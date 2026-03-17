@@ -297,7 +297,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         precision: Literal["bfloat16", "float32"] = "bfloat16",
         image_size: int = 224,
         freeze_vision_encoder: bool = False,  # noqa: FBT001, FBT002
-        train_expert_only: bool = False,  # noqa: FBT001, FBT002
+        train_expert_only: bool = True,  # noqa: FBT001, FBT002
     ) -> None:
         """Initialize PaliGemmaWithExpertModel."""
         if use_adarms is None:
@@ -554,7 +554,7 @@ class Pi05Model(nn.Module):
         max_period: float = 4.0,
         image_resolution: tuple[int, int] = (224, 224),
         freeze_vision_encoder: bool = False,
-        train_expert_only: bool = False,
+        train_expert_only: bool = True,
         compile_model: bool = False,
     ) -> None:
         """Initialize Pi05Model.
