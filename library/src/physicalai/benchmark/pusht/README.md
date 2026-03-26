@@ -2,13 +2,17 @@
 
 The PushT benchmark is derived from the Diffusion Policy paper by Columbia Engineering: https://diffusion-policy.cs.columbia.edu/.
 
-Each PushT gym is base seeded with a value of 100000 and a max number of steps of 300. They then test 50 gyms of different seeds and repeat 3 times — a total of 150 episodes.
-
+Each PushT gym is base seeded with a value of 100000 and a max number of steps of 300. They then test 50 gyms of different seeds. The paper repeats 3 times — a total of 150 episodes.
 
 The imitation data can be found [here](https://diffusion-policy.cs.columbia.edu/data/training/). HuggingFace also hosts an example in `LeRobotDataset` format [here](https://huggingface.co/datasets/lerobot/pusht).
 
+## CLI Example
 
-## Example
+```bash
+physicalai benchmark --config configs/benchmark/pusht.yaml --ckpt_path model.ckpt
+```
+
+## API Example
 
 ```python
 from physicalai.benchmark.pusht import PushTBenchmark
@@ -16,19 +20,21 @@ from physicalai.data import LeRobotDataModule
 from physicalai.policies import ACT
 from physicalai.train import Trainer
 
-# Train
+# Train policy
 datamodule = LeRobotDataModule(repo_id="lerobot/pusht")
 policy = ACT()
 trainer = Trainer(max_epochs=100)
 trainer.fit(policy, datamodule)
 
-# Evaluate (paper protocol: seed=100000, 50 episodes)
-policy = ACT.load_from_checkpoint("experiments/lightning_logs/version_0/checkpoints/last.ckpt")
-benchmark = PushTBenchmark(num_envs=3)  # let's us average over three
-results = benchmark.evaluate(policy)
-print(f"Success rate: {results.overall_success_rate:.1f}%")
-```
+# Load best checkpoint
+policy = ACT.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
+policy.eval()
 
+# Evaluate benchmark (paper protocol: seed=100000, 50 episodes)
+benchmark = PushTBenchmark()
+results = benchmark.evaluate(policy)
+print(results.summary())
+```
 
 ## Citation
 
