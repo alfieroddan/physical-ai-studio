@@ -2,17 +2,11 @@
 
 The PushT benchmark is derived from the Diffusion Policy paper by Columbia Engineering: https://diffusion-policy.cs.columbia.edu/.
 
-Each PushT gym is base seeded with a value of 100000 and a max number of steps of 300. They then test 50 gyms of different seeds. The paper repeats 3 times — a total of 150 episodes.
+Each PushT gym is base seeded with a value of 100000 and a max number of steps of 300. They then test 50 gyms of different seeds and repeat 3 times — a total of 150 episodes.
 
-The imitation data can be found [here](https://diffusion-policy.cs.columbia.edu/data/training/). HuggingFace also hosts an example in `LeRobotDataset` format [here](https://huggingface.co/datasets/lerobot/pusht).
+The imitation data can be found [at the columbia diffusion paper page](https://diffusion-policy.cs.columbia.edu/data/training/). HuggingFace also hosts an example in `LeRobotDataset` format [in a hugging face dataset](https://huggingface.co/datasets/lerobot/pusht).
 
-## CLI Example
-
-```bash
-physicalai benchmark --config configs/benchmark/pusht.yaml --ckpt_path model.ckpt
-```
-
-## API Example
+## Example
 
 ```python
 from physicalai.benchmark.pusht import PushTBenchmark
@@ -20,20 +14,17 @@ from physicalai.data import LeRobotDataModule
 from physicalai.policies import ACT
 from physicalai.train import Trainer
 
-# Train policy
+# Train
 datamodule = LeRobotDataModule(repo_id="lerobot/pusht")
 policy = ACT()
 trainer = Trainer(max_epochs=100)
 trainer.fit(policy, datamodule)
 
-# Load best checkpoint
-policy = ACT.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
-policy.eval()
-
-# Evaluate benchmark (paper protocol: seed=100000, 50 episodes)
-benchmark = PushTBenchmark()
+# Evaluate (paper protocol: seed=100000, 50 episodes)
+policy = ACT.load_from_checkpoint("experiments/lightning_logs/version_0/checkpoints/last.ckpt")
+benchmark = PushTBenchmark(num_envs=3)  # let's us average over three
 results = benchmark.evaluate(policy)
-print(results.summary())
+print(f"Success rate: {results.overall_success_rate:.1f}%")
 ```
 
 ## Citation
