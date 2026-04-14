@@ -24,7 +24,6 @@ from physicalai.inference import InferenceModel
 from physicalai.inference.callbacks import LatencyMonitor, ThroughputMonitor
 from physicalai.inference.runners import SinglePass
 from physicalai.policies import ACT, Pi05, SmolVLA
-from physicalai.train import Trainer
 
 log = logging.getLogger(__name__)
 
@@ -87,9 +86,7 @@ def export_model(policy_cls, chunk_size, datamodule):
     export_path = EXPORT_ROOT / f"{name.lower()}_chunk{chunk_size}"
 
     log.info("%s chunk_size=%d: training...", name, chunk_size)
-    policy = policy_cls(chunk_size=chunk_size, n_action_steps=chunk_size, n_obs_steps=1)
-    trainer = Trainer(max_steps=1, logger=False)
-    trainer.fit(policy, datamodule)
+    policy = policy_cls(chunk_size=chunk_size, n_action_steps=chunk_size, n_obs_steps=1, dataset_stats=datamodule.train_dataset.stats)
 
     sample_obs = make_observation_from_stats(policy.hparams["dataset_stats"])
 
