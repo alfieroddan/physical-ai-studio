@@ -12,6 +12,7 @@ benchmark, then plot.
 
 import csv
 import logging
+import copy
 import operator
 from pathlib import Path
 
@@ -122,13 +123,13 @@ def run_benchmark(policy_name, chunk_size, export_path, sample_obs):
         )
 
         for _ in range(WARMUP_STEPS):
-            model.select_action(sample_obs)
+            model.select_action(copy.deepcopy(sample_obs))
 
         latency.on_reset()
         throughput.on_reset()
 
         for _ in range(BENCHMARK_STEPS):
-            model.select_action(sample_obs)
+            model.select_action(copy.deepcopy(sample_obs))
     except Exception as e:
         log.warning("%s chunk_size=%d: benchmark failed: %s", policy_name, chunk_size, e)
         return None
