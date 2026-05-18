@@ -1148,7 +1148,7 @@ class VLAFlowMatching(nn.Module):
         num_steps = self._num_steps
         dt = -1.0 / num_steps
 
-        x_t = noise
+        x_t = noise.clone()
         for step in range(num_steps):
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
