@@ -386,6 +386,7 @@ class SmolVLAModel(ExportableModelMixin, Model):
 
     @staticmethod
     def _pi_aloha_encode_actions(actions: torch.Tensor) -> torch.Tensor:
+        actions = actions.clone()
         # Flip the joints.
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
@@ -396,6 +397,7 @@ class SmolVLAModel(ExportableModelMixin, Model):
 
     @staticmethod
     def _pi_aloha_encode_actions_inv(actions: torch.Tensor) -> torch.Tensor:
+        actions = actions.clone()
         # Flip the joints again.
         for motor_idx in [1, 2, 8, 9]:
             actions[:, :, motor_idx] *= -1
