@@ -153,7 +153,7 @@ def test_lerobot_named_wrapper_load_from_checkpoint_roundtrip(tmp_path: Path, wr
     _write_lerobot_wrapper_checkpoint(ckpt_path, wrapper_type.POLICY_NAME)
 
     try:
-        loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu")
+        loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
     except Exception as exc:
         if wrapper_cls == "Groot" and "flashattention2" in str(exc).lower():
             pytest.skip("requires FlashAttention2 runtime support for Groot wrapper in this environment")
@@ -186,7 +186,7 @@ def test_pi05_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp_pa
     ckpt_path = tmp_path / "pi05.ckpt"
     _write_checkpoint(ckpt_path, source)
 
-    loaded = Pi05.load_from_checkpoint(ckpt_path, map_location="cpu")
+    loaded = Pi05.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
 
     assert loaded._n_action_steps == 1
     assert loaded.config.n_action_steps == 1
@@ -216,7 +216,7 @@ def test_smolvla_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp
     ckpt_path = tmp_path / "smolvla.ckpt"
     _write_checkpoint(ckpt_path, source)
 
-    loaded = SmolVLA.load_from_checkpoint(ckpt_path, map_location="cpu")
+    loaded = SmolVLA.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
 
     assert loaded._n_action_steps == 1
     assert loaded.config.n_action_steps == 1
