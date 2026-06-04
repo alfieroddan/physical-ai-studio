@@ -707,7 +707,7 @@ class Pi05(ExportablePolicyMixin, Policy):
                     ),
                 )
             elif str(FeatureType.VISUAL) in feature_type:
-                feature_name = str(feature.get("name", feature_id)).removeprefix("observation.")
+                feature_name = str(feature.get("name", feature_id)).removeprefix("observation.").removeprefix(f"{IMAGES}.")
                 name = IMAGES if num_image_features == 1 else f"{IMAGES}.{feature_name}"
                 schema.append(
                     InferenceFeature(
