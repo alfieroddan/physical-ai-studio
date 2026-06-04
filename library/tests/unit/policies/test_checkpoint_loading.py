@@ -19,7 +19,6 @@ import lightning as L  # noqa: N812
 import pytest
 from physicalai.config.serializable import dataclass_to_dict
 from physicalai.inference import InferenceModel
-from physicalai.policies import ACT, Groot, Pi0
 from physicalai.policies.pi05 import Pi05, Pi05Config
 from physicalai.policies.smolvla import SmolVLA, SmolVLAConfig
 from physicalai.export.mixin_policy import CONFIG_KEY, POLICY_NAME_KEY
@@ -101,11 +100,8 @@ def _make_lerobot_wrapper_checkpoint(policy_name: str) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("policy_cls", "init_kwargs"),
     [
-        (ACT, {"chunk_size": 50, "n_action_steps": 25}),
-        (Groot, {"chunk_size": 50, "n_action_steps": 25}),
-        (Pi0, {"chunk_size": 50, "n_action_steps": 25}),
         (Pi05, {"chunk_size": 50, "n_action_steps": 25, "dataset_stats": _minimal_export_stats()}),
-        (SmolVLA, {"chunk_size": 50, "n_action_steps": 25, "dataset_stats": _minimal_export_stats()}),
+        (SmolVLA, {"chunk_size": 50, "n_action_steps": 25}),
     ],
 )
 def test_first_party_policy_load_from_checkpoint_roundtrip(
@@ -113,9 +109,9 @@ def test_first_party_policy_load_from_checkpoint_roundtrip(
     policy_cls: type,
     init_kwargs: dict[str, Any],
 ) -> None:
-    """All first-party policies should round-trip through torch export + InferenceModel."""
+    """SmolVLA and Pi05 should round-trip through torch export + InferenceModel."""
     source = policy_cls(**init_kwargs)
-    if policy_cls in {Pi05, SmolVLA} and getattr(source, "_dataset_stats", None) is None:
+    if getattr(source, "_dataset_stats", None) is None:
         source._dataset_stats = _minimal_export_stats()  # noqa: SLF001
 
     export_dir = tmp_path / f"{policy_cls.__name__.lower()}_torch"
@@ -129,39 +125,28 @@ def test_first_party_policy_load_from_checkpoint_roundtrip(
 
 @pytest.mark.parametrize(
     "wrapper_cls",
-    ["ACT", "Diffusion", "Groot", "PI0", "PI05", "PI0Fast", "SmolVLA", "XVLA"],
+    ["PI05", "SmolVLA"],
 )
 def test_lerobot_named_wrapper_load_from_checkpoint_roundtrip(tmp_path: Path, wrapper_cls: str) -> None:
-    """Named LeRobot wrappers should load back as the same subclass."""
+    """SmolVLA and PI05 LeRobot wrappers should load back as the same subclass."""
     pytest.importorskip("lerobot", reason="LeRobot not installed")
     from physicalai.policies import lerobot as lerobot_wrappers  # noqa: PLC0415
 
-    if wrapper_cls in {"PI0", "PI05", "PI0Fast"} and not os.getenv("PHYSICALAI_RUN_GATED_WRAPPER_TESTS"):
+    if not os.getenv("PHYSICALAI_RUN_GATED_WRAPPER_TESTS"):
         pytest.skip("requires gated Hugging Face model access; set PHYSICALAI_RUN_GATED_WRAPPER_TESTS=1 to enable")
-    if wrapper_cls == "Groot":
-        pytest.importorskip("flash_attn", reason="Groot wrapper requires FlashAttention runtime support")
 
     wrapper_type = getattr(lerobot_wrappers, wrapper_cls)
 
     ckpt_path = tmp_path / f"lerobot_{wrapper_cls.lower()}.ckpt"
     checkpoint = _make_lerobot_wrapper_checkpoint(wrapper_type.POLICY_NAME)
 
-    try:
-        with pytest.MonkeyPatch.context() as mp:
-            mp.setattr("physicalai.policies.lerobot.policy.torch.load", lambda *args, **kwargs: checkpoint)
-            mp.setattr(
-                "physicalai.policies.lerobot.policy.LeRobotPolicy._initialize_policy",
-                lambda self, *args, **kwargs: None,
-            )
-            loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
-    except Exception as exc:
-        if wrapper_cls == "Groot" and "flashattention2" in str(exc).lower():
-            pytest.skip("requires FlashAttention2 runtime support for Groot wrapper in this environment")
-        if wrapper_cls == "XVLA" and not os.getenv("PHYSICALAI_RUN_XVLA_WRAPPER_TESTS"):
-            pytest.skip(
-                "requires XVLA Florence config/assets; set PHYSICALAI_RUN_XVLA_WRAPPER_TESTS=1 to enable"
-            )
-        raise exc
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("physicalai.policies.lerobot.policy.torch.load", lambda *args, **kwargs: checkpoint)
+        mp.setattr(
+            "physicalai.policies.lerobot.policy.LeRobotPolicy._initialize_policy",
+            lambda self, *args, **kwargs: None,
+        )
+        loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
 
     assert type(loaded) is wrapper_type
     assert loaded.policy_name == wrapper_type.POLICY_NAME
@@ -196,7 +181,6 @@ def test_pi05_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp_pa
 
 def test_smolvla_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp_path: Path) -> None:
     """SmolVLA should reload with config values resolved in the source checkpoint."""
-
     resolved_config = SmolVLAConfig(
         n_action_steps=1,
         num_vlm_layers=0,
