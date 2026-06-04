@@ -17,7 +17,6 @@ from typing import Any
 
 import lightning as L  # noqa: N812
 import pytest
-import torch
 from physicalai.config.serializable import dataclass_to_dict
 from physicalai.inference import InferenceModel
 from physicalai.policies import ACT, Groot, Pi0
@@ -59,22 +58,18 @@ def _minimal_export_stats() -> dict[str, dict[str, Any]]:
     }
 
 
-def _write_checkpoint(checkpoint_path: Path, policy: Any) -> None:
-    """Write a minimal Lightning-compatible checkpoint for load_from_checkpoint."""
-    checkpoint = {
-        "state_dict": policy.state_dict(),
-        "hyper_parameters": dict(policy.hparams),
-        "epoch": 0,
-        "global_step": 0,
-        "pytorch-lightning_version": L.__version__,
-        "loops": {},
-        "hparams_name": "kwargs",
-    }
-    torch.save(checkpoint, str(checkpoint_path))
+def _export_checkpoint(policy: Any, export_dir: Path) -> Path:
+    """Export a policy as a torch checkpoint and return the checkpoint path."""
+    policy.export(export_dir, backend="torch")
+    checkpoint_paths = sorted(export_dir.glob("*.pt"))
+    if not checkpoint_paths:
+        msg = f"No torch checkpoint found in {export_dir}"
+        raise FileNotFoundError(msg)
+    return checkpoint_paths[0]
 
 
-def _write_lerobot_wrapper_checkpoint(checkpoint_path: Path, policy_name: str) -> None:
-    """Write a minimal checkpoint for NamedLeRobotPolicy.load_from_checkpoint."""
+def _make_lerobot_wrapper_checkpoint(policy_name: str) -> dict[str, Any]:
+    """Build a minimal checkpoint payload for NamedLeRobotPolicy.load_from_checkpoint."""
     pytest.importorskip("lerobot", reason="LeRobot not installed")
     from lerobot.policies.factory import make_policy_config  # noqa: PLC0415
     from lerobot.configs.types import FeatureType, PolicyFeature  # noqa: PLC0415
@@ -91,7 +86,7 @@ def _write_lerobot_wrapper_checkpoint(checkpoint_path: Path, policy_name: str) -
     }
     config_dict = dataclass_to_dict(config)
 
-    checkpoint = {
+    return {
         CONFIG_KEY: config_dict,
         POLICY_NAME_KEY: policy_name,
         "hyper_parameters": {"policy_name": policy_name},
@@ -101,7 +96,6 @@ def _write_lerobot_wrapper_checkpoint(checkpoint_path: Path, policy_name: str) -
         "loops": {},
         "hparams_name": "kwargs",
     }
-    torch.save(checkpoint, str(checkpoint_path))
 
 
 @pytest.mark.parametrize(
@@ -150,10 +144,16 @@ def test_lerobot_named_wrapper_load_from_checkpoint_roundtrip(tmp_path: Path, wr
     wrapper_type = getattr(lerobot_wrappers, wrapper_cls)
 
     ckpt_path = tmp_path / f"lerobot_{wrapper_cls.lower()}.ckpt"
-    _write_lerobot_wrapper_checkpoint(ckpt_path, wrapper_type.POLICY_NAME)
+    checkpoint = _make_lerobot_wrapper_checkpoint(wrapper_type.POLICY_NAME)
 
     try:
-        loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("physicalai.policies.lerobot.policy.torch.load", lambda *args, **kwargs: checkpoint)
+            mp.setattr(
+                "physicalai.policies.lerobot.policy.LeRobotPolicy._initialize_policy",
+                lambda self, *args, **kwargs: None,
+            )
+            loaded = wrapper_type.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
     except Exception as exc:
         if wrapper_cls == "Groot" and "flashattention2" in str(exc).lower():
             pytest.skip("requires FlashAttention2 runtime support for Groot wrapper in this environment")
@@ -183,8 +183,8 @@ def test_pi05_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp_pa
     monkeypatch.setattr(Pi05, "_from_hf", _fake_from_hf)
 
     source = Pi05(pretrained_name_or_path="stub-repo")
-    ckpt_path = tmp_path / "pi05.ckpt"
-    _write_checkpoint(ckpt_path, source)
+    source._dataset_stats = _minimal_export_stats()  # noqa: SLF001
+    ckpt_path = _export_checkpoint(source, tmp_path / "pi05")
 
     loaded = Pi05.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
 
@@ -213,8 +213,8 @@ def test_smolvla_load_from_checkpoint_preserves_resolved_config(monkeypatch, tmp
     monkeypatch.setattr(SmolVLA, "_from_hf", _fake_from_hf)
 
     source = SmolVLA(pretrained_name_or_path="stub-repo")
-    ckpt_path = tmp_path / "smolvla.ckpt"
-    _write_checkpoint(ckpt_path, source)
+    source._dataset_stats = _minimal_export_stats()  # noqa: SLF001
+    ckpt_path = _export_checkpoint(source, tmp_path / "smolvla")
 
     loaded = SmolVLA.load_from_checkpoint(ckpt_path, map_location="cpu", weights_only=True)
 
