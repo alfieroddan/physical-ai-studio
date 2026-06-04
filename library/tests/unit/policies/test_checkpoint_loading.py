@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 from physicalai.inference import InferenceModel
@@ -91,6 +91,8 @@ def test_policy_export_successful(
         del self, args, kwargs
         return mock_config, None, None
 
+    assert isinstance(mock_config, config_cls)
+
     with patch.object(policy_cls, "_from_hf", _fake_from_hf):
         # Create and export policy
         policy = policy_cls(pretrained_name_or_path="stub-repo")
@@ -145,6 +147,8 @@ def test_policy_export_import_roundtrip(
     def _fake_from_hf(self: Any, *args: object, **kwargs: object) -> tuple[Any, None, None]:
         del self, args, kwargs
         return mock_config, None, None
+
+    assert isinstance(mock_config, config_cls)
 
     with patch.object(policy_cls, "_from_hf", _fake_from_hf):
         # Create and export policy
