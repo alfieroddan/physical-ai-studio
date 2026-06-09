@@ -12,6 +12,7 @@ import pytest
 import torch
 from physicalai.config import Config
 from physicalai.policies.smolvla import SmolVLA, SmolVLAConfig
+from physicalai.policies.smolvla.policy import _resolve_visual_dataset_stats
 
 # ============================================================================ #
 # Configuration Tests                                                          #
@@ -80,6 +81,147 @@ class TestSmolVLAConfig:
         restored = SmolVLAConfig.from_dict(config_dict)
         assert restored.chunk_size == 100
         assert restored.optimizer_lr == 2e-4
+
+    def test_image_features_tuple_and_duplicate_validation(self) -> None:
+        """Test image_features normalization and duplicate detection."""
+        config = SmolVLAConfig(image_features=["images.top", "images.wrist"])
+        assert config.image_features == ("images.top", "images.wrist")
+
+        with pytest.raises(ValueError, match="Duplicate image feature names"):
+            SmolVLAConfig(image_features=("images.top", "images.top"))
+
+
+class TestVisualDatasetStatsResolver:
+    """Tests for visual dataset stats resolution when overriding image features."""
+
+    @staticmethod
+    def _base_stats() -> dict[str, dict[str, object]]:
+        return {
+            "observation.state": {
+                "name": "state",
+                "shape": (4,),
+                "type": "STATE",
+                "mean": [0.0, 0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0, 1.0],
+            },
+            "observation.images.top": {
+                "name": "images.top",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.3, 0.4, 0.5],
+                "std": [0.2, 0.2, 0.2],
+            },
+            "action": {
+                "name": "action",
+                "shape": (2,),
+                "type": "ACTION",
+                "mean": [0.0, 0.0],
+                "std": [1.0, 1.0],
+            },
+        }
+
+    def test_resolve_visual_stats_same_count(self) -> None:
+        stats = {
+            **self._base_stats(),
+            "observation.images.new_top": {
+                "name": "images.new_top",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.3, 0.4, 0.5],
+                "std": [0.2, 0.2, 0.2],
+            },
+        }
+        del stats["observation.images.top"]
+
+        resolved = _resolve_visual_dataset_stats(stats, ["images.new_top"])
+
+        assert "observation.images.new_top" in resolved
+        assert resolved["observation.images.new_top"]["name"] == "images.new_top"
+        assert resolved["action"] == stats["action"]
+
+    def test_resolve_visual_stats_expands_with_default_stats(self) -> None:
+        stats = self._base_stats()
+
+        resolved = _resolve_visual_dataset_stats(
+            stats,
+            ["images.top", "images.wrist"],
+            allow_missing_visual_defaults=True,
+        )
+
+        assert "observation.images.top" in resolved
+        assert "observation.images.wrist" in resolved
+        added = resolved["observation.images.wrist"]
+        assert added["shape"] == (3, 96, 96)
+        assert added["mean"] == [0.0, 0.0, 0.0]
+        assert added["std"] == [1.0, 1.0, 1.0]
+
+    def test_resolve_visual_stats_allows_too_few_by_pruning(self, caplog: pytest.LogCaptureFixture) -> None:
+        stats = {
+            **self._base_stats(),
+            "observation.images.wrist": {
+                "name": "images.wrist",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0],
+            },
+        }
+
+        resolved = _resolve_visual_dataset_stats(stats, ["images.top"])
+
+        assert "observation.images.top" in resolved
+        assert "observation.images.wrist" not in resolved
+        assert "Pruning 1 visual dataset_stats entries" in caplog.text
+
+    def test_resolve_visual_stats_reorders_when_pruning_prefix_mismatch(self, caplog: pytest.LogCaptureFixture) -> None:
+        stats = {
+            **self._base_stats(),
+            "observation.images.wrist": {
+                "name": "images.wrist",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0],
+            },
+        }
+
+        resolved = _resolve_visual_dataset_stats(stats, ["images.wrist"])
+
+        visual_keys = [k for k in resolved if k.startswith("observation.images")]
+        assert visual_keys == ["observation.images.wrist"]
+        assert "Reordering visual dataset_stats" in caplog.text
+        assert "Pruning 1 visual dataset_stats entries" in caplog.text
+
+    def test_resolve_visual_stats_rejects_count_mismatch_when_stats_provided(self) -> None:
+        stats = self._base_stats()
+
+        with pytest.raises(ValueError, match="must match in count"):
+            _resolve_visual_dataset_stats(stats, ["images.top", "images.extra"])
+
+    def test_resolve_visual_stats_reorders_order_mismatch_when_stats_provided(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        stats = {
+            **self._base_stats(),
+            "observation.images.wrist": {
+                "name": "images.wrist",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0],
+            },
+        }
+
+        resolved = _resolve_visual_dataset_stats(stats, ["images.wrist", "images.top"])
+
+        visual_keys = [k for k in resolved if k.startswith("observation.images")]
+        assert visual_keys == ["observation.images.wrist", "observation.images.top"]
+        assert "Reordering visual dataset_stats" in caplog.text
+
+    def test_resolve_visual_stats_rejects_duplicates(self) -> None:
+        with pytest.raises(ValueError, match="Duplicate image feature names"):
+            _resolve_visual_dataset_stats(self._base_stats(), ["images.top", "images.top"])
 
 
 # ============================================================================ #
