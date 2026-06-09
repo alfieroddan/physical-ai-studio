@@ -445,6 +445,15 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             self.hparams[key] = value
         self.hparams["config"] = self.config.to_dict()
 
+    def _set_config_image_features_from_dataset_stats(
+        self,
+        dataset_stats: dict[str, dict[str, list[float] | str | tuple]],
+    ) -> None:
+        """Sync config image_features from resolved visual dataset stats order."""
+        image_features = _ordered_observation_image_keys(cast("dict[str, dict[str, Any]]", dataset_stats))
+        self.hparams["image_features"] = image_features
+        self.hparams["config"] = self.config.to_dict()
+
     def _initialize_model(
         self,
         dataset_stats: dict[str, dict[str, list[float] | str | tuple]],
@@ -459,6 +468,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             weights_file: Optional pretrained weights file.
         """
         dataset_stats = _resolve_visual_dataset_stats(dataset_stats, self.config.image_features)
+        self._set_config_image_features_from_dataset_stats(dataset_stats)
 
         self.model = SmolVLAModel(
             dataset_stats,
@@ -624,6 +634,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         from .preprocessor import make_smolvla_preprocessors  # noqa: PLC0415
 
         dataset_stats = _resolve_visual_dataset_stats(dataset_stats, self.config.image_features)
+        self._set_config_image_features_from_dataset_stats(dataset_stats)
         expected_image_keys = _ordered_observation_image_keys(dataset_stats)
 
         self._preprocessor, self._postprocessor = make_smolvla_preprocessors(
