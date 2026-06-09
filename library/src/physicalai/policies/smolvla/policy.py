@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -36,11 +37,199 @@ from .model import SmolVLAModel
 from .pretrained_utils import extract_dataset_stats, fix_state_dict_keys
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from physicalai.data import Observation
 
     from .preprocessor import SmolVLAPostprocessor, SmolVLAPreprocessor
 
 logger = logging.getLogger(__name__)
+
+
+def _is_visual_stat(stat: dict[str, Any]) -> bool:
+    return stat.get("type") == FeatureType.VISUAL.value
+
+
+def _to_observation_image_key(feature_name: str) -> str:
+    if feature_name.startswith("observation."):
+        return feature_name
+    if feature_name == IMAGES or feature_name.startswith(f"{IMAGES}."):
+        return f"observation.{feature_name}"
+    return f"observation.{IMAGES}.{feature_name}"
+
+
+def _to_stat_name_from_observation_key(observation_key: str) -> str:
+    return observation_key.removeprefix("observation.")
+
+
+def _default_mean_std(shape: tuple[Any, ...]) -> tuple[list[float], list[float]]:
+    channel_dim = int(shape[0]) if shape else 1
+    return [0.0] * channel_dim, [1.0] * channel_dim
+
+
+def _normalize_requested_image_features(image_features: Iterable[str]) -> list[str]:
+    requested = [_to_observation_image_key(name) for name in image_features]
+    if len(requested) != len(set(requested)):
+        msg = f"Duplicate image feature names are not allowed: {requested}"
+        raise ValueError(msg)
+    return requested
+
+
+def _rebuild_dataset_stats_with_requested_visuals(
+    dataset_stats: dict[str, dict[str, Any]],
+    requested: list[str],
+) -> dict[str, dict[str, Any]]:
+    resolved: dict[str, dict[str, Any]] = {}
+    visuals_inserted = False
+    for key, stat in dataset_stats.items():
+        if _is_visual_stat(stat):
+            if visuals_inserted:
+                continue
+            for image_feature in requested:
+                visual_stat = deepcopy(dataset_stats[image_feature])
+                visual_stat["type"] = FeatureType.VISUAL.value
+                visual_stat["name"] = _to_stat_name_from_observation_key(image_feature)
+                resolved[image_feature] = visual_stat
+            visuals_inserted = True
+            continue
+        if key in requested:
+            msg = f"Resolved image feature key {key} collides with an existing non-visual key."
+            raise ValueError(msg)
+        resolved[key] = deepcopy(stat)
+    return resolved
+
+
+def _resolve_visual_dataset_stats_strict(
+    dataset_stats: dict[str, dict[str, Any]],
+    requested: list[str],
+    ds_visual_keys: list[str],
+) -> dict[str, dict[str, Any]]:
+    if len(requested) > len(ds_visual_keys):
+        msg = (
+            "image_features and dataset_stats visual features must match in count when "
+            "dataset_stats is provided. "
+            f"image_features={len(requested)} dataset_stats={len(ds_visual_keys)}"
+        )
+        raise ValueError(msg)
+
+    missing_visual_keys = [key for key in requested if key not in ds_visual_keys]
+    if missing_visual_keys:
+        msg = (
+            "image_features contains visual keys that do not exist in dataset_stats "
+            "when dataset_stats is provided. "
+            f"missing={missing_visual_keys} ds_visual_keys={ds_visual_keys}"
+        )
+        raise ValueError(msg)
+
+    expected_prefix = ds_visual_keys[: len(requested)]
+    if requested != expected_prefix:
+        logger.warning(
+            "Reordering visual dataset_stats to match image_features order. requested=%s dataset_stats_prefix=%s",
+            requested,
+            expected_prefix,
+        )
+
+    dropped_visual_keys = [key for key in ds_visual_keys if key not in requested]
+    if dropped_visual_keys:
+        logger.warning(
+            "Pruning %d visual dataset_stats entries not present in image_features: %s",
+            len(dropped_visual_keys),
+            dropped_visual_keys,
+        )
+
+    return _rebuild_dataset_stats_with_requested_visuals(dataset_stats, requested)
+
+
+def _resolve_visual_dataset_stats_with_defaults(
+    dataset_stats: dict[str, dict[str, Any]],
+    requested: list[str],
+    ds_visual_keys: list[str],
+) -> dict[str, dict[str, Any]]:
+    if not ds_visual_keys and requested:
+        msg = "Cannot resolve image_features because dataset_stats has no reference visual feature."
+        raise ValueError(msg)
+
+    reference_visual_key = ds_visual_keys[0] if ds_visual_keys else None
+    reference_visual_stat = deepcopy(dataset_stats[reference_visual_key]) if reference_visual_key is not None else None
+
+    dropped_visual_keys = ds_visual_keys[len(requested) :]
+    if dropped_visual_keys:
+        logger.warning(
+            "Pruning %d visual dataset_stats entries not present in image_features: %s",
+            len(dropped_visual_keys),
+            dropped_visual_keys,
+        )
+
+    resolved_with_defaults: dict[str, dict[str, Any]] = {}
+    visuals_inserted = False
+    for key, stat in dataset_stats.items():
+        if _is_visual_stat(stat):
+            if visuals_inserted:
+                continue
+
+            for idx, image_feature in enumerate(requested):
+                if idx < len(ds_visual_keys):
+                    visual_stat = deepcopy(dataset_stats[ds_visual_keys[idx]])
+                else:
+                    if reference_visual_stat is None:
+                        msg = "Missing reference visual feature while expanding image_features."
+                        raise ValueError(msg)
+                    visual_stat = deepcopy(reference_visual_stat)
+                    mean, std = _default_mean_std(cast("tuple[Any, ...]", visual_stat.get("shape", (1,))))
+                    visual_stat["mean"] = mean
+                    visual_stat["std"] = std
+
+                visual_stat["type"] = FeatureType.VISUAL.value
+                visual_stat["name"] = _to_stat_name_from_observation_key(image_feature)
+                resolved_with_defaults[image_feature] = visual_stat
+
+            visuals_inserted = True
+            continue
+
+        if key in requested:
+            msg = f"Resolved image feature key {key} collides with an existing non-visual key."
+            raise ValueError(msg)
+        resolved_with_defaults[key] = deepcopy(stat)
+
+    return resolved_with_defaults
+
+
+def _resolve_visual_dataset_stats(
+    dataset_stats: dict[str, dict[str, Any]],
+    image_features: Iterable[str] | None,
+    *,
+    allow_missing_visual_defaults: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """Resolve visual dataset stats against user-provided image feature names.
+
+    When ``allow_missing_visual_defaults`` is False, image feature names are
+    resolved against existing visual dataset_stats keys.
+
+    When ``allow_missing_visual_defaults`` is True, visual dataset_stats are
+    renamed in order and any additional image features are synthesized with
+    default normalization stats (mean=0, std=1).
+
+    Returns:
+        Dataset stats with visual entries resolved to the requested
+        image features order.
+    """
+    if image_features is None:
+        return dataset_stats
+
+    requested = _normalize_requested_image_features(image_features)
+    ds_visual_keys = [key for key, stat in dataset_stats.items() if _is_visual_stat(stat)]
+    if allow_missing_visual_defaults:
+        return _resolve_visual_dataset_stats_with_defaults(dataset_stats, requested, ds_visual_keys)
+    return _resolve_visual_dataset_stats_strict(dataset_stats, requested, ds_visual_keys)
+
+
+def _ordered_observation_image_keys(dataset_stats: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    keys: list[str] = []
+    for key, stat in dataset_stats.items():
+        if not _is_visual_stat(stat):
+            continue
+        keys.append(key.removeprefix("observation."))
+    return tuple(keys)
 
 
 class SmolVLA(ExportablePolicyMixin, Policy):
@@ -54,6 +243,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
 
     Args:
         pretrained_name_or_path: HuggingFace repo ID or local path for pretrained weights and config.
+        image_features: If available, overwrites feature name of visual features. Default: None
         n_obs_steps: Number of observation steps to use. Default: 1.
         chunk_size: Size of action chunks for prediction. Default: 50.
         n_action_steps: Number of action steps to execute. Default: 50.
@@ -107,6 +297,8 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         self,
         # Pretrained model id
         pretrained_name_or_path: str | Path | None = None,
+        # image features
+        image_features: Iterable[str] | None = None,
         # Input / output structure.
         n_obs_steps: int = 1,
         chunk_size: int = 50,
@@ -166,6 +358,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         if pretrained_name_or_path is not None:
             self.config, dataset_stats, weights_file = self._from_hf(
                 pretrained_name_or_path,
+                image_features=image_features,
                 tokenizer_max_length=tokenizer_max_length,
                 pad_language_to=pad_language_to,
                 use_random_input_noise=use_random_input_noise,
@@ -187,6 +380,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         else:
             # Create config from explicit args (policy-level config)
             self.config = SmolVLAConfig(
+                image_features=tuple(image_features) if image_features is not None else None,
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
@@ -227,7 +421,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         self.save_hyperparameters(
             ignore=["config", "pretrained_name_or_path", "compile_model"],
         )
-        # overwrites with resolved self.config values
+        # Overwrites with resolved self.config values
         self._set_hparam_keys()
 
         # Model will be built in setup() or immediately if env_action_dim provided
@@ -264,6 +458,8 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             dataset_stats: Dataset normalization statistics.
             weights_file: Optional pretrained weights file.
         """
+        dataset_stats = _resolve_visual_dataset_stats(dataset_stats, self.config.image_features)
+
         self.model = SmolVLAModel(
             dataset_stats,
             chunk_size=self.config.chunk_size,
@@ -322,6 +518,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         self,
         pretrained_name_or_path: str | Path,
         *,
+        image_features: Iterable[str] | None = None,
         tokenizer_max_length: int = 48,
         pad_language_to: str = "max_length",
         use_random_input_noise: bool = False,
@@ -398,10 +595,17 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         hf_config["scheduler_warmup_steps"] = scheduler_warmup_steps
         hf_config["scheduler_decay_steps"] = scheduler_decay_steps
         hf_config["scheduler_decay_lr"] = scheduler_decay_lr
+        if image_features is not None:
+            hf_config["image_features"] = list(image_features)
 
         config = SmolVLAConfig.from_dict(hf_config)
 
         dataset_stats = extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)
+        dataset_stats = _resolve_visual_dataset_stats(
+            dataset_stats,
+            config.image_features,
+            allow_missing_visual_defaults=True,
+        )
 
         return config, dataset_stats, weights_file
 
@@ -419,6 +623,9 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         """
         from .preprocessor import make_smolvla_preprocessors  # noqa: PLC0415
 
+        dataset_stats = _resolve_visual_dataset_stats(dataset_stats, self.config.image_features)
+        expected_image_keys = _ordered_observation_image_keys(dataset_stats)
+
         self._preprocessor, self._postprocessor = make_smolvla_preprocessors(
             max_state_dim=self.config.max_state_dim,
             max_action_dim=self.config.max_action_dim,
@@ -427,6 +634,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             max_token_len=self.config.tokenizer_max_length,
             token_pad_type=self.config.pad_language_to,
             tokenizer_name=self.config.vlm_model_name,
+            expected_image_keys=expected_image_keys,
         )
         self._dataset_stats = dataset_stats
         self.hparams["dataset_stats"] = dataset_stats

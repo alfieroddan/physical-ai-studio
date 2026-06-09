@@ -73,6 +73,7 @@ class SmolVLAPreprocessor(torch.nn.Module):
         max_state_dim: int = 32,
         max_action_dim: int = 32,
         image_resolution: tuple[int, int] = (512, 512),
+        expected_image_keys: tuple[str, ...] = (),
         features: dict[str, Feature] | None = None,
         max_token_len: int = 48,
         tokenizer_name: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
@@ -85,6 +86,9 @@ class SmolVLAPreprocessor(torch.nn.Module):
             max_action_dim: Maximum dimension for action vectors. Defaults to 32.
             image_resolution: Target resolution for input images as (height, width).
                 Defaults to (512, 512).
+            expected_image_keys: Expected flattened observation image keys order (e.g.
+                ``("images.top", "images.wrist")``). If provided, preprocessing
+                validates presence and uses this order.
             features: Dictionary mapping feature names to Feature objects for
                 normalization. If None, no normalization is applied. Defaults to None.
             max_token_len: Maximum length of tokenized text sequences. Defaults to 48.
@@ -97,6 +101,7 @@ class SmolVLAPreprocessor(torch.nn.Module):
         self.max_state_dim = max_state_dim
         self.max_action_dim = max_action_dim
         self.image_resolution = image_resolution
+        self.expected_image_keys = expected_image_keys
         self.max_token_len = max_token_len
         self.tokenizer_name = tokenizer_name
         self.padding = padding
@@ -144,12 +149,26 @@ class SmolVLAPreprocessor(torch.nn.Module):
         Returns:
             A dictionary containing the processed batch with added 'images'
             and 'image_masks' tensors, after applying image preprocessing.
+
+        Raises:
+            ValueError: If expected image keys are configured and missing
+                from the batch.
         """
         images = []
         img_masks = []
 
         batch_img_keys = Observation.get_flattened_keys(batch, IMAGES)
         batch_img_keys = [key for key in batch_img_keys if "is_pad" not in key]
+
+        if self.expected_image_keys:
+            missing_keys = [key for key in self.expected_image_keys if key not in batch_img_keys]
+            if missing_keys:
+                msg = (
+                    "Missing image features in observation. "
+                    f"expected={list(self.expected_image_keys)} got={batch_img_keys} missing={missing_keys}"
+                )
+                raise ValueError(msg)
+            batch_img_keys = [key for key in self.expected_image_keys if key in batch_img_keys]
 
         max_image_dim = 5
         for key in batch_img_keys:
@@ -342,6 +361,7 @@ def make_smolvla_preprocessors(
     stats: dict[str, dict[str, list[float] | str | tuple]] | None = None,
     *,
     image_resolution: tuple[int, int] = (512, 512),
+    expected_image_keys: tuple[str, ...] = (),
     max_token_len: int = 48,
     token_pad_type: str = "longest",  # noqa: S107
     tokenizer_name: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
@@ -354,6 +374,7 @@ def make_smolvla_preprocessors(
         env_action_dim: Actual environment action dimension.
         stats: Dataset statistics as nested dicts.
         image_resolution: Target image resolution.
+        expected_image_keys: Expected flattened observation image keys order.
         max_token_len: Maximum token length.
         token_pad_type: Padding strategy for tokenization ("longest" or "max_length").\
         tokenizer_name: HuggingFace tokenizer name.
@@ -384,6 +405,7 @@ def make_smolvla_preprocessors(
         max_state_dim=max_state_dim,
         max_action_dim=max_action_dim,
         image_resolution=image_resolution,
+        expected_image_keys=expected_image_keys,
         features=features,
         max_token_len=max_token_len,
         padding=token_pad_type,

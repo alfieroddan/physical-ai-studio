@@ -17,6 +17,7 @@ Example (API):
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from physicalai.config import Config
@@ -27,6 +28,7 @@ class SmolVLAConfig(Config):
     """Configuration for SmolVLA flow matching model.
 
     Attributes:
+        image_features: The name of the visual features.
         n_obs_steps: Number of observation steps to use. Defaults to 1.
         chunk_size: Size of action chunks for prediction. Defaults to 50.
         n_action_steps: Number of action steps to execute per model invocation. Defaults to 50.
@@ -69,6 +71,8 @@ class SmolVLAConfig(Config):
         use_random_input_noise: Whether to use random noise as the initial input for the denoising process
             during inference. If False, zeros are used instead. Defaults to True.
     """
+
+    image_features: tuple[str, ...] | None = None
 
     n_obs_steps: int = 1
     chunk_size: int = 50
@@ -143,3 +147,10 @@ class SmolVLAConfig(Config):
                 f"{self.n_action_steps} for `n_action_steps` and {self.chunk_size} for `chunk_size`."
             )
             raise ValueError(msg)
+
+        if self.image_features is not None:
+            if isinstance(self.image_features, Iterable) and not isinstance(self.image_features, tuple):
+                object.__setattr__(self, "image_features", tuple(self.image_features))
+            if len(self.image_features) != len(set(self.image_features)):
+                msg = f"Duplicate image feature names are not allowed: {self.image_features}"
+                raise ValueError(msg)
