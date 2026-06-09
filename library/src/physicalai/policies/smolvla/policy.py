@@ -47,10 +47,20 @@ logger = logging.getLogger(__name__)
 
 
 def _is_visual_stat(stat: dict[str, Any]) -> bool:
+    """Return whether a dataset stat entry represents a visual feature.
+
+    Returns:
+        True if the stat entry is visual, otherwise False.
+    """
     return stat.get("type") == FeatureType.VISUAL.value
 
 
 def _to_observation_image_key(feature_name: str) -> str:
+    """Normalize an image feature name into observation-format key form.
+
+    Returns:
+        The normalized observation-format image key.
+    """
     if feature_name.startswith("observation."):
         return feature_name
     if feature_name == IMAGES or feature_name.startswith(f"{IMAGES}."):
@@ -59,15 +69,33 @@ def _to_observation_image_key(feature_name: str) -> str:
 
 
 def _to_stat_name_from_observation_key(observation_key: str) -> str:
+    """Convert an observation-format key into the stored stat name.
+
+    Returns:
+        The dataset stat name without the observation prefix.
+    """
     return observation_key.removeprefix("observation.")
 
 
 def _default_mean_std(shape: tuple[Any, ...]) -> tuple[list[float], list[float]]:
+    """Build default channel-wise mean/std vectors for a visual feature.
+
+    Returns:
+        A pair of default mean and standard deviation vectors.
+    """
     channel_dim = int(shape[0]) if shape else 1
     return [0.0] * channel_dim, [1.0] * channel_dim
 
 
 def _normalize_requested_image_features(image_features: Iterable[str]) -> list[str]:
+    """Normalize and validate requested image feature names.
+
+    Returns:
+        The normalized image feature keys in observation format.
+
+    Raises:
+        ValueError: If duplicate image feature names are supplied.
+    """
     requested = [_to_observation_image_key(name) for name in image_features]
     if len(requested) != len(set(requested)):
         msg = f"Duplicate image feature names are not allowed: {requested}"
@@ -79,6 +107,14 @@ def _rebuild_dataset_stats_with_requested_visuals(
     dataset_stats: dict[str, dict[str, Any]],
     requested: list[str],
 ) -> dict[str, dict[str, Any]]:
+    """Rebuild dataset stats using only the requested visual features in order.
+
+    Returns:
+        Dataset stats containing only the requested visual entries.
+
+    Raises:
+        ValueError: If a requested visual key collides with a non-visual key.
+    """
     resolved: dict[str, dict[str, Any]] = {}
     visuals_inserted = False
     for key, stat in dataset_stats.items():
@@ -104,6 +140,17 @@ def _resolve_visual_dataset_stats_strict(
     requested: list[str],
     ds_visual_keys: list[str],
 ) -> dict[str, dict[str, Any]]:
+    """Resolve visual dataset stats when all requested visuals must already exist.
+
+    Returns:
+        Dataset stats with visual entries reordered and pruned to match the request.
+
+    Warnings:
+        Logs a warning when visual dataset stats are reordered or pruned.
+
+    Raises:
+        ValueError: If requested visual keys are missing from dataset stats.
+    """
     if len(requested) > len(ds_visual_keys):
         msg = (
             "image_features and dataset_stats visual features must match in count when "
@@ -145,6 +192,18 @@ def _resolve_visual_dataset_stats_with_defaults(
     requested: list[str],
     ds_visual_keys: list[str],
 ) -> dict[str, dict[str, Any]]:
+    """Resolve visual dataset stats and synthesize defaults for extra visuals.
+
+    Returns:
+        Dataset stats with visual entries aligned to the request, adding defaults
+        for any new visual features.
+
+    Warnings:
+        Logs a warning when unused visual dataset stats are pruned.
+
+    Raises:
+        ValueError: If there is no reference visual feature to copy from.
+    """
     if not ds_visual_keys and requested:
         msg = "Cannot resolve image_features because dataset_stats has no reference visual feature."
         raise ValueError(msg)
@@ -212,6 +271,9 @@ def _resolve_visual_dataset_stats(
     Returns:
         Dataset stats with visual entries resolved to the requested
         image features order.
+
+    Warnings:
+        May log warnings when visual dataset stats are reordered or pruned.
     """
     if image_features is None:
         return dataset_stats
@@ -224,6 +286,11 @@ def _resolve_visual_dataset_stats(
 
 
 def _ordered_observation_image_keys(dataset_stats: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """Return visual dataset stat keys as ordered observation image keys.
+
+    Returns:
+        A tuple of ordered observation-format image keys.
+    """
     keys: list[str] = []
     for key, stat in dataset_stats.items():
         if not _is_visual_stat(stat):
