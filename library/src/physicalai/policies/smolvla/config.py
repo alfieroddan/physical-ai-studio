@@ -149,7 +149,9 @@ class SmolVLAConfig(Config):
             raise ValueError(msg)
 
         if self.image_features is not None:
-            if isinstance(self.image_features, Iterable) and not isinstance(self.image_features, tuple):
+            if isinstance(self.image_features, str):
+                object.__setattr__(self, "image_features", (self.image_features,))
+            elif isinstance(self.image_features, Iterable) and not isinstance(self.image_features, tuple):
                 object.__setattr__(self, "image_features", tuple(self.image_features))
             if len(self.image_features) != len(set(self.image_features)):
                 msg = f"Duplicate image feature names are not allowed: {self.image_features}"
