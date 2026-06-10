@@ -269,7 +269,7 @@ def _resolve_visual_dataset_stats_with_defaults(
     reference_visual_key = ds_visual_keys[0] if ds_visual_keys else None
     reference_visual_stat = deepcopy(dataset_stats[reference_visual_key]) if reference_visual_key is not None else None
 
-    dropped_visual_keys = ds_visual_keys[len(requested) :]
+    dropped_visual_keys = [key for key in ds_visual_keys if key not in requested]
     if dropped_visual_keys:
         logger.warning(
             "Pruning %d visual dataset_stats entries not present in image_features: %s",
@@ -285,7 +285,9 @@ def _resolve_visual_dataset_stats_with_defaults(
                 continue
 
             for idx, image_feature in enumerate(requested):
-                if idx < len(ds_visual_keys):
+                if image_feature in dataset_stats and is_visual_stat(dataset_stats[image_feature]):
+                    visual_stat = deepcopy(dataset_stats[image_feature])
+                elif idx < len(ds_visual_keys):
                     visual_stat = deepcopy(dataset_stats[ds_visual_keys[idx]])
                 else:
                     if reference_visual_stat is None:

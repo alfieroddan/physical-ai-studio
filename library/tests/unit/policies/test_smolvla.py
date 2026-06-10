@@ -155,6 +155,58 @@ class TestVisualDatasetStatsResolver:
         assert added["mean"] == [0.0, 0.0, 0.0]
         assert added["std"] == [1.0, 1.0, 1.0]
 
+    def test_resolve_visual_stats_defaults_pruning_warning_uses_set_difference(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Defaults path should report dropped visuals by membership, not prefix slicing."""
+        stats = {
+            **self._base_stats(),
+            "observation.images.wrist": {
+                "name": "images.wrist",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0],
+            },
+        }
+
+        resolved = resolve_visual_dataset_stats(
+            stats,
+            ["images.wrist"],
+            allow_missing_visual_defaults=True,
+        )
+
+        visual_keys = [k for k in resolved if k.startswith("observation.images")]
+        assert visual_keys == ["observation.images.wrist"]
+        assert "Pruning 1 visual dataset_stats entries" in caplog.text
+        assert "observation.images.top" in caplog.text
+        assert "observation.images.wrist" not in caplog.text
+
+    def test_resolve_visual_stats_defaults_preserves_exact_key_stats_on_reorder(self) -> None:
+        """Defaults path should keep camera-specific stats when keys already exist."""
+        stats = {
+            **self._base_stats(),
+            "observation.images.wrist": {
+                "name": "images.wrist",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.9, 0.9, 0.9],
+                "std": [0.1, 0.1, 0.1],
+            },
+        }
+
+        resolved = resolve_visual_dataset_stats(
+            stats,
+            ["images.wrist", "images.top"],
+            allow_missing_visual_defaults=True,
+        )
+
+        assert resolved["observation.images.wrist"]["mean"] == [0.9, 0.9, 0.9]
+        assert resolved["observation.images.wrist"]["std"] == [0.1, 0.1, 0.1]
+        assert resolved["observation.images.top"]["mean"] == [0.3, 0.4, 0.5]
+        assert resolved["observation.images.top"]["std"] == [0.2, 0.2, 0.2]
+
     def test_resolve_visual_stats_allows_too_few_by_pruning(self, caplog: pytest.LogCaptureFixture) -> None:
         stats = {
             **self._base_stats(),

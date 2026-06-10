@@ -112,6 +112,20 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         >>> action = policy.select_action(obs)
     """
 
+    @staticmethod
+    def _normalize_image_features_input(image_features: Iterable[str] | None) -> tuple[str, ...] | None:
+        """Normalize image feature input into ``tuple[str, ...]``.
+
+        Returns:
+            ``None`` when no image features are provided; otherwise a tuple of
+            normalized image feature names.
+        """
+        if image_features is None:
+            return None
+        if isinstance(image_features, str):
+            return (image_features,)
+        return tuple(str(name) for name in image_features)
+
     def __init__(  # noqa: PLR0913
         self,
         # Pretrained model id
@@ -173,11 +187,14 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         """
         super().__init__(n_action_steps=n_action_steps)
 
+        # Materialize once so one-shot iterables are safe to reuse.
+        normalized_image_features = self._normalize_image_features_input(image_features)
+
         weights_file = None
         if pretrained_name_or_path is not None:
             self.config, dataset_stats, weights_file = self._from_hf(
                 pretrained_name_or_path,
-                image_features=image_features,
+                image_features=normalized_image_features,
                 tokenizer_max_length=tokenizer_max_length,
                 pad_language_to=pad_language_to,
                 use_random_input_noise=use_random_input_noise,
@@ -198,14 +215,14 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             )
         else:
             inferred_image_features: tuple[str, ...] | None = None
-            if image_features is None and dataset_stats is not None:
+            if normalized_image_features is None and dataset_stats is not None:
                 inferred_image_features = ordered_config_image_features(
                     cast("dict[str, dict[str, Any]]", dataset_stats),
                 )
 
             # Create config from explicit args (policy-level config)
             self.config = SmolVLAConfig(
-                image_features=(tuple(image_features) if image_features is not None else inferred_image_features),
+                image_features=(normalized_image_features or inferred_image_features),
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
@@ -431,18 +448,19 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         hf_config["scheduler_warmup_steps"] = scheduler_warmup_steps
         hf_config["scheduler_decay_steps"] = scheduler_decay_steps
         hf_config["scheduler_decay_lr"] = scheduler_decay_lr
-        if image_features is not None:
-            hf_config["image_features"] = list(image_features)
+        normalized_image_features = tuple(image_features) if image_features is not None else None
+        if normalized_image_features is not None:
+            hf_config["image_features"] = list(normalized_image_features)
         dataset_stats = extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)
 
-        requested_image_features = tuple(image_features) if image_features is not None else None
+        requested_image_features = normalized_image_features
         dataset_stats = resolve_visual_dataset_stats(
             dataset_stats,
             requested_image_features,
             allow_missing_visual_defaults=True,
         )
 
-        if image_features is None:
+        if normalized_image_features is None:
             hf_config["image_features"] = list(ordered_config_image_features(dataset_stats))
 
         config = SmolVLAConfig.from_dict(hf_config)
