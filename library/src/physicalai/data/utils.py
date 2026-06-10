@@ -109,12 +109,18 @@ def to_stat_name_from_observation_key(observation_key: str) -> str:
     return observation_key.removeprefix("observation.")
 
 
-def to_runtime_image_batch_key(observation_key: str, *, images_field_name: str = "images") -> str:
+def to_runtime_image_batch_key(
+    observation_key: str,
+    *,
+    images_field_name: str = "images",
+    num_visual_features: int | None = None,
+) -> str:
     """Convert an observation-format visual key into runtime batch image key form.
 
     Args:
         observation_key: Observation-format key (``observation.*``).
         images_field_name: Observation field name used for runtime image tensors.
+        num_visual_features: Total number of visual features in the dataset stats.
 
     Returns:
         Runtime image key used by flattened observation batches, such as
@@ -122,7 +128,9 @@ def to_runtime_image_batch_key(observation_key: str, *, images_field_name: str =
     """
     key = observation_key.removeprefix("observation.")
     if key == "image":
-        return images_field_name
+        return images_field_name if num_visual_features == 1 else f"{images_field_name}.image"
+    if "." not in key and not key.startswith(images_field_name):
+        return f"{images_field_name}.{key}"
     if key.startswith("image") and not key.startswith(f"{images_field_name}."):
         return (
             f"{images_field_name}.{key.removeprefix('image.')}"
@@ -167,11 +175,18 @@ def ordered_observation_image_keys(
         Ordered tuple of runtime image keys, such as
         ``("images", "images.image2")``.
     """
+    num_visual_features = sum(1 for stat in dataset_stats.values() if is_visual_stat(stat))
     keys: list[str] = []
     for key, stat in dataset_stats.items():
         if not is_visual_stat(stat):
             continue
-        keys.append(to_runtime_image_batch_key(key, images_field_name=images_field_name))
+        keys.append(
+            to_runtime_image_batch_key(
+                key,
+                images_field_name=images_field_name,
+                num_visual_features=num_visual_features,
+            ),
+        )
     return tuple(keys)
 
 
@@ -190,6 +205,39 @@ def _normalize_requested_image_features(
         msg = f"Duplicate image feature names are not allowed: {requested}"
         raise ValueError(msg)
     return requested
+
+
+def _remap_requested_image_features_to_existing_stats(
+    requested: list[str],
+    dataset_stats: dict[str, dict[str, Any]],
+    *,
+    images_field_name: str,
+) -> list[str]:
+    remapped: list[str] = []
+    for key in requested:
+        if key in dataset_stats:
+            remapped.append(key)
+            continue
+
+        if key.startswith(f"observation.{images_field_name}."):
+            stripped_key = "observation." + key.removeprefix(f"observation.{images_field_name}.")
+            if stripped_key in dataset_stats:
+                remapped.append(stripped_key)
+                continue
+
+        if key.startswith("observation.") and not key.startswith(f"observation.{images_field_name}."):
+            nested_key = f"observation.{images_field_name}." + key.removeprefix("observation.")
+            if nested_key in dataset_stats:
+                remapped.append(nested_key)
+                continue
+
+        remapped.append(key)
+
+    if len(remapped) != len(set(remapped)):
+        msg = f"Duplicate image feature names are not allowed: {remapped}"
+        raise ValueError(msg)
+
+    return remapped
 
 
 def _rebuild_dataset_stats_with_requested_visuals(
@@ -337,6 +385,11 @@ def resolve_visual_dataset_stats(
         return dataset_stats
 
     requested = _normalize_requested_image_features(image_features, images_field_name=images_field_name)
+    requested = _remap_requested_image_features_to_existing_stats(
+        requested,
+        dataset_stats,
+        images_field_name=images_field_name,
+    )
     ds_visual_keys = [key for key, stat in dataset_stats.items() if is_visual_stat(stat)]
     if allow_missing_visual_defaults:
         return _resolve_visual_dataset_stats_with_defaults(dataset_stats, requested, ds_visual_keys)
