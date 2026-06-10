@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 import torch
 from physicalai.config import Config
+from physicalai.data.utils import ordered_observation_image_keys, resolve_visual_dataset_stats
 from physicalai.policies.smolvla import SmolVLA, SmolVLAConfig
-from physicalai.policies.smolvla.policy import _ordered_observation_image_keys, _resolve_visual_dataset_stats
 
 # ============================================================================ #
 # Configuration Tests                                                          #
@@ -133,7 +133,7 @@ class TestVisualDatasetStatsResolver:
         }
         del stats["observation.images.top"]
 
-        resolved = _resolve_visual_dataset_stats(stats, ["images.new_top"])
+        resolved = resolve_visual_dataset_stats(stats, ["images.new_top"])
 
         assert "observation.images.new_top" in resolved
         assert resolved["observation.images.new_top"]["name"] == "images.new_top"
@@ -142,7 +142,7 @@ class TestVisualDatasetStatsResolver:
     def test_resolve_visual_stats_expands_with_default_stats(self) -> None:
         stats = self._base_stats()
 
-        resolved = _resolve_visual_dataset_stats(
+        resolved = resolve_visual_dataset_stats(
             stats,
             ["images.top", "images.wrist"],
             allow_missing_visual_defaults=True,
@@ -167,7 +167,7 @@ class TestVisualDatasetStatsResolver:
             },
         }
 
-        resolved = _resolve_visual_dataset_stats(stats, ["images.top"])
+        resolved = resolve_visual_dataset_stats(stats, ["images.top"])
 
         assert "observation.images.top" in resolved
         assert "observation.images.wrist" not in resolved
@@ -185,7 +185,7 @@ class TestVisualDatasetStatsResolver:
             },
         }
 
-        resolved = _resolve_visual_dataset_stats(stats, ["images.wrist"])
+        resolved = resolve_visual_dataset_stats(stats, ["images.wrist"])
 
         visual_keys = [k for k in resolved if k.startswith("observation.images")]
         assert visual_keys == ["observation.images.wrist"]
@@ -196,7 +196,7 @@ class TestVisualDatasetStatsResolver:
         stats = self._base_stats()
 
         with pytest.raises(ValueError, match="must match in count"):
-            _resolve_visual_dataset_stats(stats, ["images.top", "images.extra"])
+            resolve_visual_dataset_stats(stats, ["images.top", "images.extra"])
 
     def test_resolve_visual_stats_reorders_order_mismatch_when_stats_provided(
         self,
@@ -213,7 +213,7 @@ class TestVisualDatasetStatsResolver:
             },
         }
 
-        resolved = _resolve_visual_dataset_stats(stats, ["images.wrist", "images.top"])
+        resolved = resolve_visual_dataset_stats(stats, ["images.wrist", "images.top"])
 
         visual_keys = [k for k in resolved if k.startswith("observation.images")]
         assert visual_keys == ["observation.images.wrist", "observation.images.top"]
@@ -221,7 +221,7 @@ class TestVisualDatasetStatsResolver:
 
     def test_resolve_visual_stats_rejects_duplicates(self) -> None:
         with pytest.raises(ValueError, match="Duplicate image feature names"):
-            _resolve_visual_dataset_stats(self._base_stats(), ["images.top", "images.top"])
+            resolve_visual_dataset_stats(self._base_stats(), ["images.top", "images.top"])
 
     def test_resolve_visual_stats_accepts_single_image_aliases(self) -> None:
         """Single-image aliases (images/image) map to observation.image keys."""
@@ -256,7 +256,7 @@ class TestVisualDatasetStatsResolver:
             },
         }
 
-        resolved = _resolve_visual_dataset_stats(stats, ["images", "image2"])
+        resolved = resolve_visual_dataset_stats(stats, ["images", "image2"])
 
         visual_keys = [k for k, v in resolved.items() if v.get("type") == "VISUAL"]
         assert visual_keys == ["observation.image", "observation.image2"]
@@ -294,7 +294,7 @@ class TestVisualDatasetStatsResolver:
             },
         }
 
-        runtime_keys = _ordered_observation_image_keys(stats)
+        runtime_keys = ordered_observation_image_keys(stats)
 
         assert runtime_keys == ("images", "images.image2")
 
