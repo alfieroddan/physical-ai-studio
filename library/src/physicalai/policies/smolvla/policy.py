@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -63,7 +64,11 @@ def _to_observation_image_key(feature_name: str) -> str:
     """
     if feature_name.startswith("observation."):
         return feature_name
-    if feature_name == IMAGES or feature_name.startswith(f"{IMAGES}."):
+    if feature_name in {"image", IMAGES}:
+        return "observation.image"
+    if feature_name.startswith("image") and not feature_name.startswith(IMAGES):
+        return f"observation.{feature_name}"
+    if feature_name.startswith(f"{IMAGES}."):
         return f"observation.{feature_name}"
     return f"observation.{IMAGES}.{feature_name}"
 
@@ -75,6 +80,37 @@ def _to_stat_name_from_observation_key(observation_key: str) -> str:
         The dataset stat name without the observation prefix.
     """
     return observation_key.removeprefix("observation.")
+
+
+def _to_runtime_image_batch_key(observation_key: str) -> str:
+    """Convert an observation-format visual key into runtime batch image key form.
+
+    Returns:
+        Runtime image key used by Observation flattening (e.g. ``images`` or
+        ``images.camera1``).
+    """
+    key = observation_key.removeprefix("observation.")
+    if key == "image":
+        return IMAGES
+    if key.startswith("image") and not key.startswith(f"{IMAGES}."):
+        return f"{IMAGES}.{key.removeprefix('image.')}" if key.startswith("image.") else f"{IMAGES}.{key}"
+    if key.startswith("image."):
+        return f"{IMAGES}.{key.removeprefix('image.')}"
+    return key
+
+
+def _ordered_config_image_features(dataset_stats: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    """Return visual dataset stat keys as config-level image feature names.
+
+    Returns:
+        A tuple of image feature names suitable for ``SmolVLAConfig.image_features``.
+    """
+    keys: list[str] = []
+    for key, stat in dataset_stats.items():
+        if not _is_visual_stat(stat):
+            continue
+        keys.append(key.removeprefix("observation."))
+    return tuple(keys)
 
 
 def _default_mean_std(shape: tuple[Any, ...]) -> tuple[list[float], list[float]]:
@@ -295,7 +331,7 @@ def _ordered_observation_image_keys(dataset_stats: dict[str, dict[str, Any]]) ->
     for key, stat in dataset_stats.items():
         if not _is_visual_stat(stat):
             continue
-        keys.append(key.removeprefix("observation."))
+        keys.append(_to_runtime_image_batch_key(key))
     return tuple(keys)
 
 
@@ -445,9 +481,15 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                 scheduler_decay_lr=scheduler_decay_lr,
             )
         else:
+            inferred_image_features: tuple[str, ...] | None = None
+            if image_features is None and dataset_stats is not None:
+                inferred_image_features = _ordered_config_image_features(
+                    cast("dict[str, dict[str, Any]]", dataset_stats),
+                )
+
             # Create config from explicit args (policy-level config)
             self.config = SmolVLAConfig(
-                image_features=tuple(image_features) if image_features is not None else None,
+                image_features=(tuple(image_features) if image_features is not None else inferred_image_features),
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
@@ -517,7 +559,8 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         dataset_stats: dict[str, dict[str, list[float] | str | tuple]],
     ) -> None:
         """Sync config image_features from resolved visual dataset stats order."""
-        image_features = _ordered_observation_image_keys(cast("dict[str, dict[str, Any]]", dataset_stats))
+        image_features = _ordered_config_image_features(cast("dict[str, dict[str, Any]]", dataset_stats))
+        self.config = replace(self.config, image_features=image_features)
         self.hparams["image_features"] = image_features
         self.hparams["config"] = self.config.to_dict()
 
@@ -674,15 +717,19 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         hf_config["scheduler_decay_lr"] = scheduler_decay_lr
         if image_features is not None:
             hf_config["image_features"] = list(image_features)
-
-        config = SmolVLAConfig.from_dict(hf_config)
-
         dataset_stats = extract_dataset_stats(hf_config, preprocessor_file, preprocessor_dir)
+
+        requested_image_features = tuple(image_features) if image_features is not None else None
         dataset_stats = _resolve_visual_dataset_stats(
             dataset_stats,
-            config.image_features,
+            requested_image_features,
             allow_missing_visual_defaults=True,
         )
+
+        if image_features is None:
+            hf_config["image_features"] = list(_ordered_config_image_features(dataset_stats))
+
+        config = SmolVLAConfig.from_dict(hf_config)
 
         return config, dataset_stats, weights_file
 
@@ -744,6 +791,9 @@ class SmolVLA(ExportablePolicyMixin, Policy):
         stats_dict = train_dataset.stats
 
         if self.model is not None:
+            # Fine-tuning path: make dataset stats authoritative for image feature keys
+            # before strict visual resolution in _update_preprocessor_stats.
+            self._set_config_image_features_from_dataset_stats(stats_dict)
             self._update_preprocessor_stats(stats_dict)
             reformat_dataset_to_match_policy(self, datamodule)
             return
