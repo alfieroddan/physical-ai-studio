@@ -12,7 +12,7 @@ import pytest
 import torch
 from physicalai.config import Config
 from physicalai.policies.smolvla import SmolVLA, SmolVLAConfig
-from physicalai.policies.smolvla.policy import _resolve_visual_dataset_stats
+from physicalai.policies.smolvla.policy import _ordered_observation_image_keys, _resolve_visual_dataset_stats
 
 # ============================================================================ #
 # Configuration Tests                                                          #
@@ -222,6 +222,81 @@ class TestVisualDatasetStatsResolver:
     def test_resolve_visual_stats_rejects_duplicates(self) -> None:
         with pytest.raises(ValueError, match="Duplicate image feature names"):
             _resolve_visual_dataset_stats(self._base_stats(), ["images.top", "images.top"])
+
+    def test_resolve_visual_stats_accepts_single_image_aliases(self) -> None:
+        """Single-image aliases (images/image) map to observation.image keys."""
+        stats = {
+            "observation.state": {
+                "name": "state",
+                "shape": (4,),
+                "type": "STATE",
+                "mean": [0.0, 0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0, 1.0],
+            },
+            "observation.image": {
+                "name": "image",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.1, 0.1, 0.1],
+                "std": [0.9, 0.9, 0.9],
+            },
+            "observation.image2": {
+                "name": "image2",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.2, 0.2, 0.2],
+                "std": [0.8, 0.8, 0.8],
+            },
+            "action": {
+                "name": "action",
+                "shape": (2,),
+                "type": "ACTION",
+                "mean": [0.0, 0.0],
+                "std": [1.0, 1.0],
+            },
+        }
+
+        resolved = _resolve_visual_dataset_stats(stats, ["images", "image2"])
+
+        visual_keys = [k for k, v in resolved.items() if v.get("type") == "VISUAL"]
+        assert visual_keys == ["observation.image", "observation.image2"]
+
+    def test_ordered_runtime_keys_normalize_observation_image_variants(self) -> None:
+        """Runtime expected image keys normalize from observation.image* forms."""
+        stats = {
+            "observation.state": {
+                "name": "state",
+                "shape": (4,),
+                "type": "STATE",
+                "mean": [0.0, 0.0, 0.0, 0.0],
+                "std": [1.0, 1.0, 1.0, 1.0],
+            },
+            "observation.image": {
+                "name": "image",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.1, 0.1, 0.1],
+                "std": [0.9, 0.9, 0.9],
+            },
+            "observation.image2": {
+                "name": "image2",
+                "shape": (3, 96, 96),
+                "type": "VISUAL",
+                "mean": [0.2, 0.2, 0.2],
+                "std": [0.8, 0.8, 0.8],
+            },
+            "action": {
+                "name": "action",
+                "shape": (2,),
+                "type": "ACTION",
+                "mean": [0.0, 0.0],
+                "std": [1.0, 1.0],
+            },
+        }
+
+        runtime_keys = _ordered_observation_image_keys(stats)
+
+        assert runtime_keys == ("images", "images.image2")
 
 
 # ============================================================================ #
