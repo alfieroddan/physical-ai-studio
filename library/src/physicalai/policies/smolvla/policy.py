@@ -278,6 +278,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             chunk_size=self.config.chunk_size,
             max_state_dim=self.config.max_state_dim,
             max_action_dim=self.config.max_action_dim,
+            image_features=self.config.image_features,
             adapt_to_pi_aloha=self.config.adapt_to_pi_aloha,
             num_steps=self.config.num_steps,
             use_cache=self.config.use_cache,
@@ -703,10 +704,16 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             return None
 
         dataset_stats = self._dataset_stats
+        visual_stats: list[dict[str, Any]] = []
+        visual_shape: tuple | None = None
+        for feature_id, feature in dataset_stats.items():
+            if str(FeatureType.VISUAL) not in feature.get("type", ""):
+                continue
+            visual_stats.append(feature)
+            if visual_shape is None:
+                visual_shape = cast("tuple", feature["shape"])
 
         schema: list[InferenceFeature] = []
-
-        num_image_features = sum(1 for key in dataset_stats if str(FeatureType.VISUAL) in dataset_stats[key]["type"])
 
         for feature_id, feature in dataset_stats.items():
             if STATE in feature_id:
@@ -718,8 +725,24 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                 )
-            elif str(FeatureType.VISUAL) in feature["type"]:
-                name = IMAGES if num_image_features == 1 else f"{IMAGES}.{feature['name']}"
+        if self.config.image_features:
+            if visual_shape is None:
+                return None
+
+            for image_feature in self.config.image_features:
+                slot_name = self._normalize_image_feature_name(str(image_feature))
+                name = IMAGES if len(self.config.image_features) == 1 else f"{IMAGES}.{slot_name}"
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.VISUAL,
+                        shape=visual_shape,
+                        name=name,
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+        else:
+            for feature in visual_stats:
+                name = IMAGES if len(visual_stats) == 1 else f"{IMAGES}.{feature['name']}"
                 schema.append(
                     InferenceFeature(
                         ftype=InferenceFeatureType.VISUAL,
@@ -728,7 +751,6 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                 )
-
         schema.append(
             InferenceFeature(
                 ftype=InferenceFeatureType.LANGUAGE,
@@ -787,6 +809,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
                 type="smolvla_resize",
                 image_resolution=self.config.resize_imgs_with_padding,
                 image_key_rename_map=self.config.image_key_rename_map,
+                image_features=self.config.image_features,
                 empty_cameras=self.config.empty_cameras,
             ),
             ComponentSpec(type="new_line"),
@@ -844,6 +867,7 @@ class SmolVLA(ExportablePolicyMixin, Policy):
             postprocessors_specs=postproc_specs,
         )
         extra_args["torch"] = TorchExportParameters(
+            preprocessors_specs=base_preproc_specs,
             postprocessors_specs=torch_postproc_specs,
         )
 
