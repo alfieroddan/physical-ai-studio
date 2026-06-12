@@ -17,7 +17,7 @@ Example (API):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from physicalai.config import Config
 
@@ -34,6 +34,11 @@ class SmolVLAConfig(Config):
         max_action_dim: Maximum dimension for action vectors; shorter vectors will be padded. Defaults to 32.
         resize_imgs_with_padding: Target size (height, width) for image preprocessing with padding.
             Defaults to (512, 512).
+        image_key_rename_map: Optional mapping from dataset camera names to policy camera names.
+            This is applied in preprocessing before image stacking. Defaults to {}.
+        image_features: Expected image feature names (camera slots) for SmolVLA input ordering.
+            Can be provided as suffixes (e.g. "camera0") or flattened keys
+            (e.g. "observation.images.camera0"). Defaults to [].
         empty_cameras: Number of empty camera images to add. Used by smolvla_aloha_sim for adding empty wrist cameras.
             Defaults to 0.
         adapt_to_pi_aloha: Whether to convert joint and gripper values from standard Aloha space to pi internal
@@ -78,6 +83,9 @@ class SmolVLAConfig(Config):
     max_action_dim: int = 32
 
     resize_imgs_with_padding: tuple[int, int] = (512, 512)
+
+    image_key_rename_map: dict[str, str] = field(default_factory=dict)
+    image_features: list[str] = field(default_factory=list)
 
     empty_cameras: int = 0
 
