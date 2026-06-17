@@ -10,6 +10,7 @@ from .act import ACT, ACTConfig, ACTModel
 from .base import Policy
 from .groot import Groot, GrootConfig, GrootModel
 from .lerobot import get_lerobot_policy
+from .molmoact2 import MolmoAct2, MolmoAct2Config, MolmoAct2Model
 from .pi0 import Pi0, Pi0Config, Pi0Model
 from .pi05 import Pi05, Pi05Config, Pi05Model
 from .smolvla import SmolVLA, SmolVLAConfig, SmolVLAModel
@@ -23,6 +24,10 @@ __all__ = [
     "Groot",
     "GrootConfig",
     "GrootModel",
+    # MalmoAct2
+    "MolmoAct2",
+    "MolmoAct2Config",
+    "MolmoAct2Model",
     # Pi0
     "Pi0",
     "Pi0Config",
@@ -139,5 +144,7 @@ def get_physicalai_policy_class(policy_name: str) -> type[Policy]:
         return Pi05
     if policy_name == "smolvla":
         return SmolVLA
+    if policy_name == "molmoact2":
+        return MolmoAct2
     msg = f"Unknown physicalai policy: {policy_name}. Supported policies: act, dummy, groot, pi0, pi05, smolvla"
     raise ValueError(msg)
