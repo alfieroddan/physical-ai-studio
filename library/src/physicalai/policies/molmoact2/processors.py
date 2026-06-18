@@ -5,6 +5,16 @@
 
 """Processors for MolmoAct2."""
 
+import torch
+
+
+class MolmoAct2Preprocessor(torch.nn.Module):
+    pass
+
+
+class MolmoAct2Postprocessor(torch.nn.Module):
+    pass
+
 
 def make_molmoact2_preprocessors():
     return None, None

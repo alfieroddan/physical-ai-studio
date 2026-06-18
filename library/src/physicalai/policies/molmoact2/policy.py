@@ -10,71 +10,29 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
-from safetensors.torch import load_file as load_safetensors_file
-from torch._tensor import Tensor
 
+from physicalai.data.lerobot import FormatConverter
 from physicalai.data.observation import Observation
-from physicalai.export import ExportablePolicyMixin
 from physicalai.policies.base import Policy
-from physicalai.policies.molmoact2.config import (
+from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
+
+from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
+from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
+from lerobot.policies.molmoact2.processor_molmoact2 import (
+    make_molmoact2_pre_post_processors as lerobot_make_molmoact2_pre_post_processors,
+)
+from lerobot.configs import FeatureType, PolicyFeature
+
+from .config import (
     MolmoAct2ActionExpertConfig,
     MolmoAct2AdapterConfig,
     MolmoAct2Config,
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
 )
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
-
-
-def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
-    """Load safetensors weights with strict key validation.
-
-    Mirrors the MolmoAct2 behavior from lerobot: supports sharded and single-file
-    checkpoints, and validates key compatibility with the local model.
-
-    Raises:
-        RuntimeError: If checkpoint keys are incompatible with the local model.
-        FileNotFoundError: If no safetensors weights are found at the checkpoint.
-    """
-    checkpoint_dir = Path(checkpoint_location)
-    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
-    single_file_path = checkpoint_dir / SAFE_WEIGHTS_NAME
-
-    if index_path.is_file():
-        with index_path.open(encoding="utf-8") as f:
-            index = json.load(f)
-
-        weight_map = index["weight_map"]
-        loaded_keys = set(weight_map)
-        model_keys = set(model.state_dict())
-        missing_keys = sorted(model_keys - loaded_keys)
-        unexpected_keys = sorted(loaded_keys - model_keys)
-        if missing_keys or unexpected_keys:
-            message = ["MolmoAct2 safetensors do not match the local model implementation."]
-            if missing_keys:
-                message.append(f"Missing keys: {missing_keys[:8]}")
-            if unexpected_keys:
-                message.append(f"Unexpected keys: {unexpected_keys[:8]}")
-            raise RuntimeError(" ".join(message))
-
-        for shard_file in sorted(set(weight_map.values())):
-            state_dict = load_safetensors_file(str(checkpoint_dir / shard_file), device="cpu")
-            model.load_state_dict(state_dict, strict=False)
-            del state_dict
-        return
-
-    if single_file_path.is_file():
-        state_dict = load_safetensors_file(str(single_file_path), device="cpu")
-        model.load_state_dict(state_dict, strict=True)
-        return
-
-    msg = (
-        f"MolmoAct2 checkpoint at {checkpoint_location} must contain {SAFE_WEIGHTS_NAME} or {SAFE_WEIGHTS_INDEX_NAME}."
-    )
-    raise FileNotFoundError(msg)
 
 
 def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
@@ -100,7 +58,7 @@ def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
     raise FileNotFoundError(msg)
 
 
-class MolmoAct2(ExportablePolicyMixin, Policy):
+class MolmoAct2(Policy):
     """MolmoAct2 Policy."""
 
     def __init__(  # noqa: PLR0913
@@ -242,13 +200,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         initializer_range: float = 0.02,
         # Runtime options
         compile_model: bool = False,
+        # dataset stats
+        dataset_stats: dict[str, dict[str, list[float] | str | tuple]] | None = None,
     ) -> None:
         """Initialize MolmoAct2 policy."""
         super().__init__(n_action_steps=1)
 
         if pretrained_name_or_path is not None:
-            hf_container = self._from_hf(pretrained_name_or_path)
-            self.config = self._build_config_from_hf_config(hf_container.hf_config)
+            self.hf_container = self._from_hf(pretrained_name_or_path)
+            self.config = self._build_config_from_hf_config(self.hf_container.hf_config)
         else:
             self.config = self._build_config_from_init_args_only(
                 vit_hidden_size=vit_hidden_size,
@@ -375,25 +335,117 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # captures raw init args
         self.save_hyperparameters(ignore=["config", "pretrained_name_or_path", "compile_model"])
 
+        # load underlying model (lerobot MolmoAct2Policy)
+        self.model: LeroBotMolmoAct2Policy | None = None
+        self._preprocessor = None
+        self._postprocessor = None
+
+        self._dataset_stats = dataset_stats
+
+        if pretrained_name_or_path is not None or dataset_stats is not None:
+            self._initialize_model(dataset_stats)
+
     # physical ai
 
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict]:
-        """Run training forward or inference chunk prediction.
+    def _initialize_model(self, dataset_stats: dict[str, dict[str, Any]] | None) -> None:
+        """Initialize the lerobot MolmoAct2 policy.
+
+        Args:
+            dataset_stats: Dataset statistics for normalization.
+
+        Raises:
+            ValueError: If HF container is not initialized.
+        """
+        if not hasattr(self, "hf_container"):
+            msg = "HF container not initialized. Use pretrained_name_or_path to load model."
+            raise ValueError(msg)
+
+        # Build a clean lerobot config — mirror what the working named-wrapper path does.
+        # Use checkpoint_path pointing to the HF repo (or local dir) so that lerobot's
+        # internal _load_hf_model() and norm-stats loading both resolve correctly.
+        # All model/norm specifics (setup_type, control_mode, chunk_size, etc.) are
+        # populated automatically by apply_norm_tag_metadata() inside MolmoAct2Policy.__init__.
+        config = LeroBotMolmoAct2Config(
+            checkpoint_path=str(self.hf_container.checkpoint_location),
+            norm_tag="libero",
+            inference_action_mode="continuous",
+            enable_inference_cuda_graph=False,
+            input_features={
+                "observation.images.image": PolicyFeature(
+                    type=FeatureType.VISUAL,
+                    shape=(3, 224, 224),
+                ),
+                "observation.images.image2": PolicyFeature(
+                    type=FeatureType.VISUAL,
+                    shape=(3, 224, 224),
+                ),
+                "observation.state": PolicyFeature(
+                    type=FeatureType.STATE,
+                    shape=(8,),
+                ),
+            },
+            output_features={
+                "action": PolicyFeature(
+                    type=FeatureType.ACTION,
+                    shape=(7,),
+                ),
+            },
+        )
+
+        # Instantiate the lerobot policy — this internally calls:
+        #   apply_norm_tag_metadata()  → sets chunk_size, n_action_steps, setup_type, control_mode
+        #   _load_hf_model()           → loads HF weights from checkpoint_path
+        self.model = LeroBotMolmoAct2Policy(
+            config=config,
+            dataset_stats=dataset_stats,
+        )
+
+        # Build pre/post processors — config is already mutated by apply_norm_tag_metadata above.
+        # dataset_stats=None triggers norm-stats loading from checkpoint norm_stats.json via norm_tag.
+        self._preprocessor, self._postprocessor = lerobot_make_molmoact2_pre_post_processors(
+            config=config,
+            dataset_stats=dataset_stats,
+            dataset_meta=None,
+        )
+
+        self._dataset_stats = dataset_stats
+
+    @torch.no_grad()
+    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
+        """Predict a chunk of actions from observation.
+
+        Args:
+            batch: Input observation batch.
 
         Returns:
-            Training output or predicted action chunk output.
+            Action chunk tensor after post-processing.
+
+        Raises:
+            ValueError: If the model is not initialized.
         """
-        if self.training:
-            return self.model(batch)
+        if self.model is None:
+            msg = "Model is not initialized"
+            raise ValueError(msg)
+        if self._preprocessor is None or self._postprocessor is None:
+            msg = "Preprocessor is not initialized"
+            raise ValueError(msg)
+
+        # Use FormatConverter to preserve all fields including 'task' (language instruction)
+        lerobot_batch = FormatConverter.to_lerobot_dict(batch)
+
+        processed_batch = self._preprocessor(lerobot_batch)
+        actions = self.model.predict_action_chunk(processed_batch, inference_action_mode="continuous")
+        return self._postprocessor(actions)
+
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        """Forward pass through the model.
+
+        Eval mode: returns action chunk predictions.
+
+        Returns:
+            Action tensor in eval mode.
+        """
         return self.predict_action_chunk(batch)
-
-    def predict_action_chunk(self, batch: Observation) -> Tensor:
-        """Predict one action chunk during inference.
-
-        Returns:
-            Tensor containing one action chunk.
-        """
-        return super().predict_action_chunk(batch)
 
     @staticmethod
     def _hf_component_config(
@@ -419,12 +471,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         }
 
         top_level_keys = (
+            # Input and rollout structure
             "n_obs_steps",
             "chunk_size",
             "n_action_steps",
+            # Action/state core settings
             "max_action_dim",
             "action_mode",
             "state_format",
+            # Flow matching
             "flow_matching_num_steps",
             "flow_matching_cutoff",
             "flow_matching_time_offset",
@@ -432,12 +487,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             "flow_matching_beta_alpha",
             "flow_matching_beta_beta",
             "mask_action_dim_padding",
+            # Depth reasoning
             "enable_depth_reasoning",
             "depth_mode",
             "num_depth_codes",
             "action_expert_depth_gate",
             "action_expert_depth_gate_per_layer",
             "action_expert_depth_gate_init_bias",
+            # Vision/image special tokens
             "image_start_token_id",
             "low_res_image_start_token_id",
             "image_end_token_id",
@@ -447,25 +504,31 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             "frame_start_token_id",
             "frame_end_token_id",
             "use_frame_special_tokens",
+            # Action tokenization
             "action_output_token_id",
             "action_start_token_id",
             "action_end_token_id",
             "action_token_start_id",
             "num_action_tokens",
+            # Depth tokenization
             "depth_output_token_id",
             "depth_start_token_id",
             "depth_end_token_id",
             "depth_token_start_id",
             "num_depth_tokens",
+            # State tokenization
             "state_start_token_id",
             "state_end_token_id",
             "state_token_start_id",
             "num_state_tokens",
+            # Prompt and expert controls
             "add_setup_tokens",
             "add_control_tokens",
             "add_action_expert",
+            # Initialization and assets
             "norm_stats_filename",
             "initializer_range",
+            # Runtime options
             "compile_model",
         )
         for key in top_level_keys:
@@ -483,6 +546,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     def _build_config_from_init_args_only(  # noqa: PLR0913
         cls,
         *,
+        # Vision transformer component
         vit_hidden_size: int,
         vit_intermediate_size: int,
         vit_num_hidden_layers: int,
@@ -499,6 +563,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         vit_initializer_range: float,
         vit_float32_attention: bool,
         vit_attn_implementation: str,
+        # Vision adapter component
         adapter_vit_layers: tuple[int, ...],
         adapter_pooling_attention_mask: bool,
         adapter_hidden_size: int,
@@ -514,6 +579,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         adapter_image_feature_dropout: float,
         adapter_initializer_range: float,
         adapter_attn_implementation: str,
+        # Text transformer component
         text_hidden_size: int,
         text_num_attention_heads: int,
         text_num_key_value_heads: int | None,
@@ -539,6 +605,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         text_use_cache: bool,
         text_tie_word_embeddings: bool,
         text_attn_implementation: str,
+        # Action expert component
         action_expert_max_action_horizon: int,
         action_expert_max_action_dim: int,
         action_expert_hidden_size: int,
@@ -554,12 +621,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         action_expert_qk_norm_eps: float,
         action_expert_rope: bool,
         action_expert_causal_attn: bool,
+        # Input and rollout structure
         n_obs_steps: int,
         chunk_size: int,
         n_action_steps: int,
+        # Action/state core settings
         max_action_dim: int,
         action_mode: Literal["continuous", "discrete", "both"],
         state_format: Literal["discrete"],
+        # Flow matching
         flow_matching_num_steps: int,
         flow_matching_cutoff: float,
         flow_matching_time_offset: float,
@@ -567,12 +637,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         flow_matching_beta_alpha: float,
         flow_matching_beta_beta: float,
         mask_action_dim_padding: bool,
+        # Depth reasoning
         enable_depth_reasoning: bool,
         depth_mode: int,
         num_depth_codes: int,
         action_expert_depth_gate: bool,
         action_expert_depth_gate_per_layer: bool,
         action_expert_depth_gate_init_bias: float,
+        # Vision/image special tokens
         image_start_token_id: int | None,
         low_res_image_start_token_id: int | None,
         image_end_token_id: int | None,
@@ -582,25 +654,31 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         frame_start_token_id: int | None,
         frame_end_token_id: int | None,
         use_frame_special_tokens: bool,
+        # Action tokenization
         action_output_token_id: int | None,
         action_start_token_id: int | None,
         action_end_token_id: int | None,
         action_token_start_id: int | None,
         num_action_tokens: int,
+        # Depth tokenization
         depth_output_token_id: int | None,
         depth_start_token_id: int | None,
         depth_end_token_id: int | None,
         depth_token_start_id: int | None,
         num_depth_tokens: int,
+        # State tokenization
         state_start_token_id: int | None,
         state_end_token_id: int | None,
         state_token_start_id: int | None,
         num_state_tokens: int,
+        # Prompt and expert controls
         add_setup_tokens: bool,
         add_control_tokens: bool,
         add_action_expert: bool,
+        # Initialization and assets
         norm_stats_filename: str,
         initializer_range: float,
+        # Runtime options
         compile_model: bool,
     ) -> MolmoAct2Config:
         """Build config from init args only (no HF config).
@@ -786,8 +864,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             hf_config = json.load(f)
 
         checkpoint_location = str(Path(weights_file).parent)
-        if self.model is not None:
-            _strict_load_safetensors_weights(self.model, checkpoint_location)
 
         return HuggingfacePolicyContainer(
             config_file=Path(config_file),
@@ -797,5 +873,3 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             checkpoint_location=checkpoint_location,
             hf_config=hf_config,
         )
-
-    # molmoact2
