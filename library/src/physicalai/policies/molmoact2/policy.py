@@ -10,18 +10,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 import torch
-
-from physicalai.data.lerobot import FormatConverter
-from physicalai.data.observation import Observation
-from physicalai.policies.base import Policy
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
-
+from lerobot.configs import FeatureType, PolicyFeature
 from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
 from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
 from lerobot.policies.molmoact2.processor_molmoact2 import (
     make_molmoact2_pre_post_processors as lerobot_make_molmoact2_pre_post_processors,
 )
-from lerobot.configs import FeatureType, PolicyFeature
+
+from physicalai.data.lerobot import FormatConverter
+from physicalai.data.observation import Observation
+from physicalai.policies.base import Policy
+from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
 from .config import (
     MolmoAct2ActionExpertConfig,
