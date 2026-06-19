@@ -16,7 +16,5 @@ class MolmoAct2Postprocessor(torch.nn.Module):
     pass
 
 
-def make_molmoact2_preprocessors(
-        config,
-):
+def make_molmoact2_preprocessors(config,):
     return None, None

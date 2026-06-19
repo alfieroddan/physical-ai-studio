@@ -5,15 +5,13 @@
 
 """MolmoAct2 policy implementation."""
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from physicalai.data.observation import Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.observation import Feature, Observation
 from physicalai.policies.base import Policy
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
 from .config import (
     MolmoAct2ActionExpertConfig,
@@ -22,38 +20,12 @@ from .config import (
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
 )
+from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
 from .model import MolmoAct2Model
 from .processors import make_molmoact2_preprocessors
 
 if TYPE_CHECKING:
     from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor
-
-SAFE_WEIGHTS_NAME = "model.safetensors"
-SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
-IMAGE_SIZE_DIMS = 2
-
-
-def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
-    """Resolve local weights file for single-file or sharded safetensors checkpoints.
-
-    Returns:
-        Path to ``model.safetensors`` or ``model.safetensors.index.json``.
-
-    Raises:
-        FileNotFoundError: If neither local weights format exists.
-    """
-    single_file_path = checkpoint_dir / SAFE_WEIGHTS_NAME
-    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
-
-    if single_file_path.is_file():
-        return single_file_path
-    if index_path.is_file():
-        return index_path
-
-    msg = (
-        f"MolmoAct2 local checkpoint at {checkpoint_dir} must contain {SAFE_WEIGHTS_NAME} or {SAFE_WEIGHTS_INDEX_NAME}."
-    )
-    raise FileNotFoundError(msg)
 
 
 class MolmoAct2(Policy):
@@ -68,7 +40,6 @@ class MolmoAct2(Policy):
         hf_repo_id_or_pretrained_path: str | Path | None = None,
         # norm tag - for pretrained models to look for normalisation in json
         norm_tag: str | None = None,
-        *,
         # Input and rollout structure
         n_obs_steps: int = 30,
         chunk_size: int = 30,
@@ -77,6 +48,7 @@ class MolmoAct2(Policy):
         max_action_dim: int = 32,
         action_mode: Literal["continuous", "discrete", "both"] = "both",
         state_format: Literal["discrete"] = "discrete",
+        *,
         # Vision transformer component
         vit_hidden_size: int = 1152,
         vit_intermediate_size: int = 4304,
@@ -222,16 +194,16 @@ class MolmoAct2(Policy):
             if not norm_tag:
                 msg_str = "If loading from HuggingFace, norm_tag is required to load stats from norm_stats.json."
                 raise ValueError(msg_str)
-            self.hf_container = self._from_hf(
+            self.hf_container = load_hf_pretrained_container(
                 hf_repo_id_or_pretrained_path,
                 norm_stats_filename=norm_stats_filename,
             )
-            self.config = self._build_config_from_hf_config(
+            self.config = build_config_from_hf_config(
                 self.hf_container.hf_config,
                 norm_stats=self.hf_container.norm_stats,
-                norm_tag=norm_tag,
                 input_features=input_features,
                 output_features=output_features,
+                norm_tag=norm_tag,
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
@@ -358,6 +330,8 @@ class MolmoAct2(Policy):
                 norm_stats_filename=norm_stats_filename,
                 initializer_range=initializer_range,
                 compile_model=compile_model,
+                input_features=input_features,
+                output_features=output_features,
             )
 
         # captures raw init args
@@ -367,447 +341,6 @@ class MolmoAct2(Policy):
         self._model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
-
-    # physical ai
-
-    def _initialize_model(self) -> None:
-        """Initialize model and preprocessors for MolmoAct2.
-
-        Builds the wrapped model and policy preprocessors from the resolved
-        policy configuration.
-        """
-        # output model to lerobot for now
-        self._model = MolmoAct2Model(self.config, self.hf_container)
-
-        # # make and load pre / processors
-        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
-            config=self.config,
-        )
-
-    @torch.no_grad()
-    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
-        """Predict a chunk of actions from observation.
-
-        Args:
-            batch: Input observation batch.
-
-        Returns:
-            Action chunk tensor after post-processing.
-
-        Raises:
-            ValueError: If the model is not initialized.
-        """
-        if self._model is None:
-            msg = "Model is not initialized"
-            raise ValueError(msg)
-        if self._preprocessor is None or self._postprocessor is None:
-            msg = "Preprocessor is not initialized"
-            raise ValueError(msg)
-
-        processed_batch = self._preprocessor(batch)
-        actions = self._model.predict_action_chunk(processed_batch)
-        return self._postprocessor(actions)
-
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
-        """Forward pass through the model.
-
-        Eval mode: returns action chunk predictions.
-
-        Returns:
-            Action tensor in eval mode.
-        """
-        return self.predict_action_chunk(batch)
-
-    @staticmethod
-    def _hf_component_config(
-        hf_config: dict[str, Any],
-        component_name: str,
-    ) -> dict[str, Any]:
-        """Extract a nested HF component config.
-
-        Args:
-            hf_config: Parsed Hugging Face ``config.json`` payload.
-            component_name: Nested component key to extract.
-
-        Returns:
-            Component config as a dict, or an empty dict when missing.
-        """
-        component_config = hf_config.get(component_name)
-        if isinstance(component_config, dict):
-            return component_config
-        return {}
-
-    @staticmethod
-    def _normalization_parameters_from_stats(stats: dict[str, Any]) -> NormalizationParameters:
-        """Convert raw stats dict to ``NormalizationParameters``.
-
-        Args:
-            stats: Stats mapping containing normalization keys.
-
-        Returns:
-            Converted normalization parameters.
-        """
-        return NormalizationParameters(
-            mean=stats.get("mean"),
-            std=stats.get("std"),
-            min=stats.get("min"),
-            max=stats.get("max"),
-            q01=stats.get("q01"),
-            q99=stats.get("q99"),
-        )
-
-    @staticmethod
-    def _resolve_norm_tag_metadata(
-        norm_stats: dict[str, Any] | None,
-        norm_tag: str | None,
-    ) -> dict[str, Any]:
-        """Resolve normalization metadata for a selected tag.
-
-        Args:
-            norm_stats: Parsed ``norm_stats.json`` payload.
-            norm_tag: Tag identifying the dataset metadata block.
-
-        Returns:
-            Metadata dict for the requested tag.
-
-        Raises:
-            ValueError: If required tag inputs are missing.
-            TypeError: If the stats payload structure is invalid.
-        """
-        if norm_tag is None:
-            msg = "norm_tag is required to resolve pretrained MolmoAct2 feature normalization."
-            raise ValueError(msg)
-        if norm_stats is None:
-            msg = "Pretrained MolmoAct2 checkpoint is missing norm_stats.json contents."
-            raise ValueError(msg)
-
-        metadata_by_tag = norm_stats.get("metadata_by_tag")
-        if not isinstance(metadata_by_tag, dict):
-            msg = "Invalid MolmoAct2 norm stats format: missing metadata_by_tag."
-            raise TypeError(msg)
-
-        tag_metadata = metadata_by_tag.get(norm_tag)
-        if not isinstance(tag_metadata, dict):
-            msg = f"norm_tag '{norm_tag}' was not found in pretrained MolmoAct2 norm stats."
-            raise TypeError(msg)
-        return tag_metadata
-
-    @classmethod
-    def _resolve_hf_image_size(cls, hf_config: dict[str, Any]) -> tuple[int, int]:
-        """Resolve input image size from HF ViT config.
-
-        Args:
-            hf_config: Parsed Hugging Face ``config.json`` payload.
-
-        Returns:
-            Image size tuple as ``(height, width)``.
-
-        Raises:
-            TypeError: If the configured size is malformed.
-        """
-        image_size = cls._hf_component_config(hf_config, "vit_config").get("image_default_input_size", (378, 378))
-        if isinstance(image_size, list):
-            image_size = tuple(image_size)
-        if not isinstance(image_size, tuple) or len(image_size) != IMAGE_SIZE_DIMS:
-            msg = f"Invalid image_default_input_size in HF config: {image_size!r}"
-            raise TypeError(msg)
-        return image_size
-
-    @staticmethod
-    def _build_visual_features(camera_keys: list[Any], image_size: tuple[int, int]) -> list[Feature]:
-        """Build visual ``Feature`` entries from camera keys.
-
-        Args:
-            camera_keys: List of camera feature keys from norm stats metadata.
-            image_size: Resolved image size ``(height, width)``.
-
-        Returns:
-            Visual feature definitions.
-
-        Raises:
-            TypeError: If any camera key is not a string.
-        """
-        input_features: list[Feature] = []
-        for camera_key in camera_keys:
-            if not isinstance(camera_key, str):
-                msg = f"Invalid camera key in pretrained MolmoAct2 norm stats: {camera_key!r}"
-                raise TypeError(msg)
-            input_features.append(
-                Feature(
-                    name=camera_key.removeprefix("observation.images."),
-                    ftype=FeatureType.VISUAL,
-                    shape=(3, image_size[0], image_size[1]),
-                ),
-            )
-        return input_features
-
-    @classmethod
-    def _build_feature_from_stats(
-        cls,
-        *,
-        feature_key: str,
-        stats: dict[str, Any],
-        prefix: str,
-        ftype: FeatureType,
-    ) -> Feature:
-        """Build a single feature definition from stats metadata.
-
-        Args:
-            feature_key: Feature key from metadata.
-            stats: Normalization stats for the feature.
-            prefix: Prefix to strip from ``feature_key`` for output name.
-            ftype: Feature type enum value.
-
-        Returns:
-            A constructed ``Feature``.
-        """
-        return Feature(
-            name=feature_key.removeprefix(prefix),
-            ftype=ftype,
-            shape=(len(stats.get("mean", [])),),
-            normalization_data=cls._normalization_parameters_from_stats(stats),
-        )
-
-    @classmethod
-    def _build_features_from_norm_stats(
-        cls,
-        hf_config: dict[str, Any],
-        norm_stats: dict[str, Any] | None,
-        norm_tag: str | None,
-    ) -> tuple[list[Feature], list[Feature]]:
-        """Build input and output features from pretrained norm stats.
-
-        Args:
-            hf_config: Parsed Hugging Face ``config.json`` payload.
-            norm_stats: Parsed ``norm_stats.json`` payload.
-            norm_tag: Selected normalization metadata tag.
-
-        Returns:
-            Tuple of ``(input_features, output_features)``.
-
-        Raises:
-            TypeError: If normalization metadata has an invalid shape or type.
-        """
-        tag_metadata = cls._resolve_norm_tag_metadata(norm_stats, norm_tag)
-        image_size = cls._resolve_hf_image_size(hf_config)
-
-        camera_keys = tag_metadata.get("camera_keys")
-        if not isinstance(camera_keys, list):
-            msg = f"Invalid camera_keys for norm_tag '{norm_tag}'."
-            raise TypeError(msg)
-
-        input_features = cls._build_visual_features(camera_keys, image_size)
-
-        state_key = tag_metadata.get("state_key")
-        state_stats = tag_metadata.get("state_stats")
-        if isinstance(state_key, str) and isinstance(state_stats, dict):
-            input_features.append(
-                cls._build_feature_from_stats(
-                    feature_key=state_key,
-                    stats=state_stats,
-                    prefix="observation.",
-                    ftype=FeatureType.STATE,
-                ),
-            )
-
-        action_key = tag_metadata.get("action_key")
-        action_stats = tag_metadata.get("action_stats")
-        output_features: list[Feature] = []
-        if isinstance(action_key, str) and isinstance(action_stats, dict):
-            output_features.append(
-                cls._build_feature_from_stats(
-                    feature_key=action_key,
-                    stats=action_stats,
-                    prefix="",
-                    ftype=FeatureType.ACTION,
-                ),
-            )
-
-        return input_features, output_features
-
-    @staticmethod
-    def _merge_feature_override(base_feature: Feature, override_feature: Feature) -> Feature:
-        """Merge override values into a base feature definition.
-
-        Args:
-            base_feature: Pretrained/base feature definition.
-            override_feature: User-provided override feature definition.
-
-        Returns:
-            Merged feature with override values taking precedence.
-        """
-        return Feature(
-            name=override_feature.name if override_feature.name is not None else base_feature.name,
-            ftype=override_feature.ftype if override_feature.ftype is not None else base_feature.ftype,
-            shape=override_feature.shape if override_feature.shape is not None else base_feature.shape,
-            normalization_data=(
-                override_feature.normalization_data
-                if override_feature.normalization_data is not None
-                else base_feature.normalization_data
-            ),
-        )
-
-    @classmethod
-    def _resolve_feature_overrides(
-        cls,
-        pretrained_features: list[Feature],
-        override_features: list[Feature] | None,
-    ) -> list[Feature]:
-        """Resolve final feature list from pretrained and override inputs.
-
-        Args:
-            pretrained_features: Features derived from pretrained metadata.
-            override_features: Optional user-provided feature overrides.
-
-        Returns:
-            Final ordered feature list with overrides applied.
-        """
-        if not override_features:
-            return pretrained_features
-
-        overrides_by_name = {feature.name: feature for feature in override_features}
-        resolved_features = [
-            cls._merge_feature_override(feature, overrides_by_name[feature.name])
-            for feature in pretrained_features
-            if feature.name in overrides_by_name
-        ]
-        resolved_names = {feature.name for feature in resolved_features}
-
-        for feature in pretrained_features:
-            if feature.name not in resolved_names:
-                resolved_features.append(feature)
-
-        for feature in override_features:
-            if feature.name not in resolved_names:
-                resolved_features.append(feature)
-                resolved_names.add(feature.name)
-
-        return resolved_features
-
-    @classmethod
-    def _build_config_from_hf_config(
-        cls,
-        hf_config: dict[str, Any],
-        norm_stats: dict[str, Any] | None = None,
-        input_features: list[Feature] | None = None,
-        output_features: list[Feature] | None = None,
-        norm_tag: str | None = None,
-        n_obs_steps: int = 30,
-        chunk_size: int = 30,
-        n_action_steps: int = 30,
-        max_action_dim: int = 32,
-    ) -> MolmoAct2Config:
-        """Build policy config from Hugging Face config and local overrides.
-
-        Args:
-            hf_config: Parsed Hugging Face ``config.json`` payload.
-            norm_stats: Parsed ``norm_stats.json`` payload.
-            input_features: Optional feature overrides for model inputs.
-            output_features: Optional feature overrides for model outputs.
-            norm_tag: Selected normalization metadata tag.
-            n_obs_steps: Observation horizon override.
-            chunk_size: Action chunk size override.
-            n_action_steps: Number of executed action steps override.
-            max_action_dim: Maximum action dimension override.
-
-        Returns:
-            Resolved ``MolmoAct2Config`` instance.
-        """
-        config_data: dict[str, Any] = {
-            "vit_config": cls._hf_component_config(hf_config, "vit_config"),
-            "adapter_config": cls._hf_component_config(hf_config, "adapter_config"),
-            "text_config": cls._hf_component_config(hf_config, "text_config"),
-        }
-        pretrained_input_features, pretrained_output_features = cls._build_features_from_norm_stats(
-            hf_config,
-            norm_stats,
-            norm_tag,
-        )
-        config_data["input_features"] = cls._resolve_feature_overrides(pretrained_input_features, input_features)
-        config_data["output_features"] = cls._resolve_feature_overrides(pretrained_output_features, output_features)
-
-        top_level_keys = (
-            # Input and rollout structure
-            "n_obs_steps",
-            "chunk_size",
-            "n_action_steps",
-            # Action/state core settings
-            "max_action_dim",
-            "action_mode",
-            "state_format",
-            # Flow matching
-            "flow_matching_num_steps",
-            "flow_matching_cutoff",
-            "flow_matching_time_offset",
-            "flow_matching_time_scale",
-            "flow_matching_beta_alpha",
-            "flow_matching_beta_beta",
-            "mask_action_dim_padding",
-            # Depth reasoning
-            "enable_depth_reasoning",
-            "depth_mode",
-            "num_depth_codes",
-            "action_expert_depth_gate",
-            "action_expert_depth_gate_per_layer",
-            "action_expert_depth_gate_init_bias",
-            # Vision/image special tokens
-            "image_start_token_id",
-            "low_res_image_start_token_id",
-            "image_end_token_id",
-            "image_low_res_id",
-            "image_patch_id",
-            "image_col_id",
-            "frame_start_token_id",
-            "frame_end_token_id",
-            "use_frame_special_tokens",
-            # Action tokenization
-            "action_output_token_id",
-            "action_start_token_id",
-            "action_end_token_id",
-            "action_token_start_id",
-            "num_action_tokens",
-            # Depth tokenization
-            "depth_output_token_id",
-            "depth_start_token_id",
-            "depth_end_token_id",
-            "depth_token_start_id",
-            "num_depth_tokens",
-            # State tokenization
-            "state_start_token_id",
-            "state_end_token_id",
-            "state_token_start_id",
-            "num_state_tokens",
-            # Prompt and expert controls
-            "add_setup_tokens",
-            "add_control_tokens",
-            "add_action_expert",
-            # Initialization and assets
-            "norm_stats_filename",
-            "initializer_range",
-            # Runtime options
-            "compile_model",
-            # Norm tag (can be overridden by kwarg above, but respect hf_config if kwarg is None)
-            "norm_tag",
-        )
-
-        for key in top_level_keys:
-            # kwarg-supplied norm_tag takes precedence over hf_config value
-            if key == "norm_tag" and norm_tag is not None:
-                continue
-            if key in hf_config:
-                config_data[key] = hf_config[key]
-
-        # Overrides
-        config_data["norm_tag"] = norm_tag
-        config_data["n_obs_steps"] = n_obs_steps
-        config_data["chunk_size"] = chunk_size
-        config_data["n_action_steps"] = n_action_steps
-        config_data["max_action_dim"] = max_action_dim
-
-        if config_data.get("add_action_expert") is False:
-            config_data["action_expert_config"] = None
-
-        return MolmoAct2Config.from_dict(config_data)
 
     @classmethod
     def _build_config_from_init_args_only(  # noqa: PLR0913
@@ -948,8 +481,8 @@ class MolmoAct2(Policy):
         # Runtime options
         compile_model: bool,
         # Input / output features
-        input_features: list[Feature] | None = None,
-        output_features: list[Feature] | None = None,
+        input_features: list[Feature],
+        output_features: list[Feature],
         norm_tag: str | None = None,
     ) -> MolmoAct2Config:
         """Build policy config from constructor args only.
@@ -1074,8 +607,8 @@ class MolmoAct2(Policy):
             norm_stats_filename: Normalization stats filename.
             initializer_range: Global initializer range.
             compile_model: Whether to compile the model.
-            input_features: Optional input feature definitions.
-            output_features: Optional output feature definitions.
+            input_features: Input feature definitions.
+            output_features: Output feature definitions.
             norm_tag: Optional normalization tag.
 
         Returns:
@@ -1220,81 +753,52 @@ class MolmoAct2(Policy):
             initializer_range=initializer_range,
             compile_model=compile_model,
             norm_tag=norm_tag,
-            input_features=input_features if input_features is not None else [],
-            output_features=output_features if output_features is not None else [],
+            input_features=input_features,
+            output_features=output_features,
         )
 
-    # hf
-    def _from_hf(
-        self,
-        pretrained_name_or_path: str | Path,
-        norm_stats_filename: str = "norm_stats.json",
-        **kwargs: object,
-    ) -> HuggingfacePolicyContainer:
-        """Resolve policy artifacts from local path or Hugging Face Hub.
+    def _initialize_model(self) -> None:
+        """Initialize the underlying model and preprocessors.
+
+        Builds the model and preprocessing pipeline from the resolved config.
+        """
+        self._model = MolmoAct2Model(self.config, self.hf_container)
+
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
+            config=self.config,
+        )
+
+    @torch.no_grad()
+    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
+        """Predict an action chunk from an observation batch.
 
         Args:
-            pretrained_name_or_path: Local checkpoint directory or HF repo id.
-            norm_stats_filename: Normalization stats filename to resolve.
-            **kwargs: Optional HF hub download kwargs.
+            batch: Input observation batch.
 
         Returns:
-            Container with resolved artifact paths and parsed config payloads.
+            Predicted action chunk after post-processing.
+
+        Raises:
+            ValueError: If the model or preprocessors are not initialized.
         """
-        path = Path(pretrained_name_or_path)
-        is_local = path.is_dir()
-        norm_stats: dict[str, Any] | None = None
+        if self._model is None:
+            msg = "Model is not initialized"
+            raise ValueError(msg)
+        if self._preprocessor is None or self._postprocessor is None:
+            msg = "Preprocessor is not initialized"
+            raise ValueError(msg)
 
-        if is_local:
-            config_file = path / "config.json"
-            weights_file = _resolve_local_weights_path(path)
-            preprocessor_file = path / "policy_preprocessor.json"
-            preprocessor_dir = path
-            norm_stats_file = path / norm_stats_filename
-            if norm_stats_file.is_file():
-                with norm_stats_file.open(encoding="utf-8") as f:
-                    norm_stats = json.load(f)
-        else:
-            hub_kwargs = {
-                k: v
-                for k, v in kwargs.items()
-                if k
-                in {
-                    "cache_dir",
-                    "force_download",
-                    "resume_download",
-                    "proxies",
-                    "token",
-                    "revision",
-                    "local_files_only",
-                }
-            }
-            (
-                config_file,
-                weights_file,
-                preprocessor_file,
-                preprocessor_dir,
-                norm_stats_file,
-            ) = download_policy_artifacts_from_hub(
-                str(pretrained_name_or_path),
-                hub_kwargs=hub_kwargs,
-                norm_stats_filename=norm_stats_filename,
-            )
-            if norm_stats_file is not None:
-                with norm_stats_file.open(encoding="utf-8") as f:
-                    norm_stats = json.load(f)
+        processed_batch = self._preprocessor(batch)
+        actions = self._model.predict_action_chunk(processed_batch)
+        return self._postprocessor(actions)
 
-        with Path(config_file).open(encoding="utf-8") as f:
-            hf_config = json.load(f)
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        """Forward pass through the policy.
 
-        checkpoint_location = str(Path(weights_file).parent)
+        Args:
+            batch: Input observation batch.
 
-        return HuggingfacePolicyContainer(
-            config_file=Path(config_file),
-            weights_file=Path(weights_file),
-            preprocessor_file=Path(preprocessor_file) if preprocessor_file is not None else None,
-            preprocessor_dir=Path(preprocessor_dir) if preprocessor_dir is not None else None,
-            checkpoint_location=checkpoint_location,
-            hf_config=hf_config,
-            norm_stats=norm_stats,
-        )
+        Returns:
+            Predicted action chunk.
+        """
+        return self.predict_action_chunk(batch)
