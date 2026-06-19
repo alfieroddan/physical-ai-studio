@@ -19,9 +19,12 @@ Example (API):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from physicalai.config import Config
+
+if TYPE_CHECKING:
+    from physicalai.data import Feature
 
 
 @dataclass
@@ -154,6 +157,13 @@ class MolmoAct2Config(Config):
     n_obs_steps: int = 30
     chunk_size: int = 30
     n_action_steps: int = 30
+
+    # Input / output features
+    input_features: list[Feature] = field(default_factory=list)
+    output_features: list[Feature] = field(default_factory=list)
+
+    # Norm tag
+    norm_tag: str | None = None
 
     # Action/state core settings
     max_action_dim: int = 32

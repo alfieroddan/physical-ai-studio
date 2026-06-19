@@ -7,18 +7,11 @@
 
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
-from lerobot.configs import FeatureType, PolicyFeature
-from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
-from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
-from lerobot.policies.molmoact2.processor_molmoact2 import (
-    make_molmoact2_pre_post_processors as lerobot_make_molmoact2_pre_post_processors,
-)
 
-from physicalai.data.lerobot import FormatConverter
-from physicalai.data.observation import Observation
+from physicalai.data.observation import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies.base import Policy
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
@@ -29,9 +22,15 @@ from .config import (
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
 )
+from .model import MolmoAct2Model
+from .processors import make_molmoact2_preprocessors
+
+if TYPE_CHECKING:
+    from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+IMAGE_SIZE_DIMS = 2
 
 
 def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
@@ -62,9 +61,22 @@ class MolmoAct2(Policy):
 
     def __init__(  # noqa: PLR0913
         self,
-        # download model weights
-        pretrained_name_or_path: str | Path | None = None,
+        # Input / output features
+        input_features: list[Feature] | None = None,
+        output_features: list[Feature] | None = None,
+        # location download model weights from hf or load from local dir
+        hf_repo_id_or_pretrained_path: str | Path | None = None,
+        # norm tag - for pretrained models to look for normalisation in json
+        norm_tag: str | None = None,
         *,
+        # Input and rollout structure
+        n_obs_steps: int = 30,
+        chunk_size: int = 30,
+        n_action_steps: int = 30,
+        # Action/state core settings
+        max_action_dim: int = 32,
+        action_mode: Literal["continuous", "discrete", "both"] = "both",
+        state_format: Literal["discrete"] = "discrete",
         # Vision transformer component
         vit_hidden_size: int = 1152,
         vit_intermediate_size: int = 4304,
@@ -140,14 +152,6 @@ class MolmoAct2(Policy):
         action_expert_qk_norm_eps: float = 1e-6,
         action_expert_rope: bool = True,
         action_expert_causal_attn: bool = False,
-        # Input and rollout structure
-        n_obs_steps: int = 30,
-        chunk_size: int = 30,
-        n_action_steps: int = 30,
-        # Action/state core settings
-        max_action_dim: int = 32,
-        action_mode: Literal["continuous", "discrete", "both"] = "both",
-        state_format: Literal["discrete"] = "discrete",
         # Flow matching
         flow_matching_num_steps: int = 10,
         flow_matching_cutoff: float = 1.0,
@@ -199,15 +203,40 @@ class MolmoAct2(Policy):
         initializer_range: float = 0.02,
         # Runtime options
         compile_model: bool = False,
-        # dataset stats
-        dataset_stats: dict[str, dict[str, list[float] | str | tuple]] | None = None,
     ) -> None:
-        """Initialize MolmoAct2 policy."""
-        super().__init__(n_action_steps=1)
+        """Initialize MolmoAct2 policy.
 
-        if pretrained_name_or_path is not None:
-            self.hf_container = self._from_hf(pretrained_name_or_path)
-            self.config = self._build_config_from_hf_config(self.hf_container.hf_config)
+        Raises:
+            ValueError: If required features are missing or pretrained norm tag is not provided.
+        """
+        super().__init__(n_action_steps=n_action_steps)
+
+        # Check input / output features
+        if not input_features or not output_features:
+            msg_str = "Model requires input and output features."
+            raise ValueError(msg_str)
+
+        self.hf_container = None
+        if hf_repo_id_or_pretrained_path is not None:
+            # check norm tag exists, otherwise can't load normalisation stats
+            if not norm_tag:
+                msg_str = "If loading from HuggingFace, norm_tag is required to load stats from norm_stats.json."
+                raise ValueError(msg_str)
+            self.hf_container = self._from_hf(
+                hf_repo_id_or_pretrained_path,
+                norm_stats_filename=norm_stats_filename,
+            )
+            self.config = self._build_config_from_hf_config(
+                self.hf_container.hf_config,
+                norm_stats=self.hf_container.norm_stats,
+                norm_tag=norm_tag,
+                input_features=input_features,
+                output_features=output_features,
+                n_obs_steps=n_obs_steps,
+                chunk_size=chunk_size,
+                n_action_steps=n_action_steps,
+                max_action_dim=max_action_dim,
+            )
         else:
             self.config = self._build_config_from_init_args_only(
                 vit_hidden_size=vit_hidden_size,
@@ -332,82 +361,28 @@ class MolmoAct2(Policy):
             )
 
         # captures raw init args
-        self.save_hyperparameters(ignore=["config", "pretrained_name_or_path", "compile_model"])
+        self.save_hyperparameters(ignore=["config", "hf_repo_id_or_pretrained_path", "compile_model"])
 
-        # load underlying model (lerobot MolmoAct2Policy)
-        self.model: LeroBotMolmoAct2Policy | None = None
-        self._preprocessor = None
-        self._postprocessor = None
-
-        self._dataset_stats = dataset_stats
-
-        if pretrained_name_or_path is not None or dataset_stats is not None:
-            self._initialize_model(dataset_stats)
+        # model, pre and post processor lazy init, resolved later in _initalize_model
+        self._model: MolmoAct2Model | None = None
+        self._preprocessor: MolmoAct2Preprocessor | None = None
+        self._postprocessor: MolmoAct2Postprocessor | None = None
 
     # physical ai
 
-    def _initialize_model(self, dataset_stats: dict[str, dict[str, Any]] | None) -> None:
-        """Initialize the lerobot MolmoAct2 policy.
+    def _initialize_model(self) -> None:
+        """Initialize model and preprocessors for MolmoAct2.
 
-        Args:
-            dataset_stats: Dataset statistics for normalization.
-
-        Raises:
-            ValueError: If HF container is not initialized.
+        Builds the wrapped model and policy preprocessors from the resolved
+        policy configuration.
         """
-        if not hasattr(self, "hf_container"):
-            msg = "HF container not initialized. Use pretrained_name_or_path to load model."
-            raise ValueError(msg)
+        # output model to lerobot for now
+        self._model = MolmoAct2Model(self.config, self.hf_container)
 
-        # Build a clean lerobot config — mirror what the working named-wrapper path does.
-        # Use checkpoint_path pointing to the HF repo (or local dir) so that lerobot's
-        # internal _load_hf_model() and norm-stats loading both resolve correctly.
-        # All model/norm specifics (setup_type, control_mode, chunk_size, etc.) are
-        # populated automatically by apply_norm_tag_metadata() inside MolmoAct2Policy.__init__.
-        config = LeroBotMolmoAct2Config(
-            checkpoint_path=str(self.hf_container.checkpoint_location),
-            norm_tag="libero",
-            inference_action_mode="continuous",
-            enable_inference_cuda_graph=False,
-            input_features={
-                "observation.images.image": PolicyFeature(
-                    type=FeatureType.VISUAL,
-                    shape=(3, 224, 224),
-                ),
-                "observation.images.image2": PolicyFeature(
-                    type=FeatureType.VISUAL,
-                    shape=(3, 224, 224),
-                ),
-                "observation.state": PolicyFeature(
-                    type=FeatureType.STATE,
-                    shape=(8,),
-                ),
-            },
-            output_features={
-                "action": PolicyFeature(
-                    type=FeatureType.ACTION,
-                    shape=(7,),
-                ),
-            },
+        # # make and load pre / processors
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
+            config=self.config,
         )
-
-        # Instantiate the lerobot policy — this internally calls:
-        #   apply_norm_tag_metadata()  → sets chunk_size, n_action_steps, setup_type, control_mode
-        #   _load_hf_model()           → loads HF weights from checkpoint_path
-        self.model = LeroBotMolmoAct2Policy(
-            config=config,
-            dataset_stats=dataset_stats,
-        )
-
-        # Build pre/post processors — config is already mutated by apply_norm_tag_metadata above.
-        # dataset_stats=None triggers norm-stats loading from checkpoint norm_stats.json via norm_tag.
-        self._preprocessor, self._postprocessor = lerobot_make_molmoact2_pre_post_processors(
-            config=config,
-            dataset_stats=dataset_stats,
-            dataset_meta=None,
-        )
-
-        self._dataset_stats = dataset_stats
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -422,18 +397,15 @@ class MolmoAct2(Policy):
         Raises:
             ValueError: If the model is not initialized.
         """
-        if self.model is None:
+        if self._model is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
         if self._preprocessor is None or self._postprocessor is None:
             msg = "Preprocessor is not initialized"
             raise ValueError(msg)
 
-        # Use FormatConverter to preserve all fields including 'task' (language instruction)
-        lerobot_batch = FormatConverter.to_lerobot_dict(batch)
-
-        processed_batch = self._preprocessor(lerobot_batch)
-        actions = self.model.predict_action_chunk(processed_batch, inference_action_mode="continuous")
+        processed_batch = self._preprocessor(batch)
+        actions = self._model.predict_action_chunk(processed_batch)
         return self._postprocessor(actions)
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
@@ -451,23 +423,308 @@ class MolmoAct2(Policy):
         hf_config: dict[str, Any],
         component_name: str,
     ) -> dict[str, Any]:
+        """Extract a nested HF component config.
+
+        Args:
+            hf_config: Parsed Hugging Face ``config.json`` payload.
+            component_name: Nested component key to extract.
+
+        Returns:
+            Component config as a dict, or an empty dict when missing.
+        """
         component_config = hf_config.get(component_name)
         if isinstance(component_config, dict):
             return component_config
         return {}
 
-    @classmethod
-    def _build_config_from_hf_config(cls, hf_config: dict[str, Any]) -> MolmoAct2Config:
-        """Build config directly from HuggingFace config JSON.
+    @staticmethod
+    def _normalization_parameters_from_stats(stats: dict[str, Any]) -> NormalizationParameters:
+        """Convert raw stats dict to ``NormalizationParameters``.
+
+        Args:
+            stats: Stats mapping containing normalization keys.
 
         Returns:
-            MolmoAct2Config initialized from HF JSON.
+            Converted normalization parameters.
+        """
+        return NormalizationParameters(
+            mean=stats.get("mean"),
+            std=stats.get("std"),
+            min=stats.get("min"),
+            max=stats.get("max"),
+            q01=stats.get("q01"),
+            q99=stats.get("q99"),
+        )
+
+    @staticmethod
+    def _resolve_norm_tag_metadata(
+        norm_stats: dict[str, Any] | None,
+        norm_tag: str | None,
+    ) -> dict[str, Any]:
+        """Resolve normalization metadata for a selected tag.
+
+        Args:
+            norm_stats: Parsed ``norm_stats.json`` payload.
+            norm_tag: Tag identifying the dataset metadata block.
+
+        Returns:
+            Metadata dict for the requested tag.
+
+        Raises:
+            ValueError: If required tag inputs are missing.
+            TypeError: If the stats payload structure is invalid.
+        """
+        if norm_tag is None:
+            msg = "norm_tag is required to resolve pretrained MolmoAct2 feature normalization."
+            raise ValueError(msg)
+        if norm_stats is None:
+            msg = "Pretrained MolmoAct2 checkpoint is missing norm_stats.json contents."
+            raise ValueError(msg)
+
+        metadata_by_tag = norm_stats.get("metadata_by_tag")
+        if not isinstance(metadata_by_tag, dict):
+            msg = "Invalid MolmoAct2 norm stats format: missing metadata_by_tag."
+            raise TypeError(msg)
+
+        tag_metadata = metadata_by_tag.get(norm_tag)
+        if not isinstance(tag_metadata, dict):
+            msg = f"norm_tag '{norm_tag}' was not found in pretrained MolmoAct2 norm stats."
+            raise TypeError(msg)
+        return tag_metadata
+
+    @classmethod
+    def _resolve_hf_image_size(cls, hf_config: dict[str, Any]) -> tuple[int, int]:
+        """Resolve input image size from HF ViT config.
+
+        Args:
+            hf_config: Parsed Hugging Face ``config.json`` payload.
+
+        Returns:
+            Image size tuple as ``(height, width)``.
+
+        Raises:
+            TypeError: If the configured size is malformed.
+        """
+        image_size = cls._hf_component_config(hf_config, "vit_config").get("image_default_input_size", (378, 378))
+        if isinstance(image_size, list):
+            image_size = tuple(image_size)
+        if not isinstance(image_size, tuple) or len(image_size) != IMAGE_SIZE_DIMS:
+            msg = f"Invalid image_default_input_size in HF config: {image_size!r}"
+            raise TypeError(msg)
+        return image_size
+
+    @staticmethod
+    def _build_visual_features(camera_keys: list[Any], image_size: tuple[int, int]) -> list[Feature]:
+        """Build visual ``Feature`` entries from camera keys.
+
+        Args:
+            camera_keys: List of camera feature keys from norm stats metadata.
+            image_size: Resolved image size ``(height, width)``.
+
+        Returns:
+            Visual feature definitions.
+
+        Raises:
+            TypeError: If any camera key is not a string.
+        """
+        input_features: list[Feature] = []
+        for camera_key in camera_keys:
+            if not isinstance(camera_key, str):
+                msg = f"Invalid camera key in pretrained MolmoAct2 norm stats: {camera_key!r}"
+                raise TypeError(msg)
+            input_features.append(
+                Feature(
+                    name=camera_key.removeprefix("observation.images."),
+                    ftype=FeatureType.VISUAL,
+                    shape=(3, image_size[0], image_size[1]),
+                ),
+            )
+        return input_features
+
+    @classmethod
+    def _build_feature_from_stats(
+        cls,
+        *,
+        feature_key: str,
+        stats: dict[str, Any],
+        prefix: str,
+        ftype: FeatureType,
+    ) -> Feature:
+        """Build a single feature definition from stats metadata.
+
+        Args:
+            feature_key: Feature key from metadata.
+            stats: Normalization stats for the feature.
+            prefix: Prefix to strip from ``feature_key`` for output name.
+            ftype: Feature type enum value.
+
+        Returns:
+            A constructed ``Feature``.
+        """
+        return Feature(
+            name=feature_key.removeprefix(prefix),
+            ftype=ftype,
+            shape=(len(stats.get("mean", [])),),
+            normalization_data=cls._normalization_parameters_from_stats(stats),
+        )
+
+    @classmethod
+    def _build_features_from_norm_stats(
+        cls,
+        hf_config: dict[str, Any],
+        norm_stats: dict[str, Any] | None,
+        norm_tag: str | None,
+    ) -> tuple[list[Feature], list[Feature]]:
+        """Build input and output features from pretrained norm stats.
+
+        Args:
+            hf_config: Parsed Hugging Face ``config.json`` payload.
+            norm_stats: Parsed ``norm_stats.json`` payload.
+            norm_tag: Selected normalization metadata tag.
+
+        Returns:
+            Tuple of ``(input_features, output_features)``.
+
+        Raises:
+            TypeError: If normalization metadata has an invalid shape or type.
+        """
+        tag_metadata = cls._resolve_norm_tag_metadata(norm_stats, norm_tag)
+        image_size = cls._resolve_hf_image_size(hf_config)
+
+        camera_keys = tag_metadata.get("camera_keys")
+        if not isinstance(camera_keys, list):
+            msg = f"Invalid camera_keys for norm_tag '{norm_tag}'."
+            raise TypeError(msg)
+
+        input_features = cls._build_visual_features(camera_keys, image_size)
+
+        state_key = tag_metadata.get("state_key")
+        state_stats = tag_metadata.get("state_stats")
+        if isinstance(state_key, str) and isinstance(state_stats, dict):
+            input_features.append(
+                cls._build_feature_from_stats(
+                    feature_key=state_key,
+                    stats=state_stats,
+                    prefix="observation.",
+                    ftype=FeatureType.STATE,
+                ),
+            )
+
+        action_key = tag_metadata.get("action_key")
+        action_stats = tag_metadata.get("action_stats")
+        output_features: list[Feature] = []
+        if isinstance(action_key, str) and isinstance(action_stats, dict):
+            output_features.append(
+                cls._build_feature_from_stats(
+                    feature_key=action_key,
+                    stats=action_stats,
+                    prefix="",
+                    ftype=FeatureType.ACTION,
+                ),
+            )
+
+        return input_features, output_features
+
+    @staticmethod
+    def _merge_feature_override(base_feature: Feature, override_feature: Feature) -> Feature:
+        """Merge override values into a base feature definition.
+
+        Args:
+            base_feature: Pretrained/base feature definition.
+            override_feature: User-provided override feature definition.
+
+        Returns:
+            Merged feature with override values taking precedence.
+        """
+        return Feature(
+            name=override_feature.name if override_feature.name is not None else base_feature.name,
+            ftype=override_feature.ftype if override_feature.ftype is not None else base_feature.ftype,
+            shape=override_feature.shape if override_feature.shape is not None else base_feature.shape,
+            normalization_data=(
+                override_feature.normalization_data
+                if override_feature.normalization_data is not None
+                else base_feature.normalization_data
+            ),
+        )
+
+    @classmethod
+    def _resolve_feature_overrides(
+        cls,
+        pretrained_features: list[Feature],
+        override_features: list[Feature] | None,
+    ) -> list[Feature]:
+        """Resolve final feature list from pretrained and override inputs.
+
+        Args:
+            pretrained_features: Features derived from pretrained metadata.
+            override_features: Optional user-provided feature overrides.
+
+        Returns:
+            Final ordered feature list with overrides applied.
+        """
+        if not override_features:
+            return pretrained_features
+
+        overrides_by_name = {feature.name: feature for feature in override_features}
+        resolved_features = [
+            cls._merge_feature_override(feature, overrides_by_name[feature.name])
+            for feature in pretrained_features
+            if feature.name in overrides_by_name
+        ]
+        resolved_names = {feature.name for feature in resolved_features}
+
+        for feature in pretrained_features:
+            if feature.name not in resolved_names:
+                resolved_features.append(feature)
+
+        for feature in override_features:
+            if feature.name not in resolved_names:
+                resolved_features.append(feature)
+                resolved_names.add(feature.name)
+
+        return resolved_features
+
+    @classmethod
+    def _build_config_from_hf_config(
+        cls,
+        hf_config: dict[str, Any],
+        norm_stats: dict[str, Any] | None = None,
+        input_features: list[Feature] | None = None,
+        output_features: list[Feature] | None = None,
+        norm_tag: str | None = None,
+        n_obs_steps: int = 30,
+        chunk_size: int = 30,
+        n_action_steps: int = 30,
+        max_action_dim: int = 32,
+    ) -> MolmoAct2Config:
+        """Build policy config from Hugging Face config and local overrides.
+
+        Args:
+            hf_config: Parsed Hugging Face ``config.json`` payload.
+            norm_stats: Parsed ``norm_stats.json`` payload.
+            input_features: Optional feature overrides for model inputs.
+            output_features: Optional feature overrides for model outputs.
+            norm_tag: Selected normalization metadata tag.
+            n_obs_steps: Observation horizon override.
+            chunk_size: Action chunk size override.
+            n_action_steps: Number of executed action steps override.
+            max_action_dim: Maximum action dimension override.
+
+        Returns:
+            Resolved ``MolmoAct2Config`` instance.
         """
         config_data: dict[str, Any] = {
             "vit_config": cls._hf_component_config(hf_config, "vit_config"),
             "adapter_config": cls._hf_component_config(hf_config, "adapter_config"),
             "text_config": cls._hf_component_config(hf_config, "text_config"),
         }
+        pretrained_input_features, pretrained_output_features = cls._build_features_from_norm_stats(
+            hf_config,
+            norm_stats,
+            norm_tag,
+        )
+        config_data["input_features"] = cls._resolve_feature_overrides(pretrained_input_features, input_features)
+        config_data["output_features"] = cls._resolve_feature_overrides(pretrained_output_features, output_features)
 
         top_level_keys = (
             # Input and rollout structure
@@ -529,15 +786,26 @@ class MolmoAct2(Policy):
             "initializer_range",
             # Runtime options
             "compile_model",
+            # Norm tag (can be overridden by kwarg above, but respect hf_config if kwarg is None)
+            "norm_tag",
         )
+
         for key in top_level_keys:
+            # kwarg-supplied norm_tag takes precedence over hf_config value
+            if key == "norm_tag" and norm_tag is not None:
+                continue
             if key in hf_config:
                 config_data[key] = hf_config[key]
 
+        # Overrides
+        config_data["norm_tag"] = norm_tag
+        config_data["n_obs_steps"] = n_obs_steps
+        config_data["chunk_size"] = chunk_size
+        config_data["n_action_steps"] = n_action_steps
+        config_data["max_action_dim"] = max_action_dim
+
         if config_data.get("add_action_expert") is False:
             config_data["action_expert_config"] = None
-        elif "action_expert_config" in hf_config:
-            config_data["action_expert_config"] = cls._hf_component_config(hf_config, "action_expert_config")
 
         return MolmoAct2Config.from_dict(config_data)
 
@@ -679,11 +947,139 @@ class MolmoAct2(Policy):
         initializer_range: float,
         # Runtime options
         compile_model: bool,
+        # Input / output features
+        input_features: list[Feature] | None = None,
+        output_features: list[Feature] | None = None,
+        norm_tag: str | None = None,
     ) -> MolmoAct2Config:
-        """Build config from init args only (no HF config).
+        """Build policy config from constructor args only.
+
+        Args:
+            vit_hidden_size: Vision transformer hidden size.
+            vit_intermediate_size: Vision transformer intermediate size.
+            vit_num_hidden_layers: Vision transformer number of layers.
+            vit_num_attention_heads: Vision transformer number of attention heads.
+            vit_num_key_value_heads: Vision transformer number of key/value heads.
+            vit_head_dim: Vision transformer head dimension.
+            vit_hidden_act: Vision transformer activation name.
+            vit_layer_norm_eps: Vision transformer layer norm epsilon.
+            vit_image_default_input_size: Vision transformer default input resolution.
+            vit_image_patch_size: Vision transformer patch size.
+            vit_image_num_pos: Vision transformer positional embedding count.
+            vit_attention_dropout: Vision transformer attention dropout.
+            vit_residual_dropout: Vision transformer residual dropout.
+            vit_initializer_range: Vision transformer initializer range.
+            vit_float32_attention: Whether to force float32 attention in ViT.
+            vit_attn_implementation: ViT attention implementation.
+            adapter_vit_layers: Adapter source ViT layers.
+            adapter_pooling_attention_mask: Whether adapter uses pooling attention mask.
+            adapter_hidden_size: Adapter hidden size.
+            adapter_num_attention_heads: Adapter number of attention heads.
+            adapter_num_key_value_heads: Adapter number of key/value heads.
+            adapter_head_dim: Adapter head dimension.
+            adapter_float32_attention: Whether to force float32 attention in adapter.
+            adapter_attention_dropout: Adapter attention dropout.
+            adapter_residual_dropout: Adapter residual dropout.
+            adapter_hidden_act: Adapter activation name.
+            adapter_intermediate_size: Adapter intermediate size.
+            adapter_text_hidden_size: Adapter text hidden size.
+            adapter_image_feature_dropout: Adapter image feature dropout.
+            adapter_initializer_range: Adapter initializer range.
+            adapter_attn_implementation: Adapter attention implementation.
+            text_hidden_size: Text transformer hidden size.
+            text_num_attention_heads: Text transformer number of attention heads.
+            text_num_key_value_heads: Text transformer number of key/value heads.
+            text_head_dim: Text transformer head dimension.
+            text_vocab_size: Text vocabulary size.
+            text_additional_vocab_size: Extra text vocabulary size.
+            text_qkv_bias: Whether text qkv projections use bias.
+            text_num_hidden_layers: Text transformer number of layers.
+            text_intermediate_size: Text transformer intermediate size.
+            text_hidden_act: Text transformer activation name.
+            text_embedding_dropout: Text embedding dropout.
+            text_attention_dropout: Text attention dropout.
+            text_residual_dropout: Text residual dropout.
+            text_max_position_embeddings: Max text position embeddings.
+            text_rope_theta: RoPE theta value.
+            text_rope_scaling: Optional RoPE scaling config.
+            text_rope_scaling_layers: Optional layers for RoPE scaling.
+            text_use_qk_norm: Whether to enable qk normalization.
+            text_qk_norm_type: qk normalization variant.
+            text_layer_norm_eps: Text layer norm epsilon.
+            text_norm_after: Whether text applies norm after block.
+            text_initializer_range: Text initializer range.
+            text_use_cache: Whether text model uses KV cache.
+            text_tie_word_embeddings: Whether text ties word embeddings.
+            text_attn_implementation: Text attention implementation.
+            action_expert_max_action_horizon: Action expert horizon.
+            action_expert_max_action_dim: Action expert max action dimension.
+            action_expert_hidden_size: Action expert hidden size.
+            action_expert_num_layers: Action expert number of layers.
+            action_expert_num_heads: Action expert number of heads.
+            action_expert_mlp_ratio: Action expert MLP ratio.
+            action_expert_ffn_multiple_of: Action expert FFN multiple.
+            action_expert_timestep_embed_dim: Action expert timestep embedding dimension.
+            action_expert_dropout: Action expert dropout.
+            action_expert_attn_dropout: Action expert attention dropout.
+            action_expert_context_layer_norm: Whether action expert uses context layer norm.
+            action_expert_qk_norm: Whether action expert uses qk norm.
+            action_expert_qk_norm_eps: Action expert qk norm epsilon.
+            action_expert_rope: Whether action expert uses RoPE.
+            action_expert_causal_attn: Whether action expert uses causal attention.
+            n_obs_steps: Observation horizon.
+            chunk_size: Action chunk size.
+            n_action_steps: Number of executed action steps.
+            max_action_dim: Maximum action dimension.
+            action_mode: Action mode.
+            state_format: State format.
+            flow_matching_num_steps: Flow matching step count.
+            flow_matching_cutoff: Flow matching cutoff.
+            flow_matching_time_offset: Flow matching time offset.
+            flow_matching_time_scale: Flow matching time scale.
+            flow_matching_beta_alpha: Flow matching beta alpha.
+            flow_matching_beta_beta: Flow matching beta beta.
+            mask_action_dim_padding: Whether to mask action-dimension padding.
+            enable_depth_reasoning: Whether depth reasoning is enabled.
+            depth_mode: Depth reasoning mode.
+            num_depth_codes: Number of depth codes.
+            action_expert_depth_gate: Whether action expert uses depth gate.
+            action_expert_depth_gate_per_layer: Whether depth gate is applied per layer.
+            action_expert_depth_gate_init_bias: Initial depth gate bias.
+            image_start_token_id: Image start token id.
+            low_res_image_start_token_id: Low-res image start token id.
+            image_end_token_id: Image end token id.
+            image_low_res_id: Low-res image id.
+            image_patch_id: Image patch id.
+            image_col_id: Image column token id.
+            frame_start_token_id: Frame start token id.
+            frame_end_token_id: Frame end token id.
+            use_frame_special_tokens: Whether to use frame special tokens.
+            action_output_token_id: Action output token id.
+            action_start_token_id: Action start token id.
+            action_end_token_id: Action end token id.
+            action_token_start_id: Action token start id.
+            num_action_tokens: Number of action tokens.
+            depth_output_token_id: Depth output token id.
+            depth_start_token_id: Depth start token id.
+            depth_end_token_id: Depth end token id.
+            depth_token_start_id: Depth token start id.
+            num_depth_tokens: Number of depth tokens.
+            state_start_token_id: State start token id.
+            state_end_token_id: State end token id.
+            state_token_start_id: State token start id.
+            num_state_tokens: Number of state tokens.
+            add_setup_tokens: Whether setup tokens are added.
+            add_control_tokens: Whether control tokens are added.
+            add_action_expert: Whether action expert is enabled.
+            norm_stats_filename: Normalization stats filename.
+            initializer_range: Global initializer range.
+            compile_model: Whether to compile the model.
+            input_features: Optional input feature definitions.
+            output_features: Optional output feature definitions.
+            norm_tag: Optional normalization tag.
 
         Returns:
-            MolmoAct2Config initialized from init arguments.
+            Resolved ``MolmoAct2Config`` instance.
         """
         vit_config = MolmoAct2VitConfig(
             hidden_size=vit_hidden_size,
@@ -823,22 +1219,41 @@ class MolmoAct2(Policy):
             norm_stats_filename=norm_stats_filename,
             initializer_range=initializer_range,
             compile_model=compile_model,
+            norm_tag=norm_tag,
+            input_features=input_features if input_features is not None else [],
+            output_features=output_features if output_features is not None else [],
         )
 
     # hf
     def _from_hf(
         self,
         pretrained_name_or_path: str | Path,
+        norm_stats_filename: str = "norm_stats.json",
         **kwargs: object,
     ) -> HuggingfacePolicyContainer:
+        """Resolve policy artifacts from local path or Hugging Face Hub.
+
+        Args:
+            pretrained_name_or_path: Local checkpoint directory or HF repo id.
+            norm_stats_filename: Normalization stats filename to resolve.
+            **kwargs: Optional HF hub download kwargs.
+
+        Returns:
+            Container with resolved artifact paths and parsed config payloads.
+        """
         path = Path(pretrained_name_or_path)
         is_local = path.is_dir()
+        norm_stats: dict[str, Any] | None = None
 
         if is_local:
             config_file = path / "config.json"
             weights_file = _resolve_local_weights_path(path)
             preprocessor_file = path / "policy_preprocessor.json"
             preprocessor_dir = path
+            norm_stats_file = path / norm_stats_filename
+            if norm_stats_file.is_file():
+                with norm_stats_file.open(encoding="utf-8") as f:
+                    norm_stats = json.load(f)
         else:
             hub_kwargs = {
                 k: v
@@ -854,10 +1269,20 @@ class MolmoAct2(Policy):
                     "local_files_only",
                 }
             }
-            config_file, weights_file, preprocessor_file, preprocessor_dir = download_policy_artifacts_from_hub(
+            (
+                config_file,
+                weights_file,
+                preprocessor_file,
+                preprocessor_dir,
+                norm_stats_file,
+            ) = download_policy_artifacts_from_hub(
                 str(pretrained_name_or_path),
                 hub_kwargs=hub_kwargs,
+                norm_stats_filename=norm_stats_filename,
             )
+            if norm_stats_file is not None:
+                with norm_stats_file.open(encoding="utf-8") as f:
+                    norm_stats = json.load(f)
 
         with Path(config_file).open(encoding="utf-8") as f:
             hf_config = json.load(f)
@@ -871,4 +1296,5 @@ class MolmoAct2(Policy):
             preprocessor_dir=Path(preprocessor_dir) if preprocessor_dir is not None else None,
             checkpoint_location=checkpoint_location,
             hf_config=hf_config,
+            norm_stats=norm_stats,
         )

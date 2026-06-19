@@ -35,6 +35,7 @@ class HuggingfacePolicyContainer:
         preprocessor_dir: Optional directory containing preprocessor state files.
         checkpoint_location: Directory where checkpoint files live.
         hf_config: Parsed contents of ``config.json``.
+        norm_stats: Optional parsed contents of the configured normalization stats JSON.
     """
 
     config_file: Path
@@ -43,6 +44,7 @@ class HuggingfacePolicyContainer:
     preprocessor_dir: Path | None
     checkpoint_location: str
     hf_config: dict[str, Any]
+    norm_stats: dict[str, Any] | None = None
 
 
 def _download_optional_preprocessor(
@@ -119,8 +121,9 @@ def download_policy_artifacts_from_hub(
     config_filename: str = "config.json",
     weights_filename: str = "model.safetensors",
     preprocessor_filename: str = "policy_preprocessor.json",
+    norm_stats_filename: str | None = None,
     download_preprocessor_state_files: bool = True,
-) -> tuple[Path, Path, Path | None, Path | None]:
+) -> tuple[Path, Path, Path | None, Path | None, Path | None]:
     """Download standard policy artifacts from a Hugging Face model repo.
 
     Args:
@@ -128,14 +131,16 @@ def download_policy_artifacts_from_hub(
         config_filename: Model config file name in the repo.
         weights_filename: Model weights file name in the repo.
         preprocessor_filename: Optional preprocessor JSON file name.
+        norm_stats_filename: Optional normalization stats JSON file name.
         download_preprocessor_state_files: If True, also download files referenced
             by ``state_file`` entries inside the preprocessor JSON.
         hub_kwargs: Optional keyword arguments forwarded to
             ``huggingface_hub.hf_hub_download``.
 
     Returns:
-        Tuple of ``(config_file, weights_file, preprocessor_file, preprocessor_dir)``.
+        Tuple of ``(config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file)``.
         If the preprocessor file is missing or invalid, preprocessor values are ``None``.
+        If the norm stats file is missing, ``norm_stats_file`` is ``None``.
         ``weights_file`` is either the single safetensors file path or the
         safetensors index path for sharded checkpoints.
     """
@@ -171,4 +176,12 @@ def download_policy_artifacts_from_hub(
                 preprocessor_file = None
                 preprocessor_dir = None
 
-    return config_file, weights_file, preprocessor_file, preprocessor_dir
+    norm_stats_file = None
+    if norm_stats_filename is not None:
+        norm_stats_file = _download_optional_preprocessor(
+            repo_id,
+            norm_stats_filename,
+            hub_kwargs=selected_hub_kwargs,
+        )
+
+    return config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file
