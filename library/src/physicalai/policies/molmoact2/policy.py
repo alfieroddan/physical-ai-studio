@@ -762,11 +762,18 @@ class MolmoAct2(Policy):
 
         Builds the model and preprocessing pipeline from the resolved config.
         """
-        self._model = MolmoAct2Model(self.config, self.hf_container)
-
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
             config=self.config,
+            hf_container=self.hf_container,
         )
+
+        self._model = MolmoAct2Model(self.config, self.hf_container)
+
+    def setup(self, stage: str) -> None:
+        """Set up model from datamodule (lazy or fine-tuning path)."""
+        del stage
+
+        self._initialize_model()
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -788,7 +795,7 @@ class MolmoAct2(Policy):
             msg = "Preprocessor is not initialized"
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch)
+        processed_batch = self._preprocessor(batch.to_dict(flatten=True))
         actions = self._model.predict_action_chunk(processed_batch)
         return self._postprocessor(actions)
 

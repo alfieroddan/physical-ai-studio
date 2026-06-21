@@ -9,6 +9,7 @@ from typing import Any
 
 from torch import Tensor, nn
 
+from physicalai.data.lerobot import FormatConverter
 from physicalai.policies.base import Model
 
 from .backbones import MolmoAct2Backbone
@@ -37,48 +38,49 @@ class MolmoAct2Model(Model):
         self.config = config
         self.hf_container = hf_container
 
-        from lerobot.configs import FeatureType as FeatureType
-        from lerobot.configs import PolicyFeature
-        from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
-        from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
-        # Build a clean lerobot config — mirror what the working named-wrapper path does.
-        # Use checkpoint_path pointing to the HF repo (or local dir) so that lerobot's
-        # internal _load_hf_model() and norm-stats loading both resolve correctly.
-        # All model/norm specifics (setup_type, control_mode, chunk_size, etc.) are
-        # populated automatically by apply_norm_tag_metadata() inside MolmoAct2Policy.__init__.
-        config = LeroBotMolmoAct2Config(
-            checkpoint_path=str(self.hf_container.checkpoint_location),
-            norm_tag="libero",
-            inference_action_mode="continuous",
-            enable_inference_cuda_graph=False,
-            input_features={
-                "observation.images.image": PolicyFeature(
-                    type=FeatureType.VISUAL,
-                    shape=(3, 224, 224),
-                ),
-                "observation.images.image2": PolicyFeature(
-                    type=FeatureType.VISUAL,
-                    shape=(3, 224, 224),
-                ),
-                "observation.state": PolicyFeature(
-                    type=FeatureType.STATE,
-                    shape=(8,),
-                ),
-            },
-            output_features={
-                "action": PolicyFeature(
-                    type=FeatureType.ACTION,
-                    shape=(7,),
-                ),
-            },
-        )
+        if self.hf_container:
+            from lerobot.configs import FeatureType as FeatureType
+            from lerobot.configs import PolicyFeature
+            from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
+            from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
+            # Build a clean lerobot config — mirror what the working named-wrapper path does.
+            # Use checkpoint_path pointing to the HF repo (or local dir) so that lerobot's
+            # internal _load_hf_model() and norm-stats loading both resolve correctly.
+            # All model/norm specifics (setup_type, control_mode, chunk_size, etc.) are
+            # populated automatically by apply_norm_tag_metadata() inside MolmoAct2Policy.__init__.
+            config = LeroBotMolmoAct2Config(
+                checkpoint_path=str(self.hf_container.checkpoint_location),
+                norm_tag="libero",
+                inference_action_mode="continuous",
+                enable_inference_cuda_graph=False,
+                input_features={
+                    "observation.images.image": PolicyFeature(
+                        type=FeatureType.VISUAL,
+                        shape=(3, 224, 224),
+                    ),
+                    "observation.images.image2": PolicyFeature(
+                        type=FeatureType.VISUAL,
+                        shape=(3, 224, 224),
+                    ),
+                    "observation.state": PolicyFeature(
+                        type=FeatureType.STATE,
+                        shape=(8,),
+                    ),
+                },
+                output_features={
+                    "action": PolicyFeature(
+                        type=FeatureType.ACTION,
+                        shape=(7,),
+                    ),
+                },
+            )
 
-        # Instantiate the lerobot policy — this internally calls:
-        #   apply_norm_tag_metadata()  → sets chunk_size, n_action_steps, setup_type, control_mode
-        #   _load_hf_model()           → loads HF weights from checkpoint_path
-        self.model = LeroBotMolmoAct2Policy(
-            config=config,
-        )
+            # Instantiate the lerobot policy — this internally calls:
+            #   apply_norm_tag_metadata()  → sets chunk_size, n_action_steps, setup_type, control_mode
+            #   _load_hf_model()           → loads HF weights from checkpoint_path
+            self.model = LeroBotMolmoAct2Policy(
+                config=config,
+            )
 
     # physicalai
     @property
