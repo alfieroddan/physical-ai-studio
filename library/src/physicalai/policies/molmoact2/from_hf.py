@@ -29,6 +29,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import RemoteEntryNotFoundError
+
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
@@ -37,6 +40,55 @@ from .config import MolmoAct2Config
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 IMAGE_SIZE_DIMS = 2
+
+
+def _ensure_processor_files_downloaded(
+    repo_id: str,
+    checkpoint_location: str,
+    hub_kwargs: dict[str, object] | None = None,
+) -> None:
+    """Download custom processor Python files to the checkpoint snapshot directory.
+    
+    When loading from HF hub with trust_remote_code=True, transformers needs these files
+    in the model cache directory to load the custom processor and configuration classes.
+    
+    Args:
+        repo_id: HuggingFace model repository ID.
+        checkpoint_location: Path to the checkpoint snapshot directory.
+        hub_kwargs: Optional HuggingFace hub download kwargs.
+    """
+    processor_files = [
+        "processing_molmoact2.py",
+        "configuration_molmoact2.py",
+        "modeling_molmoact2.py",
+        "image_processing_molmoact2.py",
+        "video_processing_molmoact2.py",
+        "processor_config.json",
+        "tokenizer_config.json",
+        "tokenizer.json",
+    ]
+    
+    selected_hub_kwargs = {
+        k: v
+        for k, v in (hub_kwargs or {}).items()
+        if k in {"cache_dir", "force_download", "resume_download", "proxies", "token", "revision", "local_files_only"}
+    }
+    
+    for filename in processor_files:
+        try:
+            downloaded_path = hf_hub_download(
+                repo_id,
+                filename,
+                **selected_hub_kwargs,  # type: ignore[arg-type]
+            )
+            # The file is now in cache; ensure it's also in the checkpoint_location snapshot dir
+            target_path = Path(checkpoint_location) / filename
+            if not target_path.exists():
+                import shutil
+                shutil.copy2(downloaded_path, target_path)
+        except RemoteEntryNotFoundError:
+            # File doesn't exist in repo, skip it
+            pass
 
 
 def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
@@ -500,6 +552,14 @@ def load_hf_pretrained_container(
         if norm_stats_file is not None:
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
+        
+        # Download custom processor Python files to the snapshot directory
+        checkpoint_location_temp = str(Path(weights_file).parent)
+        _ensure_processor_files_downloaded(
+            str(pretrained_name_or_path),
+            checkpoint_location_temp,
+            hub_kwargs=hub_kwargs,
+        )
 
     with Path(config_file).open(encoding="utf-8") as f:
         hf_config = json.load(f)

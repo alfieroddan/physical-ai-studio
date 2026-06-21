@@ -9,6 +9,7 @@ from typing import Any
 
 from torch import Tensor, nn
 
+from physicalai.data import FeatureType as PAFeatureType
 from physicalai.data.lerobot import FormatConverter
 from physicalai.policies.base import Model
 
@@ -35,51 +36,59 @@ class MolmoAct2Model(Model):
     """
 
     def __init__(self, config, hf_container):
+        super().__init__()
         self.config = config
         self.hf_container = hf_container
 
         if self.hf_container:
-            from lerobot.configs import FeatureType as FeatureType
+            from lerobot.configs import FeatureType as LRFeatureType
             from lerobot.configs import PolicyFeature
             from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
             from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
-            # Build a clean lerobot config — mirror what the working named-wrapper path does.
-            # Use checkpoint_path pointing to the HF repo (or local dir) so that lerobot's
-            # internal _load_hf_model() and norm-stats loading both resolve correctly.
-            # All model/norm specifics (setup_type, control_mode, chunk_size, etc.) are
-            # populated automatically by apply_norm_tag_metadata() inside MolmoAct2Policy.__init__.
-            config = LeroBotMolmoAct2Config(
+
+            lr_input_features: dict[str, PolicyFeature] = {}
+            for feature in self.config.input_features:
+                if feature.name is None or feature.shape is None or feature.ftype is None:
+                    continue
+
+                if feature.ftype == PAFeatureType.VISUAL:
+                    key = feature.name
+                    if not key.startswith("observation.images."):
+                        key = f"observation.images.{key}"
+                    lr_input_features[key] = PolicyFeature(type=LRFeatureType.VISUAL, shape=feature.shape)
+                elif feature.ftype == PAFeatureType.STATE:
+                    key = feature.name
+                    if not key.startswith("observation."):
+                        key = f"observation.{key}"
+                    lr_input_features[key] = PolicyFeature(type=LRFeatureType.STATE, shape=feature.shape)
+
+            lr_output_features: dict[str, PolicyFeature] = {}
+            for feature in self.config.output_features:
+                if feature.name is None or feature.shape is None or feature.ftype is None:
+                    continue
+
+                if feature.ftype == PAFeatureType.ACTION:
+                    key = feature.name
+                    if key != "action" and not key.startswith("action."):
+                        key = f"action.{key}"
+                    lr_output_features[key] = PolicyFeature(type=LRFeatureType.ACTION, shape=feature.shape)
+
+            if not lr_input_features or not lr_output_features:
+                msg = "MolmoAct2Model requires non-empty input/output features to build lerobot bridge config."
+                raise ValueError(msg)
+
+            # Build lerobot config from resolved physicalai features so model and processors stay aligned.
+            lr_config = LeroBotMolmoAct2Config(
                 checkpoint_path=str(self.hf_container.checkpoint_location),
-                norm_tag="libero",
+                norm_tag=self.config.norm_tag,
                 inference_action_mode="continuous",
                 enable_inference_cuda_graph=False,
-                input_features={
-                    "observation.images.image": PolicyFeature(
-                        type=FeatureType.VISUAL,
-                        shape=(3, 224, 224),
-                    ),
-                    "observation.images.image2": PolicyFeature(
-                        type=FeatureType.VISUAL,
-                        shape=(3, 224, 224),
-                    ),
-                    "observation.state": PolicyFeature(
-                        type=FeatureType.STATE,
-                        shape=(8,),
-                    ),
-                },
-                output_features={
-                    "action": PolicyFeature(
-                        type=FeatureType.ACTION,
-                        shape=(7,),
-                    ),
-                },
+                input_features=lr_input_features,
+                output_features=lr_output_features,
             )
 
-            # Instantiate the lerobot policy — this internally calls:
-            #   apply_norm_tag_metadata()  → sets chunk_size, n_action_steps, setup_type, control_mode
-            #   _load_hf_model()           → loads HF weights from checkpoint_path
-            self.model = LeroBotMolmoAct2Policy(
-                config=config,
+            self._model = LeroBotMolmoAct2Policy(
+                config=lr_config,
             )
 
     # physicalai
@@ -103,8 +112,25 @@ class MolmoAct2Model(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
+    def _to_model_device(self, batch: dict[str, Any]) -> dict[str, Any]:
+        model_device = next(self._model.parameters()).device
+        out: dict[str, Any] = {}
+        for key, value in batch.items():
+            if isinstance(value, Tensor):
+                out[key] = value.to(device=model_device)
+            else:
+                out[key] = value
+        return out
+
     def predict_action_chunk(self, batch):
-        lerobot_batch = FormatConverter.to_lerobot_dict(batch)
+        # MolmoAct2 preprocessor already emits lerobot-ready model keys such as
+        # input_ids / attention_mask / pixel_values. Re-converting those dicts can
+        # drop these keys and lead to empty model_inputs downstream.
+        if isinstance(batch, dict) and any(k in batch for k in ("input_ids", "attention_mask", "pixel_values")):
+            lerobot_batch = batch
+        else:
+            lerobot_batch = FormatConverter.to_lerobot_dict(batch)
+        lerobot_batch = self._to_model_device(lerobot_batch)
         return self._model.predict_action_chunk(lerobot_batch, inference_action_mode="continuous")
 
     # model
