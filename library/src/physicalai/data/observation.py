@@ -468,6 +468,7 @@ class NormalizationParameters:
     max: list[float] | float | None = None
     q01: list[float] | float | None = None
     q99: list[float] | float | None = None
+    mask: list[bool] | None = None
 
 
 # Module-level constants for convenient dict access

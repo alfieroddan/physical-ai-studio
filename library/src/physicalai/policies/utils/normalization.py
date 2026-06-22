@@ -159,10 +159,20 @@ class FeatureNormalizeTransform(nn.Module):
                 torch.tensor(1e-8, device=denom.device, dtype=denom.dtype),
                 denom,
             )
+            feature_mask = buffer.get("mask") if hasattr(buffer, "get") else None
             if inverse:
-                batch[key] = (batch[key] + 1.0) * denom / 2.0 + q01
+                transformed = (batch[key] + 1.0) * denom / 2.0 + q01
             else:
-                batch[key] = 2.0 * (batch[key] - q01) / denom - 1.0
+                transformed = 2.0 * (batch[key] - q01) / denom - 1.0
+            if feature_mask is not None:
+                # Broadcast mask to match tensor shape (e.g. (D,) → (batch, D))
+                mask_bool = feature_mask.bool()
+                for _ in range(batch[key].ndim - mask_bool.ndim):
+                    mask_bool = mask_bool.unsqueeze(0)
+                mask_bool = mask_bool.expand_as(batch[key])
+                batch[key] = torch.where(mask_bool, transformed, batch[key])
+            else:
+                batch[key] = transformed
 
         elif norm_mode == NormalizationType.IDENTITY:
             # No transformation for identity normalization
@@ -290,6 +300,12 @@ class FeatureNormalizeTransform(nn.Module):
                     cast("NormalizationParameters", ft.normalization_data).q99,
                     shape,
                 )
+                norm_mask = cast("NormalizationParameters", ft.normalization_data).mask
+                if norm_mask is not None:
+                    buffer["mask"] = nn.Parameter(
+                        torch.tensor(norm_mask, dtype=torch.float32).view(shape),
+                        requires_grad=False,
+                    )
 
             stats_buffers[key] = buffer
         return stats_buffers

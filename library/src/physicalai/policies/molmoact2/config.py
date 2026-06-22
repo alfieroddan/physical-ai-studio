@@ -222,9 +222,13 @@ class MolmoAct2Config(Config):
     add_setup_tokens: bool = True
     add_control_tokens: bool = True
     add_action_expert: bool = True
+    setup_type: str = ""
+    control_mode: str = ""
 
     # Initialization and assets
     norm_stats_filename: str = "norm_stats.json"
+    tokenizer_name_or_path: str | None = None
+    processor_assets_path: str | None = None
     initializer_range: float = 0.02
 
     # Runtime options

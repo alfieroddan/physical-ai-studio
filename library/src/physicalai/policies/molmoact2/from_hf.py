@@ -149,6 +149,7 @@ def _normalization_parameters_from_stats(stats: dict[str, Any]) -> Normalization
         max=stats.get("max"),
         q01=stats.get("q01"),
         q99=stats.get("q99"),
+        mask=stats.get("mask"),
     )
 
 
@@ -360,11 +361,39 @@ def _resolve_feature_overrides(
         for feature in pretrained_features
         if feature.name in overrides_by_name
     ]
-    resolved_names = {feature.name for feature in resolved_features}
+    resolved_names = {feature.name for feature in resolved_features if feature.name is not None}
 
-    resolved_features.extend([feature for feature in pretrained_features if feature.name not in resolved_names])
-    resolved_names.update(feature.name for feature in resolved_features)
-    resolved_features.extend([feature for feature in override_features if feature.name not in resolved_names])
+    unmatched_pretrained = [feature for feature in pretrained_features if feature.name not in resolved_names]
+    unmatched_overrides = [feature for feature in override_features if feature.name not in resolved_names]
+
+    # Name-based matching is preferred. For remaining overrides (for example,
+    # camera alias remaps like wrist_image -> image2), match by type/shape to
+    # preserve pretrained normalization metadata while allowing renamed keys.
+    consumed_pretrained_ids: set[int] = set()
+    consumed_override_ids: set[int] = set()
+    for override_feature in unmatched_overrides:
+        for pretrained_feature in unmatched_pretrained:
+            if id(pretrained_feature) in consumed_pretrained_ids:
+                continue
+            if pretrained_feature.ftype != override_feature.ftype:
+                continue
+
+            pretrained_shape = tuple(pretrained_feature.shape) if pretrained_feature.shape is not None else None
+            override_shape = tuple(override_feature.shape) if override_feature.shape is not None else None
+            if pretrained_shape is not None and override_shape is not None and pretrained_shape != override_shape:
+                continue
+
+            resolved_features.append(_merge_feature_override(pretrained_feature, override_feature))
+            consumed_pretrained_ids.add(id(pretrained_feature))
+            consumed_override_ids.add(id(override_feature))
+            break
+
+    resolved_features.extend(
+        [feature for feature in unmatched_pretrained if id(feature) not in consumed_pretrained_ids],
+    )
+    resolved_features.extend(
+        [feature for feature in unmatched_overrides if id(feature) not in consumed_override_ids],
+    )
 
     return resolved_features
 
@@ -376,6 +405,8 @@ def build_config_from_hf_config(
     input_features: list[Feature] | None = None,
     output_features: list[Feature] | None = None,
     norm_tag: str | None = None,
+    tokenizer_name_or_path: str | None = None,
+    processor_assets_path: str | None = None,
     n_obs_steps: int = 30,
     chunk_size: int = 30,
     n_action_steps: int = 30,
@@ -389,6 +420,8 @@ def build_config_from_hf_config(
         input_features: Optional input feature definitions.
         output_features: Optional output feature definitions.
         norm_tag: Selected normalization metadata tag.
+        tokenizer_name_or_path: Tokenizer repo id or local path override.
+        processor_assets_path: Local directory containing processor asset files.
         n_obs_steps: Observation horizon override.
         chunk_size: Action chunk size override.
         n_action_steps: Number of executed action steps override.
@@ -482,7 +515,22 @@ def build_config_from_hf_config(
         if key in hf_config:
             config_data[key] = hf_config[key]
 
+    resolved_tokenizer_name_or_path = (
+        tokenizer_name_or_path or hf_config.get("_name_or_path") or hf_config.get("name_or_path")
+    )
+    resolved_processor_assets_path = processor_assets_path
+    if resolved_processor_assets_path is None and isinstance(resolved_tokenizer_name_or_path, str):
+        maybe_assets_dir = Path(resolved_tokenizer_name_or_path)
+        if maybe_assets_dir.is_dir():
+            resolved_processor_assets_path = str(maybe_assets_dir)
+
     config_data["norm_tag"] = norm_tag
+    config_data["tokenizer_name_or_path"] = resolved_tokenizer_name_or_path
+    config_data["processor_assets_path"] = resolved_processor_assets_path
+    if norm_stats is not None and norm_tag is not None:
+        tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
+        config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
+        config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
     config_data["n_obs_steps"] = n_obs_steps
     config_data["chunk_size"] = chunk_size
     config_data["n_action_steps"] = n_action_steps

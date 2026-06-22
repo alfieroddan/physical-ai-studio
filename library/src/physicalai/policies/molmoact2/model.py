@@ -9,7 +9,6 @@ from typing import Any
 
 from torch import Tensor, nn
 
-from physicalai.data import FeatureType as PAFeatureType
 from physicalai.data.lerobot import FormatConverter
 from physicalai.policies.base import Model
 
@@ -46,50 +45,22 @@ class MolmoAct2Model(Model):
             from lerobot.policies.molmoact2.configuration_molmoact2 import MolmoAct2Config as LeroBotMolmoAct2Config
             from lerobot.policies.molmoact2.modeling_molmoact2 import MolmoAct2Policy as LeroBotMolmoAct2Policy
 
-            lr_input_features: dict[str, PolicyFeature] = {}
-            for feature in self.config.input_features:
-                if feature.name is None or feature.shape is None or feature.ftype is None:
-                    continue
-
-                if feature.ftype == PAFeatureType.VISUAL:
-                    key = feature.name
-                    if not key.startswith("observation.images."):
-                        key = f"observation.images.{key}"
-                    lr_input_features[key] = PolicyFeature(type=LRFeatureType.VISUAL, shape=feature.shape)
-                elif feature.ftype == PAFeatureType.STATE:
-                    key = feature.name
-                    if not key.startswith("observation."):
-                        key = f"observation.{key}"
-                    lr_input_features[key] = PolicyFeature(type=LRFeatureType.STATE, shape=feature.shape)
-
-            lr_output_features: dict[str, PolicyFeature] = {}
-            for feature in self.config.output_features:
-                if feature.name is None or feature.shape is None or feature.ftype is None:
-                    continue
-
-                if feature.ftype == PAFeatureType.ACTION:
-                    key = feature.name
-                    if key != "action" and not key.startswith("action."):
-                        key = f"action.{key}"
-                    lr_output_features[key] = PolicyFeature(type=LRFeatureType.ACTION, shape=feature.shape)
-
-            if not lr_input_features or not lr_output_features:
-                msg = "MolmoAct2Model requires non-empty input/output features to build lerobot bridge config."
-                raise ValueError(msg)
-
-            # Build lerobot config from resolved physicalai features so model and processors stay aligned.
             lr_config = LeroBotMolmoAct2Config(
                 checkpoint_path=str(self.hf_container.checkpoint_location),
-                norm_tag=self.config.norm_tag,
+                norm_tag="libero",
                 inference_action_mode="continuous",
                 enable_inference_cuda_graph=False,
-                input_features=lr_input_features,
-                output_features=lr_output_features,
+                input_features={
+                    "observation.images.image": PolicyFeature(type=LRFeatureType.VISUAL, shape=(3, 224, 224)),
+                    "observation.images.image2": PolicyFeature(type=LRFeatureType.VISUAL, shape=(3, 224, 224)),
+                    "observation.state": PolicyFeature(type=LRFeatureType.STATE, shape=(8,)),
+                },
+                output_features={
+                    "action": PolicyFeature(type=LRFeatureType.ACTION, shape=(7,)),
+                },
             )
 
-            self._model = LeroBotMolmoAct2Policy(
-                config=lr_config,
-            )
+            self._model = LeroBotMolmoAct2Policy(config=lr_config)
 
     # physicalai
     @property
@@ -112,25 +83,16 @@ class MolmoAct2Model(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    def _to_model_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        model_device = next(self._model.parameters()).device
-        out: dict[str, Any] = {}
-        for key, value in batch.items():
-            if isinstance(value, Tensor):
-                out[key] = value.to(device=model_device)
-            else:
-                out[key] = value
-        return out
-
     def predict_action_chunk(self, batch):
-        # MolmoAct2 preprocessor already emits lerobot-ready model keys such as
-        # input_ids / attention_mask / pixel_values. Re-converting those dicts can
-        # drop these keys and lead to empty model_inputs downstream.
+        # If the preprocessor already emitted lerobot-ready keys (input_ids, pixel_values, …)
+        # skip FormatConverter — it would drop those keys.
         if isinstance(batch, dict) and any(k in batch for k in ("input_ids", "attention_mask", "pixel_values")):
             lerobot_batch = batch
         else:
             lerobot_batch = FormatConverter.to_lerobot_dict(batch)
-        lerobot_batch = self._to_model_device(lerobot_batch)
+        model_device = next(self._model.parameters()).device
+        lerobot_batch = {
+            k: (v.to(device=model_device) if isinstance(v, Tensor) else v)
+            for k, v in lerobot_batch.items()
+        }
         return self._model.predict_action_chunk(lerobot_batch, inference_action_mode="continuous")
-
-    # model
