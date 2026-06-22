@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from physicalai.data.observation import ACTION, Feature, Observation
+from physicalai.data.observation import Feature, Observation
 from physicalai.policies.base import Policy
 
 from .config import (
@@ -38,6 +38,8 @@ class MolmoAct2(Policy):
         output_features: list[Feature] | None = None,
         # location download model weights from hf or load from local dir
         hf_repo_id_or_pretrained_path: str | Path | None = None,
+        # tokenizer assets for TASK preprocessing
+        tokenizer_name_or_path: str | Path | None = None,
         # norm tag - for pretrained models to look for normalisation in json
         norm_tag: str | None = None,
         # Input and rollout structure
@@ -204,6 +206,8 @@ class MolmoAct2(Policy):
                 input_features=input_features,
                 output_features=output_features,
                 norm_tag=norm_tag,
+                tokenizer_name_or_path=str(self.hf_container.checkpoint_location),
+                processor_assets_path=str(self.hf_container.checkpoint_location),
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
@@ -333,6 +337,22 @@ class MolmoAct2(Policy):
                 input_features=input_features,
                 output_features=output_features,
             )
+
+        resolved_tokenizer_name_or_path: str | None = None
+        if hf_repo_id_or_pretrained_path is not None:
+            resolved_tokenizer_name_or_path = self.config.tokenizer_name_or_path
+            if resolved_tokenizer_name_or_path is None and self.hf_container is not None:
+                resolved_tokenizer_name_or_path = str(self.hf_container.checkpoint_location)
+        elif tokenizer_name_or_path is not None:
+            resolved_tokenizer_name_or_path = str(tokenizer_name_or_path)
+        else:
+            resolved_tokenizer_name_or_path = self.config.tokenizer_name_or_path
+
+        self.config.tokenizer_name_or_path = resolved_tokenizer_name_or_path
+        if hf_repo_id_or_pretrained_path is not None and self.hf_container is not None:
+            self.config.processor_assets_path = str(self.hf_container.checkpoint_location)
+        elif tokenizer_name_or_path is not None and Path(tokenizer_name_or_path).is_dir():
+            self.config.processor_assets_path = str(tokenizer_name_or_path)
 
         # captures raw init args
         self.save_hyperparameters(ignore=["config", "hf_repo_id_or_pretrained_path", "compile_model"])
