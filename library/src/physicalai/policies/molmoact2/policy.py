@@ -764,7 +764,6 @@ class MolmoAct2(Policy):
         """
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
             config=self.config,
-            hf_container=self.hf_container,
         )
 
         self._model = MolmoAct2Model(self.config, self.hf_container)
