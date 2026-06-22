@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
-from physicalai.data.observation import Feature, Observation
+from physicalai.data.observation import ACTION, Feature, Observation
 from physicalai.policies.base import Policy
 
 from .config import (
@@ -796,7 +796,8 @@ class MolmoAct2(Policy):
 
         processed_batch = self._preprocessor(batch.to_dict(flatten=True))
         actions = self._model.predict_action_chunk(processed_batch)
-        return self._postprocessor(actions)
+        postprocessed = self._postprocessor({ACTION: actions})
+        return postprocessed[ACTION]
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         """Forward pass through the policy.

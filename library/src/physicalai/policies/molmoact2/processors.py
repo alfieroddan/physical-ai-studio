@@ -74,15 +74,15 @@ class MolmoAct2Postprocessor(torch.nn.Module):
             inverse=True,
         )
 
-    def forward(self, batch: dict[str, Any]) -> torch.Tensor:
+    def forward(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Postprocess normalized action predictions.
 
         Args:
             batch: Model output batch containing an ``ACTION`` tensor.
 
         Returns:
-            torch.Tensor: Action tensor in environment scale after slicing,
-            clamping, and inverse normalization.
+            dict[str, torch.Tensor]: Output dictionary containing the
+            denormalized action tensor under the ``ACTION`` key.
 
         Raises:
             TypeError: If ``batch`` is not a dictionary.
@@ -100,7 +100,8 @@ class MolmoAct2Postprocessor(torch.nn.Module):
 
         action = action[..., : self.env_action_dim]
         action = action.clamp(-1.0, 1.0)
-        return self._denormalizer.to(action.device)({self.action_name: action})[self.action_name]
+        denormalized = self._denormalizer.to(action.device)({self.action_name: action})[self.action_name]
+        return {ACTION: denormalized}
 
 
 def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
