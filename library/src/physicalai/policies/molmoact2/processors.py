@@ -173,7 +173,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self.action_feature = _feature_by_type(config.output_features, FeatureType.ACTION)
 
         all_features = {f.name: f for f in config.input_features + config.output_features if f.name}
-        norm_map = {FeatureType.STATE: NormalizationType.QUANTILES, FeatureType.ACTION: NormalizationType.QUANTILES, FeatureType.VISUAL: NormalizationType.IDENTITY}
+        norm_map = {
+            FeatureType.STATE: NormalizationType.QUANTILES,
+            FeatureType.ACTION: NormalizationType.QUANTILES,
+            FeatureType.VISUAL: NormalizationType.IDENTITY,
+        }
         self._normalizer = FeatureNormalizeTransform(all_features, norm_map, inverse=False)
 
         self.max_action_dim = int(config.max_action_dim)
@@ -185,8 +189,12 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self.add_control_tokens = bool(config.add_control_tokens)
 
         self.setup_type, self.control_mode = self._resolve_setup_and_control_mode()
-        self.image_keys = [feature.name for feature in config.input_features if feature.ftype == FeatureType.VISUAL and feature.name]
-        self.env_action_dim = int(self.action_feature.shape[0]) if self.action_feature and self.action_feature.shape else 0
+        self.image_keys = [
+            feature.name for feature in config.input_features if feature.ftype == FeatureType.VISUAL and feature.name
+        ]
+        self.env_action_dim = (
+            int(self.action_feature.shape[0]) if self.action_feature and self.action_feature.shape else 0
+        )
 
         self._processor: Any = None
 
@@ -210,7 +218,10 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if not processor_assets_path:
             raise ValueError("MolmoAct2 processor requires processor_assets_path in config.")
 
-        self._processor = load_molmoact2_processor_from_pretrained(processor_assets_path)
+        self._processor = load_molmoact2_processor_from_pretrained(
+            processor_assets_path,
+            processor_config=self.config.processor_config,
+        )
         return self._processor
 
     def _resolve_image_keys(self, observation: dict[str, Any]) -> list[str]:
@@ -275,14 +286,18 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             raise ValueError(f"MolmoAct2 expected action shape [B, T, D], got {tuple(action.shape)}.")
         if int(action.shape[-1]) > self.max_action_dim:
             raise ValueError(
-                f"Action dim {action.shape[-1]} exceeds MolmoAct2 max_action_dim={self.max_action_dim}."
+                f"Action dim {action.shape[-1]} exceeds MolmoAct2 max_action_dim={self.max_action_dim}.",
             )
 
         normalized = action.to(dtype=torch.float32).clamp(-1.0, 1.0)
-        padded = torch.zeros((*normalized.shape[:-1], self.max_action_dim), device=normalized.device, dtype=torch.float32)
+        padded = torch.zeros(
+            (*normalized.shape[:-1], self.max_action_dim), device=normalized.device, dtype=torch.float32
+        )
         padded[..., : normalized.shape[-1]] = normalized
 
-        action_dim_is_pad = torch.ones((normalized.shape[0], self.max_action_dim), device=normalized.device, dtype=torch.bool)
+        action_dim_is_pad = torch.ones(
+            (normalized.shape[0], self.max_action_dim), device=normalized.device, dtype=torch.bool
+        )
         action_dim_is_pad[:, : normalized.shape[-1]] = False
         action_horizon_is_pad = torch.zeros(normalized.shape[:2], device=normalized.device, dtype=torch.bool)
         return padded, action_horizon_is_pad, action_dim_is_pad
@@ -324,21 +339,23 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         for i in range(batch_size):
             flat_images.extend(images_by_example[i])
             discrete_state = _build_discrete_state_string(state_np[i], self.num_state_tokens)
-            prompt_texts.append(_build_robot_text(
-                task=tasks[i],
-                discrete_state_string=discrete_state,
-                setup_type=self.setup_type,
-                control_mode=self.control_mode,
-                add_setup_tokens=self.add_setup_tokens,
-                add_control_tokens=self.add_control_tokens,
-                num_images=len(images_by_example[i]),
-            ))
+            prompt_texts.append(
+                _build_robot_text(
+                    task=tasks[i],
+                    discrete_state_string=discrete_state,
+                    setup_type=self.setup_type,
+                    control_mode=self.control_mode,
+                    add_setup_tokens=self.add_setup_tokens,
+                    add_control_tokens=self.add_control_tokens,
+                    num_images=len(images_by_example[i]),
+                )
+            )
 
         # Tokenize and encode images via HF processor.
         inputs = self.processor(text=prompt_texts, images=flat_images, return_tensors="pt", padding=True)
         if int(inputs["input_ids"].shape[1]) > self.max_sequence_length:
             raise ValueError(
-                f"MolmoAct2 sequence length {int(inputs['input_ids'].shape[1])} exceeds max_sequence_length={self.max_sequence_length}."
+                f"MolmoAct2 sequence length {int(inputs['input_ids'].shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
             )
 
         # Pad normalized action if present.
@@ -371,7 +388,9 @@ class MolmoAct2Postprocessor(torch.nn.Module):
     def __init__(self, *, config: Any) -> None:
         super().__init__()
         action_feature = _feature_by_type(config.output_features, FeatureType.ACTION)
-        self.env_action_dim = int(action_feature.shape[0]) if action_feature and action_feature.shape else int(config.max_action_dim)
+        self.env_action_dim = (
+            int(action_feature.shape[0]) if action_feature and action_feature.shape else int(config.max_action_dim)
+        )
         self.action_name = action_feature.name if action_feature else ACTION
         output_features = {f.name: f for f in config.output_features if f.name}
         self._denormalizer = FeatureNormalizeTransform(

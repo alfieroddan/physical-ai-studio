@@ -7,45 +7,40 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
 from typing import Any
 
-import numpy as np
-import torch
 from transformers import AutoTokenizer
 
-from physicalai.policies.molmoact2.processing_local import MolmoAct2Processor
 from physicalai.policies.molmoact2.image_processing_local import MolmoAct2ImageProcessor
+from physicalai.policies.molmoact2.processing_local import MolmoAct2Processor
 from physicalai.policies.molmoact2.video_processing_local import MolmoAct2VideoProcessor
 
 
 def load_molmoact2_processor_from_pretrained(
     processor_assets_path: str | Path,
+    processor_config: dict[str, Any] | None = None,
 ) -> MolmoAct2Processor:
     """Load MolmoAct2 processor from local processor asset files.
 
     Args:
-        processor_assets_path: Directory containing processor config and asset files.
+        processor_assets_path: Directory containing processor asset files.
+        processor_config: Pre-loaded processor config dict (required).
 
     Returns:
         Initialized MolmoAct2Processor instance.
 
     Raises:
-        FileNotFoundError: If required asset files are missing.
+        ValueError: If processor_config is not provided.
     """
+    if processor_config is None:
+        msg = "processor_config must be provided to load_molmoact2_processor_from_pretrained"
+        raise ValueError(msg)
+
     processor_assets_path = Path(processor_assets_path)
 
-    # Load processor config
-    processor_config_path = processor_assets_path / "processor_config.json"
-    if not processor_config_path.exists():
-        msg = f"processor_config.json not found at {processor_config_path}"
-        raise FileNotFoundError(msg)
-
-    with processor_config_path.open() as f:
-        processor_config = json.load(f)
-
-    # Load tokenizer (using HF's AutoTokenizer but from local files)
+    # Load tokenizer (using HF's AutoTokenizer but from local files
     tokenizer = AutoTokenizer.from_pretrained(
         str(processor_assets_path),
         trust_remote_code=False,

@@ -146,11 +146,7 @@ def download_policy_artifacts_from_hub(
         ``weights_file`` is either the single safetensors file path or the
         safetensors index path for sharded checkpoints.
     """
-    selected_hub_kwargs = {
-        k: v
-        for k, v in (hub_kwargs or {}).items()
-        if k in _HF_HUB_DOWNLOAD_KEYS
-    }
+    selected_hub_kwargs = {k: v for k, v in (hub_kwargs or {}).items() if k in _HF_HUB_DOWNLOAD_KEYS}
 
     config_file = Path(
         hf_hub_download(repo_id, config_filename, **selected_hub_kwargs),  # nosec B615  # type: ignore[arg-type]

@@ -48,10 +48,10 @@ def _ensure_processor_files_downloaded(
     hub_kwargs: dict[str, object] | None = None,
 ) -> None:
     """Download custom processor Python files to the checkpoint snapshot directory.
-    
+
     When loading from HF hub with trust_remote_code=True, transformers needs these files
     in the model cache directory to load the custom processor and configuration classes.
-    
+
     Args:
         repo_id: HuggingFace model repository ID.
         checkpoint_location: Path to the checkpoint snapshot directory.
@@ -67,13 +67,13 @@ def _ensure_processor_files_downloaded(
         "tokenizer_config.json",
         "tokenizer.json",
     ]
-    
+
     selected_hub_kwargs = {
         k: v
         for k, v in (hub_kwargs or {}).items()
         if k in {"cache_dir", "force_download", "resume_download", "proxies", "token", "revision", "local_files_only"}
     }
-    
+
     for filename in processor_files:
         try:
             downloaded_path = hf_hub_download(
@@ -85,6 +85,7 @@ def _ensure_processor_files_downloaded(
             target_path = Path(checkpoint_location) / filename
             if not target_path.exists():
                 import shutil
+
                 shutil.copy2(downloaded_path, target_path)
         except RemoteEntryNotFoundError:
             # File doesn't exist in repo, skip it
@@ -530,7 +531,7 @@ def build_config_from_hf_config(
     config_data["tokenizer_name_or_path"] = resolved_tokenizer_name_or_path
     config_data["processor_assets_path"] = resolved_processor_assets_path
     config_data["processor_config"] = processor_config
-    
+
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
         config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
@@ -604,7 +605,7 @@ def load_hf_pretrained_container(
         if norm_stats_file is not None:
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
-        
+
         # Download custom processor Python files to the snapshot directory
         checkpoint_location_temp = str(Path(weights_file).parent)
         _ensure_processor_files_downloaded(
@@ -617,7 +618,7 @@ def load_hf_pretrained_container(
         hf_config = json.load(f)
 
     checkpoint_location = str(Path(weights_file).parent)
-    
+
     # Load processor config from checkpoint location
     processor_config: dict[str, Any] | None = None
     processor_config_path = Path(checkpoint_location) / "processor_config.json"

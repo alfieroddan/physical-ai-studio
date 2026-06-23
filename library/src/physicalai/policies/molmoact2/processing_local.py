@@ -1,39 +1,33 @@
-"""
-Processor class for MolmoAct2.
-"""
-from typing import Optional, Union
-import dataclasses
+"""Processor class for MolmoAct2."""
 
 import numpy as np
-
+from transformers import AutoTokenizer
+from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
-from transformers.video_utils import VideoInput
 from transformers.processing_utils import (
-    Unpack,
     ProcessingKwargs,
     ProcessorMixin,
+    Unpack,
 )
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.tokenization_utils_base import TextInput, PreTokenizedInput
+from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 from transformers.utils import logging
+from transformers.video_utils import VideoInput
 
-from transformers import AutoTokenizer
-from .image_processing_local import MolmoAct2ImagesKwargs, MolmoAct2ImageProcessor
-from .video_processing_local import MolmoAct2VideoProcessorKwargs, MolmoAct2VideoProcessor
-
+from .image_processing_local import MolmoAct2ImageProcessor, MolmoAct2ImagesKwargs
+from .video_processing_local import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorKwargs
 
 logger = logging.get_logger(__name__)
 
 
 # Special tokens, these should be present in any tokenizer we use since the preprocessor uses them
-IMAGE_PATCH_TOKEN = f"<im_patch>"  # Where to insert high-res tokens
-IMAGE_LOW_RES_TOKEN = f"<im_low>"  # Where to insert low-res tokens
-IM_START_TOKEN = f"<im_start>"
-LOW_RES_IMAGE_START_TOKEN = f"<low_res_im_start>"
-FRAME_START_TOKEN = f"<frame_start>"
-IM_END_TOKEN = f"<im_end>"
-FRAME_END_TOKEN= f"<frame_end>"
-IM_COL_TOKEN = f"<im_col>"
+IMAGE_PATCH_TOKEN = "<im_patch>"  # Where to insert high-res tokens
+IMAGE_LOW_RES_TOKEN = "<im_low>"  # Where to insert low-res tokens
+IM_START_TOKEN = "<im_start>"
+LOW_RES_IMAGE_START_TOKEN = "<low_res_im_start>"
+FRAME_START_TOKEN = "<frame_start>"
+IM_END_TOKEN = "<im_end>"
+FRAME_END_TOKEN = "<frame_end>"
+IM_COL_TOKEN = "<im_col>"
 IMAGE_PROMPT = "<|image|>"
 VIDEO_PROMPT = "<|video|>"
 
@@ -51,6 +45,7 @@ IMAGE_TOKENS = [
 
 class MolmoAct2ProcessorKwargs(ProcessingKwargs, total=False):
     """MolmoAct2 processor kwargs"""
+
     images_kwargs: MolmoAct2ImagesKwargs
     videos_kwargs: MolmoAct2VideoProcessorKwargs
     _defaults = {
@@ -82,13 +77,13 @@ class MolmoAct2Processor(ProcessorMixin):
         image_processor: MolmoAct2ImageProcessor = None,
         video_processor: MolmoAct2VideoProcessor = None,
         tokenizer: AutoTokenizer = None,
-        chat_template: Optional[str] = None,
-        image_use_col_tokens: Optional[bool] = True,
-        use_single_crop_col_tokens: Optional[bool] = None,
-        use_single_crop_start_token: Optional[bool] = True,
-        video_use_col_tokens: Optional[bool] = False,
-        use_frame_special_tokens: Optional[bool] = True,
-        **kwargs
+        chat_template: str | None = None,
+        image_use_col_tokens: bool | None = True,
+        use_single_crop_col_tokens: bool | None = None,
+        use_single_crop_start_token: bool | None = True,
+        video_use_col_tokens: bool | None = False,
+        use_frame_special_tokens: bool | None = True,
+        **kwargs,
     ) -> None:
         super().__init__(
             image_processor,
@@ -104,10 +99,7 @@ class MolmoAct2Processor(ProcessorMixin):
 
         self.image_placeholder_token = IMAGE_PROMPT
         self.video_placeholder_token = VIDEO_PROMPT
-        self.image_token_ids = [
-            tokenizer.convert_tokens_to_ids(token)
-            for token in IMAGE_TOKENS
-        ]
+        self.image_token_ids = [tokenizer.convert_tokens_to_ids(token) for token in IMAGE_TOKENS]
 
     def get_image_tokens(self, image_grid: np.ndarray):
         resized_h, resized_w, height, width = image_grid
@@ -136,15 +128,9 @@ class MolmoAct2Processor(ProcessorMixin):
         ]
         per_row = np.full(resized_w, IMAGE_PATCH_TOKEN)
         use_single_crop_col_tokens = (
-            self.image_use_col_tokens
-            if self.use_single_crop_col_tokens is None
-            else self.use_single_crop_col_tokens
+            self.image_use_col_tokens if self.use_single_crop_col_tokens is None else self.use_single_crop_col_tokens
         )
-        image_start_token = (
-            LOW_RES_IMAGE_START_TOKEN
-            if self.use_single_crop_start_token
-            else IM_START_TOKEN
-        )
+        image_start_token = LOW_RES_IMAGE_START_TOKEN if self.use_single_crop_start_token else IM_START_TOKEN
         if use_single_crop_col_tokens:
             per_row = np.concatenate([per_row, [IM_COL_TOKEN]], 0)
         joint = [
@@ -172,7 +158,7 @@ class MolmoAct2Processor(ProcessorMixin):
         for frame_idx, frame_time in enumerate(timestamps):
             # `per-frame-compact` time mode
             prev_space = " " if frame_idx > 0 else ""
-            frame_prefix = prev_space + f"{frame_time:.1f} " # explicit whitespace before/after image tokens
+            frame_prefix = prev_space + f"{frame_time:.1f} "  # explicit whitespace before/after image tokens
 
             video_string += frame_prefix
             per_row = np.full(w, IMAGE_PATCH_TOKEN)
@@ -195,8 +181,7 @@ class MolmoAct2Processor(ProcessorMixin):
         bos_token_id: int,
         pad_token_id: int,
     ):
-        """
-        Args:
+        """Args:
             input_ids: [B, S] array with left padding
             attention_mask: [B, S] array (0 for pad, 1 for valid)
             bos_token_id: int
@@ -205,7 +190,6 @@ class MolmoAct2Processor(ProcessorMixin):
             input_ids_out: [B, S] or [B, S+1] array with bos inserted if needed
             attention_mask_out: same shape as input_ids_out
         """
-
         need_to_expand = len(input_ids.shape) == 1
         if need_to_expand:
             input_ids = input_ids[None, :]
@@ -230,43 +214,40 @@ class MolmoAct2Processor(ProcessorMixin):
                 input_ids = input_ids[0]
                 attention_mask = attention_mask[0]
             return input_ids, attention_mask
-        else:
-            new_input_ids = np.full((B, S+1), pad_token_id, dtype=input_ids.dtype)
-            new_attention_mask = np.zeros((B, S+1), dtype=attention_mask.dtype)
+        new_input_ids = np.full((B, S + 1), pad_token_id, dtype=input_ids.dtype)
+        new_attention_mask = np.zeros((B, S + 1), dtype=attention_mask.dtype)
 
-            src_idx = np.tile(np.arange(S), (B, 1))  # [B, S]
-            valid_mask = src_idx >= first_valid_index[:, None]  # [B, S]
-            tgt_idx = src_idx + 1  # shit right
-            batch_idx = np.tile(np.arange(B)[:, None], (1, S))  # [B, S]
+        src_idx = np.tile(np.arange(S), (B, 1))  # [B, S]
+        valid_mask = src_idx >= first_valid_index[:, None]  # [B, S]
+        tgt_idx = src_idx + 1  # shit right
+        batch_idx = np.tile(np.arange(B)[:, None], (1, S))  # [B, S]
 
-            # flatten valid_positions
-            flat_vals = input_ids[valid_mask]
-            flat_batch = batch_idx[valid_mask]
-            flat_tgt = tgt_idx[valid_mask]
+        # flatten valid_positions
+        flat_vals = input_ids[valid_mask]
+        flat_batch = batch_idx[valid_mask]
+        flat_tgt = tgt_idx[valid_mask]
 
-            new_input_ids[flat_batch, flat_tgt] = flat_vals
-            new_attention_mask[flat_batch, flat_tgt] = 1
+        new_input_ids[flat_batch, flat_tgt] = flat_vals
+        new_attention_mask[flat_batch, flat_tgt] = 1
 
-            insert_pos = first_valid_index
-            new_input_ids[np.arange(B), insert_pos] = bos_token_id
-            new_attention_mask[np.arange(B), insert_pos] = 1
+        insert_pos = first_valid_index
+        new_input_ids[np.arange(B), insert_pos] = bos_token_id
+        new_attention_mask[np.arange(B), insert_pos] = 1
 
-            if need_to_expand:
-                new_input_ids = new_input_ids[0]
-                new_attention_mask = new_attention_mask[0]
+        if need_to_expand:
+            new_input_ids = new_input_ids[0]
+            new_attention_mask = new_attention_mask[0]
 
-            return new_input_ids, new_attention_mask
+        return new_input_ids, new_attention_mask
 
     def __call__(
         self,
-        text: Union[TextInput, PreTokenizedInput, list[TextInput], list[PreTokenizedInput]] = None,
+        text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] = None,
         images: ImageInput = None,
         videos: VideoInput = None,
         **kwargs: Unpack[MolmoAct2ProcessorKwargs],
     ) -> BatchFeature:
-        """
-
-        Args:
+        """Args:
             text (`str`, `list[str]`, `list[list[str]]`):
                 The sequence or batch of sequences to be encoded. Each sequence can be a string or a list of strings
                 (pretokenized string). If the sequences are provided as list of strings (pretokenized), you must set
@@ -302,7 +283,6 @@ class MolmoAct2Processor(ProcessorMixin):
               Returned when `videos` is not `None`.
             - **video_grids** -- Grids of videos. Returned when `videos` is not `None`.
         """
-
         output_kwargs = self._merge_kwargs(
             MolmoAct2ProcessorKwargs,
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
@@ -331,13 +311,13 @@ class MolmoAct2Processor(ProcessorMixin):
         if not isinstance(text, list):
             text = [text]
 
-        text = text.copy() # below lines change text in-place
+        text = text.copy()  # below lines change text in-place
 
         if image_grids is not None:
             index = 0
             for i in range(len(text)):
                 num_images = text[i].count(self.image_placeholder_token)
-                image_grids_i = image_grids[index:index+num_images]
+                image_grids_i = image_grids[index : index + num_images]
                 for image_grid in image_grids_i:
                     image_tokens = self.get_image_tokens(image_grid)
                     image_string = "".join(image_tokens)
@@ -349,9 +329,9 @@ class MolmoAct2Processor(ProcessorMixin):
             for i in range(len(text)):
                 num_videos = text[i].count(self.video_placeholder_token)
                 assert num_videos in {0, 1}, "At most one video is supported for now"
-                video_grids_i = video_grids[index:index+num_videos]
-                metadata_i = video_metadata[index:index+num_videos]
-                for video_grid, metadata in zip(video_grids_i, metadata_i):
+                video_grids_i = video_grids[index : index + num_videos]
+                metadata_i = video_metadata[index : index + num_videos]
+                for video_grid, metadata in zip(video_grids_i, metadata_i, strict=False):
                     video_string = self.get_video_string(
                         video_grid,
                         metadata.timestamps,
@@ -371,7 +351,10 @@ class MolmoAct2Processor(ProcessorMixin):
 
         bos = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
         input_ids, attention_mask = self.insert_bos(
-            input_ids, attention_mask, bos, self.tokenizer.pad_token_id
+            input_ids,
+            attention_mask,
+            bos,
+            self.tokenizer.pad_token_id,
         )
 
         if return_mm_token_type_ids:
@@ -388,10 +371,13 @@ class MolmoAct2Processor(ProcessorMixin):
         )
 
     def post_process_image_text_to_text(
-        self, generated_outputs, skip_special_tokens=True, clean_up_tokenization_spaces=False, **kwargs
+        self,
+        generated_outputs,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+        **kwargs,
     ):
-        """
-        Post-process the output of the model to decode the text.
+        """Post-process the output of the model to decode the text.
 
         Args:
             generated_outputs (`torch.Tensor` or `np.ndarray`):
