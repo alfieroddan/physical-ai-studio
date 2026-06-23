@@ -10,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from transformers import AutoTokenizer
+from transformers import Qwen2Tokenizer
 
 from physicalai.policies.molmoact2.image_processing_local import MolmoAct2ImageProcessor
 from physicalai.policies.molmoact2.processing_local import MolmoAct2Processor
@@ -18,33 +18,25 @@ from physicalai.policies.molmoact2.video_processing_local import MolmoAct2VideoP
 
 
 def load_molmoact2_processor_from_pretrained(
-    processor_assets_path: str | Path,
+    tokenizer_path: str | Path,
     processor_config: dict[str, Any] | None = None,
 ) -> MolmoAct2Processor:
-    """Load MolmoAct2 processor from local processor asset files.
+    """Load MolmoAct2 processor from checkpoint tokenizer and processor config data.
 
     Args:
-        processor_assets_path: Directory containing processor asset files.
-        processor_config: Pre-loaded processor config dict (required).
+        tokenizer_path: Local checkpoint directory containing the extended tokenizer vocab.
+        processor_config: Optional pre-loaded processor config dict.
 
     Returns:
         Initialized MolmoAct2Processor instance.
 
-    Raises:
-        ValueError: If processor_config is not provided.
     """
-    if processor_config is None:
-        msg = "processor_config must be provided to load_molmoact2_processor_from_pretrained"
-        raise ValueError(msg)
-
-    processor_assets_path = Path(processor_assets_path)
-
-    # Load tokenizer (using HF's AutoTokenizer but from local files
-    tokenizer = AutoTokenizer.from_pretrained(
-        str(processor_assets_path),
-        trust_remote_code=False,
+    tokenizer = Qwen2Tokenizer.from_pretrained(
+        str(tokenizer_path),
         local_files_only=True,
     )
+
+    processor_config = processor_config or {}
 
     # Load image processor
     image_processor_config = processor_config.get("image_processor", {})

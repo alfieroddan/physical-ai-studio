@@ -406,8 +406,7 @@ def build_config_from_hf_config(
     input_features: list[Feature] | None = None,
     output_features: list[Feature] | None = None,
     norm_tag: str | None = None,
-    tokenizer_name_or_path: str | None = None,
-    processor_assets_path: str | None = None,
+    checkpoint_path: str | None = None,
     processor_config: dict[str, Any] | None = None,
     n_obs_steps: int = 30,
     chunk_size: int = 30,
@@ -422,8 +421,7 @@ def build_config_from_hf_config(
         input_features: Optional input feature definitions.
         output_features: Optional output feature definitions.
         norm_tag: Selected normalization metadata tag.
-        tokenizer_name_or_path: Tokenizer repo id or local path override.
-        processor_assets_path: Local directory containing processor asset files.
+        checkpoint_path: Local checkpoint directory containing extended tokenizer vocab.
         processor_config: Optional pre-loaded processor config dict.
         n_obs_steps: Observation horizon override.
         chunk_size: Action chunk size override.
@@ -518,18 +516,8 @@ def build_config_from_hf_config(
         if key in hf_config:
             config_data[key] = hf_config[key]
 
-    resolved_tokenizer_name_or_path = (
-        tokenizer_name_or_path or hf_config.get("_name_or_path") or hf_config.get("name_or_path")
-    )
-    resolved_processor_assets_path = processor_assets_path
-    if resolved_processor_assets_path is None and isinstance(resolved_tokenizer_name_or_path, str):
-        maybe_assets_dir = Path(resolved_tokenizer_name_or_path)
-        if maybe_assets_dir.is_dir():
-            resolved_processor_assets_path = str(maybe_assets_dir)
-
     config_data["norm_tag"] = norm_tag
-    config_data["tokenizer_name_or_path"] = resolved_tokenizer_name_or_path
-    config_data["processor_assets_path"] = resolved_processor_assets_path
+    config_data["processor_assets_path"] = checkpoint_path
     config_data["processor_config"] = processor_config
 
     if norm_stats is not None and norm_tag is not None:
@@ -550,6 +538,8 @@ def build_config_from_hf_config(
 def load_hf_pretrained_container(
     pretrained_name_or_path: str | Path,
     *,
+    config_filename: str = "config.json",
+    processor_filename: str = "processor_config.json",
     norm_stats_filename: str = "norm_stats.json",
     **kwargs: object,
 ) -> HuggingfacePolicyContainer:
@@ -568,9 +558,9 @@ def load_hf_pretrained_container(
     norm_stats: dict[str, Any] | None = None
 
     if is_local:
-        config_file = path / "config.json"
+        config_file = path / config_filename
         weights_file = _resolve_local_weights_path(path)
-        preprocessor_file = path / "policy_preprocessor.json"
+        preprocessor_file = path / processor_filename
         preprocessor_dir = path
         norm_stats_file = path / norm_stats_filename
         if norm_stats_file.is_file():

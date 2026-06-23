@@ -18,7 +18,8 @@ import torch
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
 from physicalai.policies.molmoact2.local_processor import load_molmoact2_processor_from_pretrained
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer
+
+from .config import MolmoAct2Config
 
 ACTION_OUTPUT_TOKEN = "<action_output>"
 SETUP_START_TOKEN = "<setup_start>"
@@ -162,12 +163,9 @@ class MolmoAct2Preprocessor(torch.nn.Module):
     def __init__(
         self,
         config: Any,
-        *,
-        hf_container: HuggingfacePolicyContainer | None = None,
     ) -> None:
         super().__init__()
         self.config = config
-        self.hf_container = hf_container
 
         self.state_feature = _feature_by_type(config.input_features, FeatureType.STATE)
         self.action_feature = _feature_by_type(config.output_features, FeatureType.ACTION)
@@ -187,8 +185,8 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self.action_mode = str(config.action_mode)
         self.add_setup_tokens = bool(config.add_setup_tokens)
         self.add_control_tokens = bool(config.add_control_tokens)
-
-        self.setup_type, self.control_mode = self._resolve_setup_and_control_mode()
+        self.setup_type = str(config.setup_type or "")
+        self.control_mode = str(config.control_mode or "")
         self.image_keys = [
             feature.name for feature in config.input_features if feature.ftype == FeatureType.VISUAL and feature.name
         ]
@@ -198,28 +196,13 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         self._processor: Any = None
 
-    def _resolve_setup_and_control_mode(self) -> tuple[str, str]:
-        if self.hf_container is None or self.hf_container.norm_stats is None or not self.config.norm_tag:
-            return "", ""
-        metadata_by_tag = self.hf_container.norm_stats.get("metadata_by_tag")
-        if not isinstance(metadata_by_tag, dict):
-            return "", ""
-        metadata = metadata_by_tag.get(self.config.norm_tag)
-        if not isinstance(metadata, dict):
-            return "", ""
-        return str(metadata.get("setup_type") or ""), str(metadata.get("control_mode") or "")
-
     @property
     def processor(self) -> Any:
         if self._processor is not None:
             return self._processor
 
-        processor_assets_path = self.config.processor_assets_path
-        if not processor_assets_path:
-            raise ValueError("MolmoAct2 processor requires processor_assets_path in config.")
-
         self._processor = load_molmoact2_processor_from_pretrained(
-            processor_assets_path,
+            self.config.processor_assets_path,
             processor_config=self.config.processor_config,
         )
         return self._processor
@@ -420,10 +403,8 @@ class MolmoAct2Postprocessor(torch.nn.Module):
 
 
 def make_molmoact2_preprocessors(
-    config: Any,
-    *,
-    hf_container: HuggingfacePolicyContainer | None = None,
+    config: MolmoAct2Config,
 ) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
-    preprocessor = MolmoAct2Preprocessor(config=config, hf_container=hf_container)
+    preprocessor = MolmoAct2Preprocessor(config=config)
     postprocessor = MolmoAct2Postprocessor(config=config)
     return preprocessor, postprocessor

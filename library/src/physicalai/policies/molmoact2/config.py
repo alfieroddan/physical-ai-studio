@@ -227,7 +227,6 @@ class MolmoAct2Config(Config):
 
     # Initialization and assets
     norm_stats_filename: str = "norm_stats.json"
-    tokenizer_name_or_path: str | None = None
     processor_assets_path: str | None = None
     processor_config: dict[str, Any] | None = None
     initializer_range: float = 0.02

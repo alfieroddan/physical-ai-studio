@@ -38,8 +38,6 @@ class MolmoAct2(Policy):
         output_features: list[Feature] | None = None,
         # location download model weights from hf or load from local dir
         hf_repo_id_or_pretrained_path: str | Path | None = None,
-        # tokenizer assets for TASK preprocessing
-        tokenizer_name_or_path: str | Path | None = None,
         # norm tag - for pretrained models to look for normalisation in json
         norm_tag: str | None = None,
         # Input and rollout structure
@@ -172,8 +170,10 @@ class MolmoAct2(Policy):
         add_setup_tokens: bool = True,
         add_control_tokens: bool = True,
         add_action_expert: bool = True,
-        # Initialization and assets
+        # Initialization and assets from hf
+        config_filename: str = "config.json",
         norm_stats_filename: str = "norm_stats.json",
+        processor_filename: str = "processor_config.json",
         initializer_range: float = 0.02,
         # Runtime options
         compile_model: bool = False,
@@ -199,6 +199,8 @@ class MolmoAct2(Policy):
             self.hf_container = load_hf_pretrained_container(
                 hf_repo_id_or_pretrained_path,
                 norm_stats_filename=norm_stats_filename,
+                config_filename=config_filename,
+                processor_filename=processor_filename,
             )
             self.config = build_config_from_hf_config(
                 self.hf_container.hf_config,
@@ -206,8 +208,7 @@ class MolmoAct2(Policy):
                 input_features=input_features,
                 output_features=output_features,
                 norm_tag=norm_tag,
-                tokenizer_name_or_path=str(self.hf_container.checkpoint_location),
-                processor_assets_path=str(self.hf_container.checkpoint_location),
+                checkpoint_path=self.hf_container.checkpoint_location,
                 processor_config=self.hf_container.processor_config,
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
@@ -338,22 +339,6 @@ class MolmoAct2(Policy):
                 input_features=input_features,
                 output_features=output_features,
             )
-
-        resolved_tokenizer_name_or_path: str | None = None
-        if hf_repo_id_or_pretrained_path is not None:
-            resolved_tokenizer_name_or_path = self.config.tokenizer_name_or_path
-            if resolved_tokenizer_name_or_path is None and self.hf_container is not None:
-                resolved_tokenizer_name_or_path = str(self.hf_container.checkpoint_location)
-        elif tokenizer_name_or_path is not None:
-            resolved_tokenizer_name_or_path = str(tokenizer_name_or_path)
-        else:
-            resolved_tokenizer_name_or_path = self.config.tokenizer_name_or_path
-
-        self.config.tokenizer_name_or_path = resolved_tokenizer_name_or_path
-        if hf_repo_id_or_pretrained_path is not None and self.hf_container is not None:
-            self.config.processor_assets_path = str(self.hf_container.checkpoint_location)
-        elif tokenizer_name_or_path is not None and Path(tokenizer_name_or_path).is_dir():
-            self.config.processor_assets_path = str(tokenizer_name_or_path)
 
         # captures raw init args
         self.save_hyperparameters(ignore=["config", "hf_repo_id_or_pretrained_path", "compile_model"])
@@ -785,7 +770,6 @@ class MolmoAct2(Policy):
         """
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
             config=self.config,
-            hf_container=self.hf_container,
         )
 
         self._model = MolmoAct2Model(self.config, self.hf_container)
@@ -813,7 +797,7 @@ class MolmoAct2(Policy):
             msg = "Model is not initialized"
             raise ValueError(msg)
         if self._preprocessor is None or self._postprocessor is None:
-            msg = "Preprocessor is not initialized"
+            msg = "Processors are not initialized"
             raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to_dict(flatten=True))

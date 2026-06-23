@@ -575,8 +575,36 @@ class MolmoAct2VideoProcessor(BaseVideoProcessor):
     valid_kwargs = MolmoAct2VideoProcessorKwargs
     model_input_names = ["pixel_values_videos", "video_token_pooling", "video_grids"]
 
-    def __init__(self, **kwargs: Unpack[MolmoAct2VideoProcessorKwargs]):
+    def __init__(
+        self,
+        size: dict[str, int] | None = None,
+        resample: PILImageResampling = PILImageResampling.BILINEAR,
+        image_mean: float | list[float] | None = None,
+        image_std: float | list[float] | None = None,
+        do_convert_rgb: bool = True,
+        patch_size: int = 14,
+        pooling_size: list[int] | None = None,
+        do_sample_frames: bool = True,
+        frame_sample_mode: str = "uniform_last_frame",
+        max_fps: int = 2,
+        sampling_fps: int = 2,
+        **kwargs: Unpack[MolmoAct2VideoProcessorKwargs],
+    ) -> None:
         super().__init__(**kwargs)
+        
+        # Set defaults for instance attributes
+        self.size = size if size is not None else {"height": 378, "width": 378}
+        self.resample = resample
+        self.image_mean = image_mean if image_mean is not None else IMAGENET_STANDARD_MEAN
+        self.image_std = image_std if image_std is not None else IMAGENET_STANDARD_STD
+        self.do_convert_rgb = do_convert_rgb
+        self.patch_size = patch_size
+        self.pooling_size = pooling_size if pooling_size is not None else [3, 3]
+        self.do_sample_frames = do_sample_frames
+        self.frame_sample_mode = frame_sample_mode
+        self.max_fps = max_fps
+        self.sampling_fps = sampling_fps
+        
         if self.size is not None and (self.size.get("height", None) is None or self.size.get("width", None) is None):
             raise ValueError("size must contain 'height' and 'width' keys.")
 
