@@ -291,12 +291,16 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         normalized = action.to(dtype=torch.float32).clamp(-1.0, 1.0)
         padded = torch.zeros(
-            (*normalized.shape[:-1], self.max_action_dim), device=normalized.device, dtype=torch.float32
+            (*normalized.shape[:-1], self.max_action_dim),
+            device=normalized.device,
+            dtype=torch.float32,
         )
         padded[..., : normalized.shape[-1]] = normalized
 
         action_dim_is_pad = torch.ones(
-            (normalized.shape[0], self.max_action_dim), device=normalized.device, dtype=torch.bool
+            (normalized.shape[0], self.max_action_dim),
+            device=normalized.device,
+            dtype=torch.bool,
         )
         action_dim_is_pad[:, : normalized.shape[-1]] = False
         action_horizon_is_pad = torch.zeros(normalized.shape[:2], device=normalized.device, dtype=torch.bool)
@@ -348,7 +352,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
                     add_setup_tokens=self.add_setup_tokens,
                     add_control_tokens=self.add_control_tokens,
                     num_images=len(images_by_example[i]),
-                )
+                ),
             )
 
         # Tokenize and encode images via HF processor.
