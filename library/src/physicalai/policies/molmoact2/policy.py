@@ -208,6 +208,7 @@ class MolmoAct2(Policy):
                 norm_tag=norm_tag,
                 tokenizer_name_or_path=str(self.hf_container.checkpoint_location),
                 processor_assets_path=str(self.hf_container.checkpoint_location),
+                processor_config=self.hf_container.processor_config,
                 n_obs_steps=n_obs_steps,
                 chunk_size=chunk_size,
                 n_action_steps=n_action_steps,

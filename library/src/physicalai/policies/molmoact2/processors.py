@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
+from physicalai.policies.molmoact2.local_processor import load_molmoact2_processor_from_pretrained
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer
 
@@ -205,18 +206,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if self._processor is not None:
             return self._processor
 
-        location = None
-        if self.hf_container is not None:
-            location = self.hf_container.checkpoint_location
-        if not location:
-            raise ValueError("MolmoAct2 processor requires a pretrained checkpoint location.")
+        processor_assets_path = self.config.processor_assets_path
+        if not processor_assets_path:
+            raise ValueError("MolmoAct2 processor requires processor_assets_path in config.")
 
-        try:
-            from transformers import AutoProcessor  # noqa: PLC0415
-        except ImportError as exc:
-            raise ImportError("MolmoAct2 processor requires transformers to be installed.") from exc
-
-        self._processor = AutoProcessor.from_pretrained(location, trust_remote_code=True)
+        self._processor = load_molmoact2_processor_from_pretrained(processor_assets_path)
         return self._processor
 
     def _resolve_image_keys(self, observation: dict[str, Any]) -> list[str]:

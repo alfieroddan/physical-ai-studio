@@ -407,6 +407,7 @@ def build_config_from_hf_config(
     norm_tag: str | None = None,
     tokenizer_name_or_path: str | None = None,
     processor_assets_path: str | None = None,
+    processor_config: dict[str, Any] | None = None,
     n_obs_steps: int = 30,
     chunk_size: int = 30,
     n_action_steps: int = 30,
@@ -422,6 +423,7 @@ def build_config_from_hf_config(
         norm_tag: Selected normalization metadata tag.
         tokenizer_name_or_path: Tokenizer repo id or local path override.
         processor_assets_path: Local directory containing processor asset files.
+        processor_config: Optional pre-loaded processor config dict.
         n_obs_steps: Observation horizon override.
         chunk_size: Action chunk size override.
         n_action_steps: Number of executed action steps override.
@@ -527,6 +529,8 @@ def build_config_from_hf_config(
     config_data["norm_tag"] = norm_tag
     config_data["tokenizer_name_or_path"] = resolved_tokenizer_name_or_path
     config_data["processor_assets_path"] = resolved_processor_assets_path
+    config_data["processor_config"] = processor_config
+    
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
         config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
@@ -613,6 +617,13 @@ def load_hf_pretrained_container(
         hf_config = json.load(f)
 
     checkpoint_location = str(Path(weights_file).parent)
+    
+    # Load processor config from checkpoint location
+    processor_config: dict[str, Any] | None = None
+    processor_config_path = Path(checkpoint_location) / "processor_config.json"
+    if processor_config_path.exists():
+        with processor_config_path.open(encoding="utf-8") as f:
+            processor_config = json.load(f)
 
     return HuggingfacePolicyContainer(
         config_file=Path(config_file),
@@ -622,4 +633,5 @@ def load_hf_pretrained_container(
         checkpoint_location=checkpoint_location,
         hf_config=hf_config,
         norm_stats=norm_stats,
+        processor_config=processor_config,
     )

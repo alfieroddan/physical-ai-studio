@@ -36,6 +36,7 @@ class HuggingfacePolicyContainer:
         checkpoint_location: Directory where checkpoint files live.
         hf_config: Parsed contents of ``config.json``.
         norm_stats: Optional parsed contents of the configured normalization stats JSON.
+        processor_config: Optional parsed contents of the processor config JSON.
     """
 
     config_file: Path
@@ -45,6 +46,7 @@ class HuggingfacePolicyContainer:
     checkpoint_location: str
     hf_config: dict[str, Any]
     norm_stats: dict[str, Any] | None = None
+    processor_config: dict[str, Any] | None = None
 
 
 def _download_optional_preprocessor(
