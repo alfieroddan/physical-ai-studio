@@ -517,6 +517,7 @@ def build_config_from_hf_config(
             config_data[key] = hf_config[key]
 
     config_data["norm_tag"] = norm_tag
+    config_data["tokenizer_name_or_path"] = checkpoint_path
     config_data["processor_assets_path"] = checkpoint_path
     config_data["processor_config"] = processor_config
 

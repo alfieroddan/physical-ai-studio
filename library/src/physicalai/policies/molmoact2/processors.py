@@ -201,8 +201,15 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if self._processor is not None:
             return self._processor
 
+        tokenizer_name_or_path = self.config.tokenizer_name_or_path
+        if not tokenizer_name_or_path:
+            raise ValueError(
+                "config.tokenizer_name_or_path is required. "
+                "Provide it via constructor or set MolmoAct2Config.tokenizer_name_or_path."
+            )
+
         self._processor = load_molmoact2_processor_from_pretrained(
-            self.config.processor_assets_path,
+            tokenizer_name_or_path,
             processor_config=self.config.processor_config,
         )
         return self._processor

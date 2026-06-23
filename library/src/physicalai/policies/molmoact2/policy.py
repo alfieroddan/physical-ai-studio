@@ -177,6 +177,10 @@ class MolmoAct2(Policy):
         initializer_range: float = 0.02,
         # Runtime options
         compile_model: bool = False,
+        tokenizer_name_or_path: str | None = None,
+        processor_config: dict[str, Any] | None = None,
+        setup_type: str = "",
+        control_mode: str = "",
     ) -> None:
         """Initialize MolmoAct2 policy.
 
@@ -336,6 +340,10 @@ class MolmoAct2(Policy):
                 norm_stats_filename=norm_stats_filename,
                 initializer_range=initializer_range,
                 compile_model=compile_model,
+                tokenizer_name_or_path=tokenizer_name_or_path,
+                processor_config=processor_config,
+                setup_type=setup_type,
+                control_mode=control_mode,
                 input_features=input_features,
                 output_features=output_features,
             )
@@ -490,6 +498,10 @@ class MolmoAct2(Policy):
         input_features: list[Feature],
         output_features: list[Feature],
         norm_tag: str | None = None,
+        tokenizer_name_or_path: str | None = None,
+        processor_config: dict[str, Any] | None = None,
+        setup_type: str = "",
+        control_mode: str = "",
     ) -> MolmoAct2Config:
         """Build policy config from constructor args only.
 
@@ -759,6 +771,10 @@ class MolmoAct2(Policy):
             initializer_range=initializer_range,
             compile_model=compile_model,
             norm_tag=norm_tag,
+            tokenizer_name_or_path=tokenizer_name_or_path,
+            processor_config=processor_config,
+            setup_type=setup_type,
+            control_mode=control_mode,
             input_features=input_features,
             output_features=output_features,
         )

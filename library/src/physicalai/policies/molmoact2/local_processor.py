@@ -18,13 +18,13 @@ from physicalai.policies.molmoact2.video_processing_local import MolmoAct2VideoP
 
 
 def load_molmoact2_processor_from_pretrained(
-    tokenizer_path: str | Path,
+    tokenizer_name_or_path: str | Path,
     processor_config: dict[str, Any] | None = None,
 ) -> MolmoAct2Processor:
     """Load MolmoAct2 processor from checkpoint tokenizer and processor config data.
 
     Args:
-        tokenizer_path: Local checkpoint directory containing the extended tokenizer vocab.
+        tokenizer_name_or_path: Local checkpoint directory or HF repo id containing the tokenizer vocab.
         processor_config: Optional pre-loaded processor config dict.
 
     Returns:
@@ -32,7 +32,7 @@ def load_molmoact2_processor_from_pretrained(
 
     """
     tokenizer = Qwen2Tokenizer.from_pretrained(
-        str(tokenizer_path),
+        str(tokenizer_name_or_path),
         local_files_only=True,
     )
 
