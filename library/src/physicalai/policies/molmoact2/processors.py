@@ -171,9 +171,19 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self.action_feature = _feature_by_type(config.output_features, FeatureType.ACTION)
 
         all_features = {f.name: f for f in config.input_features + config.output_features if f.name}
+        state_norm = (
+            NormalizationType.QUANTILES
+            if self.state_feature is not None and self.state_feature.normalization_data is not None
+            else NormalizationType.IDENTITY
+        )
+        action_norm = (
+            NormalizationType.QUANTILES
+            if self.action_feature is not None and self.action_feature.normalization_data is not None
+            else NormalizationType.IDENTITY
+        )
         norm_map = {
-            FeatureType.STATE: NormalizationType.QUANTILES,
-            FeatureType.ACTION: NormalizationType.QUANTILES,
+            FeatureType.STATE: state_norm,
+            FeatureType.ACTION: action_norm,
             FeatureType.VISUAL: NormalizationType.IDENTITY,
         }
         self._normalizer = FeatureNormalizeTransform(all_features, norm_map, inverse=False)
@@ -207,7 +217,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if not tokenizer_name_or_path:
             raise ValueError(
                 "config.tokenizer_name_or_path is required. "
-                "Provide it via constructor or set MolmoAct2Config.tokenizer_name_or_path."
+                "Provide it via constructor or set MolmoAct2Config.tokenizer_name_or_path.",
             )
 
         self._processor = load_molmoact2_processor_from_pretrained(
@@ -394,9 +404,14 @@ class MolmoAct2Postprocessor(torch.nn.Module):
         )
         self.action_name = action_feature.name if action_feature else ACTION
         output_features = {f.name: f for f in config.output_features if f.name}
+        action_norm = (
+            NormalizationType.QUANTILES
+            if action_feature is not None and action_feature.normalization_data is not None
+            else NormalizationType.IDENTITY
+        )
         self._denormalizer = FeatureNormalizeTransform(
             output_features,
-            {FeatureType.ACTION: NormalizationType.QUANTILES},
+            {FeatureType.ACTION: action_norm},
             inverse=True,
         )
 
