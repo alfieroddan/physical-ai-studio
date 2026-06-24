@@ -788,7 +788,7 @@ class MolmoAct2(Policy):
             config=self.config,
         )
 
-        self._model = MolmoAct2Model(self.config, self.hf_container)
+        self._model = MolmoAct2Model(self.config)
 
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path)."""

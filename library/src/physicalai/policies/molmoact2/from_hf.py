@@ -435,6 +435,7 @@ def build_config_from_hf_config(
         "vit_config": _hf_component_config(hf_config, "vit_config"),
         "adapter_config": _hf_component_config(hf_config, "adapter_config"),
         "text_config": _hf_component_config(hf_config, "text_config"),
+        "action_expert_config": _hf_component_config(hf_config, "action_expert_config"),
     }
     pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
         hf_config,

@@ -195,6 +195,8 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         )
 
         self._processor: Any = None
+        # Tracks the policy/preprocessor device via Module.to(...).
+        self.register_buffer("_device_indicator", torch.empty(0), persistent=False)
 
     @property
     def processor(self) -> Any:
@@ -373,6 +375,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             packed["action_horizon_is_pad"] = action_horizon_is_pad
         if action_padded is not None:
             packed[ACTION] = action_padded
+
+        target_device = self._device_indicator.device
+        for key, value in list(packed.items()):
+            if torch.is_tensor(value):
+                packed[key] = value.to(device=target_device)
         return packed
 
 

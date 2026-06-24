@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
+from transformers.configuration_utils import PretrainedConfig
 
 from physicalai.config import Config
 
@@ -54,6 +55,15 @@ class MolmoAct2VitConfig(Config):
         h, w = self.image_default_input_size
         return h // self.image_patch_size, w // self.image_patch_size
 
+    @property
+    def _attn_implementation(self) -> str:
+        """HF-compat alias used by the backbone internals."""
+        return self.attn_implementation
+
+    @_attn_implementation.setter
+    def _attn_implementation(self, value: str | None) -> None:
+        self.attn_implementation = "eager" if value is None else str(value)
+
 
 @dataclass
 class MolmoAct2AdapterConfig(Config):
@@ -75,10 +85,21 @@ class MolmoAct2AdapterConfig(Config):
     initializer_range: float = 0.02
     attn_implementation: str = "eager"
 
+    @property
+    def _attn_implementation(self) -> str:
+        """HF-compat alias used by the backbone internals."""
+        return self.attn_implementation
+
+    @_attn_implementation.setter
+    def _attn_implementation(self, value: str | None) -> None:
+        self.attn_implementation = "eager" if value is None else str(value)
+
 
 @dataclass
-class MolmoAct2TextConfig(Config):
+class MolmoAct2TextConfig(Config, PretrainedConfig):
     """Text transformer component configuration for MolmoAct2."""
+
+    model_type: str = "molmoact2_text"
 
     hidden_size: int = 3584
     num_attention_heads: int = 28
@@ -112,6 +133,8 @@ class MolmoAct2TextConfig(Config):
         Raises:
             ValueError: If any attention-head setting is invalid.
         """
+        PretrainedConfig.__init__(self, tie_word_embeddings=self.tie_word_embeddings)
+
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
         if self.num_attention_heads < 1:
@@ -120,6 +143,15 @@ class MolmoAct2TextConfig(Config):
         if self.num_key_value_heads < 1:
             msg = f"num_key_value_heads must be >= 1, got {self.num_key_value_heads}"
             raise ValueError(msg)
+
+    @property
+    def _attn_implementation(self) -> str:
+        """HF-compat alias used by the decoder layer internals."""
+        return self.attn_implementation
+
+    @_attn_implementation.setter
+    def _attn_implementation(self, value: str | None) -> None:
+        self.attn_implementation = "eager" if value is None else str(value)
 
 
 @dataclass
@@ -144,8 +176,10 @@ class MolmoAct2ActionExpertConfig(Config):
 
 
 @dataclass
-class MolmoAct2Config(Config):
+class MolmoAct2Config(Config, PretrainedConfig):
     """Top-level configuration for MolmoAct2 with split component sub-configs."""
+
+    model_type: str = "molmoact2"
 
     # Component sub-configs
     vit_config: MolmoAct2VitConfig = field(default_factory=MolmoAct2VitConfig)
@@ -283,12 +317,29 @@ class MolmoAct2Config(Config):
         return self.text_config.max_position_embeddings
 
     @property
+    def use_cache(self) -> bool:
+        """Expose text use_cache for compatibility with HF-style access."""
+        return self.text_config.use_cache
+
+    @property
     def image_num_patch(self) -> tuple[int, int]:
         """Expose image patch grid via nested ViT config."""
         return self.vit_config.image_num_patch
 
+    def _coerce_nested_configs(self) -> None:
+        if isinstance(self.vit_config, dict):
+            self.vit_config = MolmoAct2VitConfig.from_dict(self.vit_config)
+        if isinstance(self.adapter_config, dict):
+            self.adapter_config = MolmoAct2AdapterConfig.from_dict(self.adapter_config)
+        if isinstance(self.text_config, dict):
+            self.text_config = MolmoAct2TextConfig.from_dict(self.text_config)
+        if isinstance(self.action_expert_config, dict):
+            self.action_expert_config = MolmoAct2ActionExpertConfig.from_dict(self.action_expert_config)
+
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
+        self._coerce_nested_configs()
+        PretrainedConfig.__init__(self, tie_word_embeddings=self.text_config.tie_word_embeddings)
         self._validate_rollout_settings()
         self._validate_flow_matching_settings()
         self._validate_depth_and_token_settings()
@@ -354,6 +405,7 @@ class MolmoAct2Config(Config):
             return
         if self.action_expert_config is None:
             self.action_expert_config = MolmoAct2ActionExpertConfig()
+        self.action_expert_config.num_layers = int(self.text_config.num_hidden_layers)
         self.action_expert_config.max_action_horizon = int(self.chunk_size)
         self.action_expert_config.max_action_dim = int(self.max_action_dim)
         if self.state_format != "discrete":
