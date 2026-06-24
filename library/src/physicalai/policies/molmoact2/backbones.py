@@ -63,48 +63,6 @@ class _ActionFlowInputs:
     action_dim_is_pad: torch.Tensor | None
 
 
-class ActionCudaGraphManager:
-    def __init__(self, model: torch.nn.Module) -> None:
-        self.model = model
-        self.enabled = True
-
-    def set_enabled(self, enabled: bool) -> None:
-        self.enabled = bool(enabled)
-
-    def can_use_action_flow(self, inputs: _ActionFlowInputs) -> bool:
-        del inputs
-        return False
-
-    def run_action_flow(
-        self,
-        inputs: _ActionFlowInputs,
-        steps: int,
-        fallback: Callable[[_ActionFlowInputs, int], torch.Tensor],
-    ) -> torch.Tensor:
-        return fallback(inputs, steps)
-
-
-class DepthDecodeCudaGraphManager:
-    def __init__(self, model: torch.nn.Module) -> None:
-        self.model = model
-        self.enabled = True
-
-    def set_enabled(self, enabled: bool) -> None:
-        self.enabled = bool(enabled)
-
-    def can_use(self, token_ids: torch.Tensor, **kwargs: Any) -> bool:
-        del token_ids, kwargs
-        return False
-
-    def run(self, token_ids: torch.Tensor, **kwargs: Any) -> tuple[torch.Tensor, Cache]:
-        del token_ids, kwargs
-        raise RuntimeError("Depth decode CUDA graphs are not implemented in the local backbone.")
-
-    def make_static_cache(self, max_cache_len: int) -> Cache:
-        del max_cache_len
-        return DynamicCache()
-
-
 def _cache_seq_len_int(past_key_values: Cache | None) -> int:
     if past_key_values is None:
         return 0
@@ -2712,7 +2670,6 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         else:
             self.action_expert_depth_gate = None
         self._depth_gate_token_ids = self._resolve_depth_gate_token_ids()
-        self.action_cuda_graph_manager: ActionCudaGraphManager | None = None
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -3131,11 +3088,7 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
             modulations=modulation_cache,
             action_dim_is_pad=action_dim_is_pad,
         )
-        action_cuda_graph_manager = self.action_cuda_graph_manager
-        if action_cuda_graph_manager is not None and action_cuda_graph_manager.can_use_action_flow(flow_inputs):
-            trajectory = action_cuda_graph_manager.run_action_flow(flow_inputs, steps, self._run_action_flow_loop)
-        else:
-            trajectory = self._run_action_flow_loop(flow_inputs, steps)
+        trajectory = self._run_action_flow_loop(flow_inputs, steps)
         return trajectory
 
     def build_batched_images(
@@ -3622,8 +3575,6 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         self.model = MolmoAct2Model(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.vocab_size = config.vocab_size
-        self.model.action_cuda_graph_manager = ActionCudaGraphManager(self.model)
-        self.depth_decode_cuda_graph_manager = DepthDecodeCudaGraphManager(self)
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -3869,17 +3820,6 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             raise ValueError(f"Expected token_ids to have rank 1 or 2, got {tuple(token_ids.shape)}.")
         past_length = _cache_seq_len_int(past_key_values)
         end = past_length + int(next_input_ids.shape[1])
-        if self.depth_decode_cuda_graph_manager.can_use(
-            next_input_ids,
-            past_key_values=past_key_values,
-            attention_bias=attention_bias,
-        ):
-            return self.depth_decode_cuda_graph_manager.run(
-                next_input_ids,
-                past_key_values=past_key_values,
-                attention_bias=attention_bias,
-                past_length=past_length,
-            )
         cache_position = torch.arange(past_length, end, device=next_input_ids.device, dtype=torch.long)
         attention_bias = attention_bias[:, :, past_length:end, :end]
         inputs_embeds = self._embed_base_tokens(next_input_ids)
@@ -3921,18 +3861,16 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
 
     def _make_ar_decode_static_cache(self, inputs: Mapping[str, Any], max_steps: int) -> Cache:
         prompt_len = inputs["input_ids"].shape[1]
-        return self.depth_decode_cuda_graph_manager.make_static_cache(
-            max_cache_len=prompt_len + max(1, int(max_steps)),
-        )
+        del prompt_len, max_steps
+        return DynamicCache()
 
     def _make_depth_static_cache(self, inputs: Mapping[str, Any]) -> Cache:
         prompt_len = inputs["input_ids"].shape[1]
         action_horizon = self.model._resolve_action_horizon()
         max_end_steps = max(8, action_horizon)
         action_token_budget = max(1, action_horizon * 16)
-        return self.depth_decode_cuda_graph_manager.make_static_cache(
-            max_cache_len=prompt_len + self._max_depth_decode_steps() + max_end_steps + action_token_budget,
-        )
+        del prompt_len, max_end_steps, action_token_budget
+        return DynamicCache()
 
     def _continue_discrete_generation_from_output(
         self,
@@ -4329,8 +4267,7 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             batch_size=batch_size,
             device=self.device,
         )
-        self.model.action_cuda_graph_manager.set_enabled(enable_cuda_graph)
-        self.depth_decode_cuda_graph_manager.set_enabled(enable_cuda_graph)
+        del enable_cuda_graph
 
         generated_token_ids = None
         depth_bins = None
