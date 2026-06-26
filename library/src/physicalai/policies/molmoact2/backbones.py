@@ -106,6 +106,7 @@ def _iter_cache_key_values(past_key_values: Cache | None):
             if isinstance(entry, (list, tuple)) and len(entry) >= 2:
                 yield entry[0], entry[1]
 
+
 ACTION_START_TOKEN = "<action_start>"  # nosec B105
 ACTION_END_TOKEN = "<action_end>"  # nosec B105
 ACTION_OUTPUT_TOKEN = "<action_output>"  # nosec B105

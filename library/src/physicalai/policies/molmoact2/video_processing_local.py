@@ -591,7 +591,7 @@ class MolmoAct2VideoProcessor(BaseVideoProcessor):
         **kwargs: Unpack[MolmoAct2VideoProcessorKwargs],
     ) -> None:
         super().__init__(**kwargs)
-        
+
         # Set defaults for instance attributes
         self.size = size if size is not None else {"height": 378, "width": 378}
         self.resample = resample
@@ -604,7 +604,7 @@ class MolmoAct2VideoProcessor(BaseVideoProcessor):
         self.frame_sample_mode = frame_sample_mode
         self.max_fps = max_fps
         self.sampling_fps = sampling_fps
-        
+
         if self.size is not None and (self.size.get("height", None) is None or self.size.get("width", None) is None):
             raise ValueError("size must contain 'height' and 'width' keys.")
 

@@ -27,8 +27,23 @@ SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 
 
 def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
+    """Load safetensors weights into a model, strictly verifying key correspondence.
+
+    Supports both sharded (index JSON) and single-file checkpoints. Raises
+    clearly if the checkpoint does not exist or does not match the model.
+
+    Args:
+        model: The PyTorch module to load weights into.
+        checkpoint_location: Directory containing the safetensors checkpoint.
+
+    Raises:
+        FileNotFoundError: If neither a sharded index nor a single weights file
+            is found at ``checkpoint_location``.
+        RuntimeError: If the checkpoint keys do not exactly match the model keys.
+    """
     index_path = os.path.join(checkpoint_location, SAFE_WEIGHTS_INDEX_NAME)
     single_file_path = os.path.join(checkpoint_location, SAFE_WEIGHTS_NAME)
+
     if os.path.isfile(index_path):
         with open(index_path, encoding="utf-8") as file_obj:
             index = json.load(file_obj)
@@ -50,6 +65,7 @@ def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location
             model.load_state_dict(state_dict, strict=False)
             del state_dict
         return
+
     if os.path.isfile(single_file_path):
         print(f"Loading MolmoAct2 weights from {single_file_path} ...")
         state_dict = load_safetensors_file(single_file_path, device="cpu")
@@ -57,23 +73,31 @@ def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location
         print("MolmoAct2 weights loaded.")
         return
 
-    msg = (
-        f"MolmoAct2 checkpoint at {checkpoint_location} must contain {SAFE_WEIGHTS_NAME} "
-        f"or {SAFE_WEIGHTS_INDEX_NAME}."
+    raise FileNotFoundError(
+        f"No safetensors checkpoint found at '{checkpoint_location}'. "
+        f"Expected '{SAFE_WEIGHTS_NAME}' or '{SAFE_WEIGHTS_INDEX_NAME}'."
     )
-    raise FileNotFoundError(msg)
 
 
 class MolmoAct2Model(Model):
     """Wrapper for MolmoAct2ForConditionalGeneration using physicalai config.
 
     This model handles both training and inference modes:
-    - Training: Computes supervised losses using the backbone
-    - Inference: Generates predicted action chunks
+
+    - Training: Computes supervised losses using the backbone.
+    - Inference: Generates predicted action chunks.
+
+    Weight loading is intentionally separated from construction. Call
+    :meth:`load_pretrained_weights` explicitly after instantiation when a
+    pretrained checkpoint is available.
     """
 
     def __init__(self, config: MolmoAct2Config) -> None:
         """Initialize the MolmoAct2 model wrapper.
+
+        Constructs the backbone architecture from ``config`` but does **not**
+        load any weights. Call :meth:`load_pretrained_weights` separately to
+        load a pretrained checkpoint.
 
         Args:
             config: MolmoAct2Config instance with all model components defined.
@@ -81,34 +105,19 @@ class MolmoAct2Model(Model):
         super().__init__()
         self.config = config
 
-        # Initialize the backbone model using the provided config
-        # Use add_module so it's properly registered for _apply() device/dtype handling
+        # Use add_module so the backbone is properly registered for
+        # _apply() device/dtype handling (e.g. .cuda(), .half()).
         backbone = MolmoAct2ForConditionalGeneration(config)
         self.add_module("_backbone", backbone)
-        self._maybe_load_pretrained_checkpoint()
 
-    def _resolve_checkpoint_location(self) -> str | None:
-        candidates = [
-            self.config.processor_assets_path,
-            self.config.tokenizer_name_or_path,
-        ]
-        for candidate in candidates:
-            if candidate and os.path.isdir(candidate):
-                return candidate
-        return None
+    def load_pretrained_weights(self, checkpoint_location: str) -> None:
+        """Load pretrained safetensors weights from a checkpoint directory.
 
-    def _maybe_load_pretrained_checkpoint(self) -> None:
-        checkpoint_location = self._resolve_checkpoint_location()
-        if checkpoint_location is None:
-            return
-        if not (
-            os.path.isfile(os.path.join(checkpoint_location, SAFE_WEIGHTS_NAME))
-            or os.path.isfile(os.path.join(checkpoint_location, SAFE_WEIGHTS_INDEX_NAME))
-        ):
-            return
+        Args:
+            checkpoint_location: Path to a directory containing either
+                ``model.safetensors`` or ``model.safetensors.index.json``.
+        """
         _strict_load_safetensors_weights(self._backbone, checkpoint_location)
-
-    # ============ physicalai.policies.base.Model interface ============
 
     @property
     def action_delta_indices(self) -> list | None:
@@ -125,16 +134,11 @@ class MolmoAct2Model(Model):
         """Return reward delta indices if this wrapper defines them."""
         return None
 
-    # ============ Training and Inference ============
-
     def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
         """Compute the supervised training loss.
 
         Args:
             batch: Input batch with model inputs and action targets.
-
-        Returns:
-            Tuple of (loss_tensor, metrics_dict).
 
         Raises:
             NotImplementedError: Training not yet fully implemented.
@@ -149,8 +153,8 @@ class MolmoAct2Model(Model):
             batch: Input batch dictionary.
 
         Returns:
-            - In training mode: Tuple of (loss, metrics_dict)
-            - In inference mode: Predicted action tensor
+            In training mode, a tuple of (loss_tensor, metrics_dict).
+            In inference mode, the predicted action tensor.
         """
         if self.training:
             return self.compute_loss(batch)
@@ -163,27 +167,27 @@ class MolmoAct2Model(Model):
             batch: Input batch with encoded observations and prompts.
 
         Returns:
-            Dictionary with "actions" key containing the predicted action tensor 
-            of shape (batch_size, action_horizon, action_dim).
+            Dictionary with an ``"actions"`` key containing the predicted
+            action tensor of shape ``(batch_size, action_horizon, action_dim)``.
         """
-        model_inputs: dict[str, Any] = {}
-        for key in (
-            "input_ids",
-            "pixel_values",
-            "image_token_pooling",
-            "image_grids",
-            "image_num_crops",
-            "pixel_values_videos",
-            "video_token_pooling",
-            "video_grids",
-            "attention_mask",
-            "token_type_ids",
-            "action_dim_is_pad",
-        ):
-            if key in batch and batch[key] is not None:
-                model_inputs[key] = batch[key]
+        model_inputs: dict[str, Any] = {
+            key: batch[key]
+            for key in (
+                "input_ids",
+                "pixel_values",
+                "image_token_pooling",
+                "image_grids",
+                "image_num_crops",
+                "pixel_values_videos",
+                "video_token_pooling",
+                "video_grids",
+                "attention_mask",
+                "token_type_ids",
+                "action_dim_is_pad",
+            )
+            if key in batch and batch[key] is not None
+        }
 
-        # Pass through backbone action-generation path from the inner model.
         with torch.no_grad():
             actions = self._backbone.model.generate_actions_from_inputs(**model_inputs)
         return {"actions": actions}

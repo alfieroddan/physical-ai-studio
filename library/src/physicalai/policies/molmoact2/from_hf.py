@@ -409,7 +409,6 @@ def build_config_from_hf_config(
     checkpoint_path: str | None = None,
     processor_config: dict[str, Any] | None = None,
     n_obs_steps: int = 30,
-    chunk_size: int = 30,
     n_action_steps: int = 30,
     max_action_dim: int = 32,
 ) -> MolmoAct2Config:
@@ -527,7 +526,6 @@ def build_config_from_hf_config(
         config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
         config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
     config_data["n_obs_steps"] = n_obs_steps
-    config_data["chunk_size"] = chunk_size
     config_data["n_action_steps"] = n_action_steps
     config_data["max_action_dim"] = max_action_dim
 

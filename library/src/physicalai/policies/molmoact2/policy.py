@@ -9,8 +9,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
+from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
 
-from physicalai.data.observation import Feature, Observation
+from physicalai.data.observation import IMAGES, TASK, Feature, FeatureType, Observation
+from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.policies.base import Policy
 
 from .config import MolmoAct2Config
@@ -27,35 +29,30 @@ def make_molmoact2_config(
     input_features: list[Feature],
     output_features: list[Feature],
     n_obs_steps: int,
-    chunk_size: int,
     n_action_steps: int,
-    max_action_dim: int,
-    tokenizer_name_or_path: str | None = None,
-    processor_assets_path: str | None = None,
-    processor_config: dict[str, object] | None = None,
-    setup_type: str = "",
-    control_mode: str = "",
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
 
     This function is the non-policy home for model-definition defaults.
+
+    Args:
+        input_features: List of input features the model consumes.
+        output_features: List of output features the model produces.
+        n_obs_steps: Number of observation steps.
+        n_action_steps: Number of action steps.
+
+    Returns:
+        A fully populated :class:`MolmoAct2Config`.
     """
     return MolmoAct2Config(
         input_features=input_features,
         output_features=output_features,
         n_obs_steps=n_obs_steps,
-        chunk_size=chunk_size,
         n_action_steps=n_action_steps,
-        max_action_dim=max_action_dim,
-        tokenizer_name_or_path=tokenizer_name_or_path,
-        processor_assets_path=processor_assets_path,
-        processor_config=processor_config,
-        setup_type=setup_type,
-        control_mode=control_mode,
     )
 
 
-class MolmoAct2(Policy):
+class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
     def __init__(
@@ -65,26 +62,33 @@ class MolmoAct2(Policy):
         hf_repo_id_or_pretrained_path: str | Path | None = None,
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
-        chunk_size: int = 30,
         n_action_steps: int = 30,
-        max_action_dim: int = 32,
-        tokenizer_name_or_path: str | None = None,
-        processor_config: dict[str, object] | None = None,
-        setup_type: str = "",
-        control_mode: str = "",
-        *,
-        config_filename: str = "config.json",
-        norm_stats_filename: str = "norm_stats.json",
-        processor_filename: str = "processor_config.json",
     ) -> None:
         """Initialize MolmoAct2 policy.
 
+        When ``hf_repo_id_or_pretrained_path`` is provided the config is built
+        from the HuggingFace checkpoint and ``norm_tag`` is required to resolve
+        normalisation statistics. Otherwise a fresh config is built from the
+        provided features and step counts.
+
+        Args:
+            input_features: Input features the policy consumes. Required.
+            output_features: Output features the policy produces. Required.
+            hf_repo_id_or_pretrained_path: HuggingFace repo ID or local path to
+                a pretrained checkpoint. When given, weights are loaded during
+                :meth:`_initialize_model`.
+            norm_tag: Tag used to select normalisation statistics from
+                ``norm_stats.json``. Required when loading from HuggingFace.
+            n_obs_steps: Number of observation steps.
+            n_action_steps: Number of action steps.
+
         Raises:
-            ValueError: If required features are missing or pretrained norm tag is not provided.
+            ValueError: If ``input_features`` or ``output_features`` are not
+                provided, or if ``hf_repo_id_or_pretrained_path`` is given
+                without a ``norm_tag``.
         """
         if not input_features or not output_features:
-            msg_str = "Model requires input and output features."
-            raise ValueError(msg_str)
+            raise ValueError("Model requires input and output features.")
 
         super().__init__(n_action_steps=n_action_steps)
 
@@ -92,25 +96,18 @@ class MolmoAct2(Policy):
 
         if hf_repo_id_or_pretrained_path is not None:
             if not norm_tag:
-                msg_str = "If loading from HuggingFace, norm_tag is required to load stats from norm_stats.json."
-                raise ValueError(msg_str)
-
-            self.hf_container = load_hf_pretrained_container(
-                hf_repo_id_or_pretrained_path,
-                norm_stats_filename=norm_stats_filename,
-                config_filename=config_filename,
-                processor_filename=processor_filename,
-            )
+                raise ValueError(
+                    "norm_tag is required when loading from HuggingFace to resolve statistics from norm_stats.json."
+                )
+            self.hf_container = load_hf_pretrained_container(hf_repo_id_or_pretrained_path)
             self.config = build_config_from_hf_config(
                 self.hf_container.hf_config,
                 norm_stats=self.hf_container.norm_stats,
                 input_features=input_features,
                 output_features=output_features,
                 n_obs_steps=n_obs_steps,
-                chunk_size=chunk_size,
                 norm_tag=norm_tag,
                 n_action_steps=n_action_steps,
-                max_action_dim=max_action_dim,
                 checkpoint_path=self.hf_container.checkpoint_location,
                 processor_config=self.hf_container.processor_config,
             )
@@ -119,23 +116,80 @@ class MolmoAct2(Policy):
                 input_features=input_features,
                 output_features=output_features,
                 n_obs_steps=n_obs_steps,
-                chunk_size=chunk_size,
                 n_action_steps=n_action_steps,
-                max_action_dim=max_action_dim,
-                tokenizer_name_or_path=tokenizer_name_or_path,
-                processor_config=processor_config,
-                setup_type=setup_type,
-                control_mode=control_mode,
             )
+
+        self._checkpoint_location: str | None = (
+            self.hf_container.checkpoint_location if self.hf_container is not None else None
+        )
 
         self.save_hyperparameters(ignore=["config", "hf_repo_id_or_pretrained_path"])
 
-        self._model: MolmoAct2Model | None = None
+        self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
 
-        self.missing_keys: list[str] = []
-        self.unexpected_keys: list[str] = []
+    def _initialize_model(self) -> None:
+        """Initialize the model architecture, preprocessors, and pretrained weights.
+
+        Model construction and weight loading are kept as explicit sequential
+        steps so each concern is visible and testable independently:
+
+        1. Build preprocessor/postprocessor from config.
+        2. Construct the :class:`MolmoAct2Model` (architecture only, no weights).
+        3. Load pretrained weights if a checkpoint path is present in the config.
+        """
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
+            config=self.config,
+        )
+
+        self.model = MolmoAct2Model(self.config)
+
+        if self._checkpoint_location is not None:
+            self.model.load_pretrained_weights(self._checkpoint_location)
+
+    def setup(self, stage: str) -> None:
+        """Set up model from datamodule (lazy or fine-tuning path).
+
+        Args:
+            stage: Lightning stage identifier (unused; required by the interface).
+        """
+        del stage
+        self._initialize_model()
+
+    @torch.no_grad()
+    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
+        """Predict an action chunk from an observation batch.
+
+        Args:
+            batch: Observation batch to run inference on.
+
+        Returns:
+            Predicted action tensor of shape
+            ``(batch_size, action_horizon, action_dim)``.
+
+        Raises:
+            ValueError: If the model or processors have not been initialized.
+        """
+        if self.model is None:
+            raise ValueError("Model is not initialized. Call setup() first.")
+        if self._preprocessor is None or self._postprocessor is None:
+            raise ValueError("Processors are not initialized. Call setup() first.")
+
+        processed_batch = self._preprocessor(batch.to_dict(flatten=True))
+        actions = self.model.predict_action_chunk(processed_batch)
+        return self._postprocessor(actions)
+
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        """Forward pass through the policy.
+
+        Args:
+            batch: Observation batch.
+
+        Returns:
+            Predicted action tensor, or a tuple of (loss, metrics) during training.
+        """
+        return self.predict_action_chunk(batch)
 
     @property
     def input_features(self) -> list[Feature]:
@@ -147,33 +201,89 @@ class MolmoAct2(Policy):
         """Return the explicit output feature contract."""
         return self.config.output_features
 
-    def _initialize_model(self) -> None:
-        """Initialize the underlying model and preprocessors."""
-        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
-            config=self.config,
-        )
+    @property
+    def inputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's expected model inputs for export tracing.
 
-        self._model = MolmoAct2Model(self.config)
+        Derived directly from :attr:`config.input_features`. Returns ``None``
+        if the model has not yet been initialized.
 
-    def setup(self, stage: str) -> None:
-        """Set up model from datamodule (lazy or fine-tuning path)."""
-        del stage
-        self._initialize_model()
+        Returns:
+            A list of :class:`InferenceFeature` descriptors, or ``None``.
+        """
+        if self.model is None:
+            return None
 
-    @torch.no_grad()
-    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
-        """Predict an action chunk from an observation batch."""
+        schema: list[InferenceFeature] = []
+        for feature in self.config.input_features:
+            if feature.ftype == FeatureType.VISUAL:
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.VISUAL,
+                        shape=feature.shape,
+                        name=f"{IMAGES}.{feature.name}",
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+            elif feature.ftype == FeatureType.STATE:
+                schema.append(
+                    InferenceFeature(
+                        ftype=InferenceFeatureType.STATE,
+                        shape=feature.shape,
+                        name=feature.name,
+                        dtype=InferenceFeatureDtype.FLOAT32,
+                    ),
+                )
+            schema.append(
+                InferenceFeature(
+                    ftype=InferenceFeatureType.LANGUAGE,
+                    shape=(),
+                    name=TASK,
+                    dtype=InferenceFeatureDtype.STRING,
+                ),
+            )
+        return schema
+
+    @property
+    def outputs_schema(self) -> list[InferenceFeature] | None:
+        """Describe the policy's model output for export.
+
+        Derived directly from :attr:`config.output_features`. Returns ``None``
+        if the model has not yet been initialized.
+
+        Returns:
+            A list of :class:`InferenceFeature` descriptors, or ``None``.
+        """
         if self._model is None:
-            msg = "Model is not initialized"
-            raise ValueError(msg)
-        if self._preprocessor is None or self._postprocessor is None:
-            msg = "Processors are not initialized"
-            raise ValueError(msg)
+            return None
 
-        processed_batch = self._preprocessor(batch.to_dict(flatten=True))
-        actions = self._model.predict_action_chunk(processed_batch)
-        return self._postprocessor(actions)
+        return [
+            InferenceFeature(
+                ftype=InferenceFeatureType.ACTION,
+                shape=(self.config.n_action_steps, *feature.shape),
+                name=feature.name,
+                dtype=InferenceFeatureDtype.FLOAT32,
+            )
+            for feature in self.config.output_features
+        ]
 
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
-        """Forward pass through the policy."""
-        return self.predict_action_chunk(batch)
+    @property
+    def extra_export_args(self) -> dict:
+        """Extra arguments for the export process.
+
+        Returns:
+            An empty dict. Override when backend-specific export parameters
+            (e.g. ONNX, OpenVINO) are required.
+        """
+        return {}
+
+    @staticmethod
+    def get_supported_export_backends() -> list[str | ExportBackend]:
+        """Get a list of export backends supported by policy.
+
+        This method returns a list of supported export backends as strings.
+
+        Returns:
+            list[str | ExportBackend]: A list of supported export backends.
+        """
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
