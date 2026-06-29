@@ -17,6 +17,7 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from tqdm import tqdm
 
+from physicalai.data.observation import FeatureType
 from physicalai.policies.base import Model
 
 from .backbones import MolmoAct2ForConditionalGeneration
@@ -105,6 +106,9 @@ class MolmoAct2Model(Model):
         super().__init__()
         self.config = config
         self.backbone = MolmoAct2ForConditionalGeneration(config)
+        self.max_sequence_length = _text_max_positions(config)
+        self.max_action_dim = int(config.max_action_dim)
+        self.env_action_dim = _env_action_dim(config)
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load pretrained safetensors weights from a checkpoint directory.
@@ -156,16 +160,70 @@ class MolmoAct2Model(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    def predict_action_chunk(self, batch: dict[str, Any]) -> dict[str, Tensor]:
-        """Convert a processed batch into a predicted action chunk.
+    @staticmethod
+    def _validate_local_pooling_indices(inputs: dict[str, Any]) -> None:
+        if "pixel_values" in inputs and "image_token_pooling" in inputs:
+            pixel_values = inputs["pixel_values"]
+            image_token_pooling = inputs["image_token_pooling"]
+            if torch.is_tensor(pixel_values) and pixel_values.ndim == 3 and torch.is_tensor(image_token_pooling):
+                n_patches = int(pixel_values.shape[1])
+                valid = image_token_pooling >= 0
+                if torch.any(valid):
+                    max_idx = int(image_token_pooling[valid].max().item())
+                    if max_idx >= n_patches:
+                        raise ValueError(
+                            "image_token_pooling contains out-of-range indices for per-image local patch IDs: "
+                            f"max_idx={max_idx}, n_patches={n_patches}."
+                        )
 
-        Args:
-            batch: Input batch with encoded observations and prompts.
+        if "pixel_values_videos" in inputs and "video_token_pooling" in inputs:
+            pixel_values_videos = inputs["pixel_values_videos"]
+            video_token_pooling = inputs["video_token_pooling"]
+            if (
+                torch.is_tensor(pixel_values_videos)
+                and pixel_values_videos.ndim == 3
+                and torch.is_tensor(video_token_pooling)
+            ):
+                n_frame_patches_total = int(pixel_values_videos.shape[0] * pixel_values_videos.shape[1])
+                valid = video_token_pooling >= 0
+                if torch.any(valid):
+                    max_idx = int(video_token_pooling[valid].max().item())
+                    if max_idx >= n_frame_patches_total:
+                        raise ValueError(
+                            "video_token_pooling contains out-of-range indices for local frame patch IDs: "
+                            f"max_idx={max_idx}, total_patches={n_frame_patches_total}."
+                        )
 
-        Returns:
-            Dictionary with an ``"actions"`` key containing the predicted
-            action tensor of shape ``(batch_size, action_horizon, action_dim)``.
+    def _default_action_dim_is_pad(self, *, batch_size: int, device: torch.device) -> torch.Tensor:
+        action_dim_is_pad = torch.ones((batch_size, self.max_action_dim), dtype=torch.bool, device=device)
+        if self.env_action_dim > 0:
+            action_dim_is_pad[:, : self.env_action_dim] = False
+        return action_dim_is_pad
+
+    def prepare_graph_inputs(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Prepare tensor-only model inputs from processor output.
+
+        This stage keeps graph-friendly tensor logic inside the model boundary:
+        sequence length validation, local pooling-index validation, action mask
+        defaults, and tensor device placement.
         """
+        if "input_ids" not in batch or not torch.is_tensor(batch["input_ids"]):
+            raise ValueError("MolmoAct2 model expects tensor input_ids from preprocessor output.")
+
+        if int(batch["input_ids"].shape[1]) > self.max_sequence_length:
+            raise ValueError(
+                f"MolmoAct2 sequence length {int(batch['input_ids'].shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
+            )
+
+        self._validate_local_pooling_indices(batch)
+
+        batch_size = int(batch["input_ids"].shape[0])
+        action_dim_is_pad = batch.get("action_dim_is_pad")
+        if not torch.is_tensor(action_dim_is_pad):
+            action_dim_is_pad = self._default_action_dim_is_pad(batch_size=batch_size, device=batch["input_ids"].device)
+        else:
+            action_dim_is_pad = action_dim_is_pad.to(dtype=torch.bool)
+
         model_inputs: dict[str, Any] = {
             key: batch[key]
             for key in (
@@ -179,11 +237,43 @@ class MolmoAct2Model(Model):
                 "video_grids",
                 "attention_mask",
                 "token_type_ids",
-                "action_dim_is_pad",
             )
             if key in batch and batch[key] is not None
         }
+        model_inputs["action_dim_is_pad"] = action_dim_is_pad
+
+        target_device = next(self.backbone.parameters()).device
+        for key, value in list(model_inputs.items()):
+            if torch.is_tensor(value):
+                model_inputs[key] = value.to(device=target_device)
+        return model_inputs
+
+    def predict_action_chunk(self, batch: dict[str, Any]) -> dict[str, Tensor]:
+        """Convert a processed batch into a predicted action chunk.
+
+        Args:
+            batch: Input batch with encoded observations and prompts.
+
+        Returns:
+            Dictionary with an ``"actions"`` key containing the predicted
+            action tensor of shape ``(batch_size, action_horizon, action_dim)``.
+        """
+        model_inputs = self.prepare_graph_inputs(batch)
 
         with torch.no_grad():
             actions = self.backbone.model.generate_actions_from_inputs(**model_inputs)
         return {"actions": actions}
+
+
+def _text_max_positions(config: Any, *, default: int = 4096) -> int:
+    text_config = getattr(config, "text_config", None)
+    if isinstance(text_config, dict):
+        return int(text_config.get("max_position_embeddings", default))
+    return int(getattr(text_config, "max_position_embeddings", default))
+
+
+def _env_action_dim(config: MolmoAct2Config) -> int:
+    action_feature = next((f for f in config.output_features if f.ftype == FeatureType.ACTION), None)
+    if action_feature is None or action_feature.shape is None:
+        return 0
+    return int(action_feature.shape[0])
