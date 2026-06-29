@@ -104,11 +104,7 @@ class MolmoAct2Model(Model):
         """
         super().__init__()
         self.config = config
-
-        # Use add_module so the backbone is properly registered for
-        # _apply() device/dtype handling (e.g. .cuda(), .half()).
-        backbone = MolmoAct2ForConditionalGeneration(config)
-        self.add_module("_backbone", backbone)
+        self.backbone = MolmoAct2ForConditionalGeneration(config)
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load pretrained safetensors weights from a checkpoint directory.
@@ -117,7 +113,7 @@ class MolmoAct2Model(Model):
             checkpoint_location: Path to a directory containing either
                 ``model.safetensors`` or ``model.safetensors.index.json``.
         """
-        _strict_load_safetensors_weights(self._backbone, checkpoint_location)
+        _strict_load_safetensors_weights(self.backbone, checkpoint_location)
 
     @property
     def action_delta_indices(self) -> list | None:
@@ -189,5 +185,5 @@ class MolmoAct2Model(Model):
         }
 
         with torch.no_grad():
-            actions = self._backbone.model.generate_actions_from_inputs(**model_inputs)
+            actions = self.backbone.model.generate_actions_from_inputs(**model_inputs)
         return {"actions": actions}
