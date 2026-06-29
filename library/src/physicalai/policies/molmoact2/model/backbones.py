@@ -44,7 +44,7 @@ from transformers.utils import (
     logging,
 )
 
-from .config import (
+from ..config import (
     MolmoAct2ActionExpertConfig,
     MolmoAct2AdapterConfig,
     MolmoAct2Config,

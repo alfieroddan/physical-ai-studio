@@ -21,9 +21,9 @@ from physicalai.data.observation import FeatureType
 from physicalai.policies.base import Model
 
 from .backbones import MolmoAct2ForConditionalGeneration
-from .config import MolmoAct2Config
-from .processors.image import MolmoAct2ImageProcessor
-from .processors.video import MolmoAct2VideoProcessor
+from .image import MolmoAct2ImageProcessor
+from .video import MolmoAct2VideoProcessor
+from ..config import MolmoAct2Config
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
@@ -103,6 +103,9 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
             max_fps=int(video_cfg.max_fps),
             sampling_fps=video_cfg.sampling_fps,
         )
+        self.image_use_col_tokens = bool(processor_config.image_use_col_tokens)
+        self.use_single_crop_col_tokens = processor_config.use_single_crop_col_tokens
+        self.use_single_crop_start_token = bool(processor_config.use_single_crop_start_token)
 
     def _default_action_dim_is_pad(self, *, batch_size: int, device: torch.device) -> torch.Tensor:
         action_dim_is_pad = torch.ones((batch_size, self.max_action_dim), dtype=torch.bool, device=device)
@@ -115,11 +118,146 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         if value is not None and not torch.is_tensor(value):
             raise TypeError(f"MolmoAct2 torch frontend expected tensor for '{name}', got {type(value)}")
 
+    @staticmethod
+    def _as_int_or_none(value: int | torch.Tensor | None, name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if torch.is_tensor(value):
+            if value.ndim == 0:
+                return int(value.item())
+            if value.ndim == 1 and int(value.numel()) == 1:
+                return int(value.reshape(()).item())
+        raise TypeError(f"MolmoAct2 torch frontend expected int-like value for '{name}', got {type(value)}")
+
+    def _image_token_ids_for_grid(self, grid: torch.Tensor) -> list[int]:
+        if grid.ndim != 1 or int(grid.numel()) != 4:
+            raise ValueError(f"Expected image grid shape (4,), got {tuple(grid.shape)}")
+
+        if self.config.image_patch_id is None or self.config.image_start_token_id is None or self.config.image_end_token_id is None:
+            raise ValueError("MolmoAct2 config must define image_patch_id/image_start_token_id/image_end_token_id.")
+
+        image_patch_id = int(self.config.image_patch_id)
+        image_start_token_id = int(self.config.image_start_token_id)
+        image_end_token_id = int(self.config.image_end_token_id)
+        image_col_id = None if self.config.image_col_id is None else int(self.config.image_col_id)
+        low_res_start_id = (
+            int(self.config.low_res_image_start_token_id)
+            if self.config.low_res_image_start_token_id is not None
+            else image_start_token_id
+        )
+
+        resized_h, resized_w, height, width = [int(x) for x in grid.tolist()]
+
+        def make_rows(num_rows: int, num_cols: int, *, use_col: bool) -> list[int]:
+            row = [image_patch_id] * int(num_cols)
+            if use_col and image_col_id is not None:
+                row = row + [image_col_id]
+            return row * int(num_rows)
+
+        use_single_crop_col_tokens = (
+            self.image_use_col_tokens if self.use_single_crop_col_tokens is None else bool(self.use_single_crop_col_tokens)
+        )
+
+        if height == 0 or width == 0:
+            return [image_start_token_id] + make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens) + [
+                image_end_token_id,
+            ]
+
+        high_res = [image_start_token_id] + make_rows(height, width, use_col=self.image_use_col_tokens) + [
+            image_end_token_id,
+        ]
+        low_start = low_res_start_id if self.use_single_crop_start_token else image_start_token_id
+        low_res = [low_start] + make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens) + [image_end_token_id]
+        return low_res + high_res
+
+    def _build_token_type_ids(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor | None:
+        image_token_ids = [
+            self.config.image_patch_id,
+            self.config.image_col_id,
+            self.config.image_start_token_id,
+            self.config.low_res_image_start_token_id,
+            self.config.frame_start_token_id,
+            self.config.image_end_token_id,
+            self.config.frame_end_token_id,
+            self.config.image_low_res_id,
+        ]
+        image_token_ids = [int(x) for x in image_token_ids if x is not None]
+        if not image_token_ids:
+            return None
+
+        token_set = torch.as_tensor(image_token_ids, device=input_ids.device, dtype=input_ids.dtype)
+        token_type_ids = (input_ids.unsqueeze(-1) == token_set.view(1, 1, -1)).any(dim=-1).to(dtype=torch.long)
+        token_type_ids = token_type_ids * attention_mask.to(dtype=torch.long)
+        return token_type_ids
+
+    def _expand_image_placeholders(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        image_grids: torch.Tensor,
+        image_placeholder_token_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if int(image_grids.shape[0]) == 0:
+            return input_ids, attention_mask, self._build_token_type_ids(input_ids, attention_mask)
+
+        pad_values = input_ids[attention_mask == 0]
+        pad_token_id = int(pad_values[0].item()) if int(pad_values.numel()) > 0 else 0
+
+        expanded_per_example: list[list[int]] = []
+        grid_idx = 0
+        batch_size = int(input_ids.shape[0])
+
+        for b_idx in range(batch_size):
+            valid_ids = input_ids[b_idx][attention_mask[b_idx].to(dtype=torch.bool)]
+            expanded_ids: list[int] = []
+            for token in valid_ids.tolist():
+                token_int = int(token)
+                if token_int == image_placeholder_token_id:
+                    if grid_idx >= int(image_grids.shape[0]):
+                        raise ValueError(
+                            "Not enough image grids to expand all <|image|> placeholders in input_ids.",
+                        )
+                    expanded_ids.extend(self._image_token_ids_for_grid(image_grids[grid_idx]))
+                    grid_idx += 1
+                else:
+                    expanded_ids.append(token_int)
+            expanded_per_example.append(expanded_ids)
+
+        if grid_idx != int(image_grids.shape[0]):
+            raise ValueError(
+                "Unconsumed image grids after placeholder expansion. "
+                f"consumed={grid_idx}, total={int(image_grids.shape[0])}",
+            )
+
+        max_len = max((len(tokens) for tokens in expanded_per_example), default=0)
+        max_len = max(max_len, 1)
+        out_ids = torch.full(
+            (batch_size, max_len),
+            fill_value=pad_token_id,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        out_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
+
+        for b_idx, tokens in enumerate(expanded_per_example):
+            if not tokens:
+                continue
+            token_tensor = torch.as_tensor(tokens, dtype=input_ids.dtype, device=input_ids.device)
+            out_ids[b_idx, : token_tensor.numel()] = token_tensor
+            out_mask[b_idx, : token_tensor.numel()] = 1
+
+        token_type_ids = self._build_token_type_ids(out_ids, out_mask)
+        return out_ids, out_mask, token_type_ids
+
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         token_type_ids: torch.Tensor | None = None,
+        image_placeholder_token_id: int | torch.Tensor | None = None,
         images_bchw: torch.Tensor | None = None,
         videos_btchw: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
@@ -145,10 +283,7 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         self._ensure_tensor_or_none("video_token_pooling", video_token_pooling)
         self._ensure_tensor_or_none("video_grids", video_grids)
         self._ensure_tensor_or_none("action_dim_is_pad", action_dim_is_pad)
-        if int(input_ids.shape[1]) > self.max_sequence_length:
-            raise ValueError(
-                f"MolmoAct2 sequence length {int(input_ids.shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
-            )
+        image_placeholder_token_id_int = self._as_int_or_none(image_placeholder_token_id, "image_placeholder_token_id")
 
         if pixel_values is None and images_bchw is not None:
             image_out = self.image_processor(images_bchw, return_tensors="pt")
@@ -165,6 +300,20 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
 
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+
+        if image_grids is not None and image_placeholder_token_id_int is not None:
+            input_ids, attention_mask, rebuilt_token_type_ids = self._expand_image_placeholders(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                image_grids=image_grids,
+                image_placeholder_token_id=image_placeholder_token_id_int,
+            )
+            token_type_ids = rebuilt_token_type_ids
+
+        if int(input_ids.shape[1]) > self.max_sequence_length:
+            raise ValueError(
+                f"MolmoAct2 sequence length {int(input_ids.shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
+            )
 
         if action_dim_is_pad is None:
             action_dim_is_pad = self._default_action_dim_is_pad(batch_size=int(input_ids.shape[0]), device=input_ids.device)
@@ -201,6 +350,7 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
             input_ids=batch["input_ids"],
             attention_mask=batch.get("attention_mask"),
             token_type_ids=batch.get("token_type_ids"),
+            image_placeholder_token_id=batch.get("image_placeholder_token_id"),
             images_bchw=batch.get("images_bchw"),
             videos_btchw=batch.get("videos_btchw"),
             pixel_values=batch.get("pixel_values"),
@@ -232,6 +382,7 @@ class MolmoAct2TorchInference(torch.nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         token_type_ids: torch.Tensor | None = None,
+        image_placeholder_token_id: int | torch.Tensor | None = None,
         images_bchw: torch.Tensor | None = None,
         videos_btchw: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
@@ -247,6 +398,7 @@ class MolmoAct2TorchInference(torch.nn.Module):
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
+            image_placeholder_token_id=image_placeholder_token_id,
             images_bchw=images_bchw,
             videos_btchw=videos_btchw,
             pixel_values=pixel_values,
