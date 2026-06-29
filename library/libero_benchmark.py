@@ -52,8 +52,8 @@ output_features = [
 policy = MolmoAct2(
     input_features=input_features,
     output_features=output_features,
-    hf_repo_id_or_pretrained_path="molmo-LIBERO",
-    # hf_repo_id_or_pretrained_path="allenai/MolmoAct2-LIBERO",
+    repo_id="molmo-LIBERO",
+    # repo_id="allenai/MolmoAct2-LIBERO",
     norm_tag="libero",
     n_action_steps=10,
 )

@@ -59,14 +59,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
-        hf_repo_id_or_pretrained_path: str | Path | None = None,
+        repo_id: str | Path | None = None,
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
     ) -> None:
         """Initialize MolmoAct2 policy.
 
-        When ``hf_repo_id_or_pretrained_path`` is provided the config is built
+        When ``repo_id`` is provided the config is built
         from the HuggingFace checkpoint and ``norm_tag`` is required to resolve
         normalisation statistics. Otherwise a fresh config is built from the
         provided features and step counts.
@@ -74,7 +74,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Args:
             input_features: Input features the policy consumes. Required.
             output_features: Output features the policy produces. Required.
-            hf_repo_id_or_pretrained_path: HuggingFace repo ID or local path to
+            repo_id: HuggingFace repo ID or local path to
                 a pretrained checkpoint. When given, weights are loaded during
                 :meth:`_initialize_model`.
             norm_tag: Tag used to select normalisation statistics from
@@ -84,22 +84,22 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         Raises:
             ValueError: If ``input_features`` or ``output_features`` are not
-                provided, or if ``hf_repo_id_or_pretrained_path`` is given
+                provided, or if ``repo_id`` is given
                 without a ``norm_tag``.
         """
         if not input_features or not output_features:
-            raise ValueError("Model requires input and output features.")
+            msg = "Model requires input and output features."
+            raise ValueError(msg)
 
         super().__init__(n_action_steps=n_action_steps)
 
         self.hf_container = None
 
-        if hf_repo_id_or_pretrained_path is not None:
+        if repo_id is not None:
             if not norm_tag:
-                raise ValueError(
-                    "norm_tag is required when loading from HuggingFace to resolve statistics from norm_stats.json."
-                )
-            self.hf_container = load_hf_pretrained_container(hf_repo_id_or_pretrained_path)
+                msg = "norm_tag is required when loading from HuggingFace to resolve statistics from norm_stats.json."
+                raise ValueError(msg)
+            self.hf_container = load_hf_pretrained_container(repo_id)
             self.config = build_config_from_hf_config(
                 self.hf_container.hf_config,
                 norm_stats=self.hf_container.norm_stats,
@@ -123,7 +123,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self.hf_container.checkpoint_location if self.hf_container is not None else None
         )
 
-        self.save_hyperparameters(ignore=["config", "hf_repo_id_or_pretrained_path"])
+        self.save_hyperparameters(ignore=["config", "repo_id"])
 
         self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None

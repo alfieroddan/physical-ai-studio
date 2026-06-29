@@ -35,22 +35,19 @@ from huggingface_hub.errors import RemoteEntryNotFoundError
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
-from .config import MolmoAct2Config
+from .config import MolmoAct2Config, MolmoAct2ProcessorConfig
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 IMAGE_SIZE_DIMS = 2
 
 
-def _ensure_processor_files_downloaded(
+def _ensure_processor_assets_downloaded(
     repo_id: str,
     checkpoint_location: str,
     hub_kwargs: dict[str, object] | None = None,
 ) -> None:
-    """Download custom processor Python files to the checkpoint snapshot directory.
-
-    When loading from HF hub with trust_remote_code=True, transformers needs these files
-    in the model cache directory to load the custom processor and configuration classes.
+    """Download the tokenizer and processor config assets required by the local processor.
 
     Args:
         repo_id: HuggingFace model repository ID.
@@ -58,11 +55,6 @@ def _ensure_processor_files_downloaded(
         hub_kwargs: Optional HuggingFace hub download kwargs.
     """
     processor_files = [
-        "processing_molmoact2.py",
-        "configuration_molmoact2.py",
-        "modeling_molmoact2.py",
-        "image_processing_molmoact2.py",
-        "video_processing_molmoact2.py",
         "processor_config.json",
         "tokenizer_config.json",
         "tokenizer.json",
@@ -407,7 +399,7 @@ def build_config_from_hf_config(
     output_features: list[Feature] | None = None,
     norm_tag: str | None = None,
     checkpoint_path: str | None = None,
-    processor_config: dict[str, Any] | None = None,
+    processor_config: dict[str, Any] | MolmoAct2ProcessorConfig | None = None,
     n_obs_steps: int = 30,
     n_action_steps: int = 30,
     max_action_dim: int = 32,
@@ -519,6 +511,8 @@ def build_config_from_hf_config(
     config_data["norm_tag"] = norm_tag
     config_data["tokenizer_name_or_path"] = checkpoint_path
     config_data["processor_assets_path"] = checkpoint_path
+    if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
+        processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
     config_data["processor_config"] = processor_config
 
     if norm_stats is not None and norm_tag is not None:
@@ -596,9 +590,9 @@ def load_hf_pretrained_container(
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
 
-        # Download custom processor Python files to the snapshot directory
+        # Download the tokenizer and processor config assets into the snapshot directory.
         checkpoint_location_temp = str(Path(weights_file).parent)
-        _ensure_processor_files_downloaded(
+        _ensure_processor_assets_downloaded(
             str(pretrained_name_or_path),
             checkpoint_location_temp,
             hub_kwargs=hub_kwargs,

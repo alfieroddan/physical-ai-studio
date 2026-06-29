@@ -45,7 +45,7 @@ OUTPUT_FEATURES = [SO100_OUTPUT_FEATURES, SO100_OUTPUT_FEATURES, LIBERO_OUTPUT_F
 if __name__ == "__main__":
     for norm_tag, repo_id, inp, out in zip(NORM_TAGS, EXAMPLE_REPO_IDS, INPUT_FEATURES, OUTPUT_FEATURES, strict=False):
         policy = MolmoAct2(
-            hf_repo_id_or_pretrained_path=repo_id, input_features=inp, output_features=out, norm_tag=norm_tag
+            repo_id=repo_id, input_features=inp, output_features=out, norm_tag=norm_tag
         )
         policy.setup("inference")
         print(policy.config)

@@ -57,7 +57,7 @@ def print_resolved_features(label: str, features: list[Feature]) -> None:
 if __name__ == "__main__":
     # Initialize the policy
     policy = MolmoAct2(
-        hf_repo_id_or_pretrained_path="allenai/MolmoAct2-SO100_101",
+        repo_id="allenai/MolmoAct2-SO100_101",
         norm_tag="so100_so101_molmoact2",
         input_features=input_features,
         output_features=output_features,

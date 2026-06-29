@@ -9,6 +9,7 @@ from .config import (
     MolmoAct2ActionExpertConfig,
     MolmoAct2AdapterConfig,
     MolmoAct2Config,
+    MolmoAct2ProcessorConfig,
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "MolmoAct2AdapterConfig",
     "MolmoAct2Config",
     "MolmoAct2Model",
+    "MolmoAct2ProcessorConfig",
     "MolmoAct2TextConfig",
     "MolmoAct2VitConfig",
     "HuggingfacePolicyContainer",

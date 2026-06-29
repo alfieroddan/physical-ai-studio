@@ -32,7 +32,7 @@ output_features = [
 if __name__ == "__main__":
     # Initialize the policy
     policy = MolmoAct2(
-        hf_repo_id_or_pretrained_path="molmo-LIBERO",
+        repo_id="molmo-LIBERO",
         norm_tag="libero",
         input_features=input_features,
         output_features=output_features,

@@ -177,6 +177,89 @@ class MolmoAct2ActionExpertConfig(Config):
 
 
 @dataclass
+class MolmoAct2ImageProcessorConfig(Config):
+    """Image processor configuration for MolmoAct2."""
+
+    auto_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "AutoImageProcessor": "image_processing_molmoact2.MolmoAct2ImageProcessor",
+            "AutoProcessor": "processing_molmoact2.MolmoAct2Processor",
+        },
+    )
+    crop_mode: str = "resize"
+    do_convert_rgb: bool = True
+    image_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    image_processor_type: str = "MolmoAct2ImageProcessor"
+    image_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    max_crops: int = 8
+    overlap_margins: list[int] = field(default_factory=lambda: [4, 4])
+    patch_size: int = 14
+    pooling_size: list[int] = field(default_factory=lambda: [2, 2])
+    resample: int = 2
+    size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
+
+
+@dataclass
+class MolmoAct2VideoProcessorConfig(Config):
+    """Video processor configuration for MolmoAct2."""
+
+    auto_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "AutoProcessor": "processing_molmoact2.MolmoAct2Processor",
+            "AutoVideoProcessor": "video_processing_molmoact2.MolmoAct2VideoProcessor",
+        },
+    )
+    data_format: str = "channels_first"
+    default_to_square: bool = True
+    do_convert_rgb: bool = True
+    do_normalize: bool = True
+    do_rescale: bool = True
+    do_resize: bool = True
+    do_sample_frames: bool = True
+    frame_sample_mode: str = "uniform_last_frame"
+    image_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    image_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    max_fps: float = 2.0
+    num_frames: int = 8
+    patch_size: int = 14
+    pooling_size: list[int] = field(default_factory=lambda: [3, 3])
+    resample: int = 2
+    rescale_factor: float = 1.0 / 255.0
+    return_metadata: bool = False
+    sampling_fps: int = 2
+    size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
+    video_processor_type: str = "MolmoAct2VideoProcessor"
+
+
+@dataclass
+class MolmoAct2ProcessorConfig(Config):
+    """Processor configuration for MolmoAct2."""
+
+    auto_map: dict[str, str] = field(
+        default_factory=lambda: {"AutoProcessor": "processing_molmoact2.MolmoAct2Processor"},
+    )
+    image_processor: MolmoAct2ImageProcessorConfig = field(default_factory=MolmoAct2ImageProcessorConfig)
+    image_use_col_tokens: bool = True
+    processor_class: str = "MolmoAct2Processor"
+    use_frame_special_tokens: bool = True
+    use_single_crop_col_tokens: bool | None = False
+    use_single_crop_start_token: bool = True
+    video_processor: MolmoAct2VideoProcessorConfig = field(default_factory=MolmoAct2VideoProcessorConfig)
+    video_use_col_tokens: bool = False
+    chat_template: str | None = None
+
+    def _coerce_nested_configs(self) -> None:
+        if isinstance(self.image_processor, dict):
+            self.image_processor = MolmoAct2ImageProcessorConfig.from_dict(self.image_processor)
+        if isinstance(self.video_processor, dict):
+            self.video_processor = MolmoAct2VideoProcessorConfig.from_dict(self.video_processor)
+
+    def __post_init__(self) -> None:
+        """Coerce nested processor configs into their typed dataclass forms."""
+        self._coerce_nested_configs()
+
+
+@dataclass
 class MolmoAct2Config(Config, PretrainedConfig):
     """Top-level configuration for MolmoAct2 with split component sub-configs."""
 
@@ -264,7 +347,7 @@ class MolmoAct2Config(Config, PretrainedConfig):
     norm_stats_filename: str = "norm_stats.json"
     tokenizer_name_or_path: str | None = None
     processor_assets_path: str | None = None
-    processor_config: dict[str, Any] | None = None
+    processor_config: MolmoAct2ProcessorConfig | None = None
     initializer_range: float = 0.02
 
     # Runtime options
@@ -336,6 +419,8 @@ class MolmoAct2Config(Config, PretrainedConfig):
             self.text_config = MolmoAct2TextConfig.from_dict(self.text_config)
         if isinstance(self.action_expert_config, dict):
             self.action_expert_config = MolmoAct2ActionExpertConfig.from_dict(self.action_expert_config)
+        if isinstance(self.processor_config, dict):
+            self.processor_config = MolmoAct2ProcessorConfig.from_dict(self.processor_config)
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
