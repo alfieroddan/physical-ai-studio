@@ -16,7 +16,7 @@ import torch
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
-from .common import build_discrete_state_string, build_robot_text, normalize_text, to_numpy_image
+from .common import build_discrete_state_string, build_robot_text, normalize_text
 
 
 class FeatureBatchNormalizer(torch.nn.Module):
@@ -57,7 +57,7 @@ class PreprocessBatchBundle:
 
     state: torch.Tensor
     tasks: list[str]
-    images_by_example: list[list[np.ndarray]]
+    images_by_example: list[list[torch.Tensor]]
 
 
 class StateTaskImageExtractor:
@@ -79,15 +79,33 @@ class StateTaskImageExtractor:
             raise ValueError("MolmoAct2 requires at least one image observation.")
         return sorted(str(key) for key in fallback)
 
-    def _extract_images(self, observation: dict[str, Any], batch_size: int) -> list[list[np.ndarray]]:
-        images_by_example: list[list[np.ndarray]] = [[] for _ in range(batch_size)]
+    @staticmethod
+    def _as_chw_tensor(image: Any) -> torch.Tensor:
+        if not torch.is_tensor(image):
+            raise TypeError(f"Expected torch image tensor in CHW, got {type(image)}")
+        if image.ndim != 3:
+            raise ValueError(f"Expected CHW image item, got shape {tuple(image.shape)}")
+        if image.shape[0] != 3:
+            raise ValueError(f"Expected CHW with 3 channels, got shape {tuple(image.shape)}")
+        return image
+
+    def _extract_images(self, observation: dict[str, Any], batch_size: int) -> list[list[torch.Tensor]]:
+        images_by_example: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
         for key in self._resolve_image_keys(observation):
             value = observation[key]
+            if not torch.is_tensor(value):
+                raise TypeError(f"Expected batched image tensor/ndarray at {key}, got {type(value)}")
+            if getattr(value, "ndim", 0) != 4:
+                raise ValueError(
+                    f"Expected batched images in BCHW format at {key}, got shape {getattr(value, 'shape', None)}"
+                )
+            if int(value.shape[1]) != 3:
+                raise ValueError(f"Expected BCHW with 3 channels at {key}, got shape {tuple(value.shape)}")
             for batch_idx in range(batch_size):
                 item = value
-                if (torch.is_tensor(value) or isinstance(value, np.ndarray)) and getattr(value, "ndim", 0) >= 4:
+                if getattr(value, "ndim", 0) >= 4:
                     item = value[batch_idx]
-                images_by_example[batch_idx].append(to_numpy_image(item))
+                images_by_example[batch_idx].append(self._as_chw_tensor(item))
         return images_by_example
 
     @staticmethod
@@ -145,7 +163,7 @@ class PromptPack:
     """Text prompts and flattened image list for processor input."""
 
     prompt_texts: list[str]
-    flat_images: list[np.ndarray]
+    flat_images: list[torch.Tensor]
 
 
 class RobotPromptEncoder:
@@ -169,7 +187,7 @@ class RobotPromptEncoder:
     def encode(self, bundle: PreprocessBatchBundle) -> PromptPack:
         state_np = bundle.state.detach().cpu().numpy()
         prompt_texts: list[str] = []
-        flat_images: list[np.ndarray] = []
+        flat_images: list[torch.Tensor] = []
 
         for i in range(bundle.state.shape[0]):
             flat_images.extend(bundle.images_by_example[i])

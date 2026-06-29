@@ -81,9 +81,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         bundle = self._extractor_step.extract(normalized_batch)
         prompt_pack = self._prompt_step.encode(bundle)
 
+        image_batch = torch.stack(prompt_pack.flat_images, dim=0) if prompt_pack.flat_images else torch.empty((0, 3, 0, 0))
+
         inputs = self.processor(
             text=prompt_pack.prompt_texts,
-            images=prompt_pack.flat_images,
+            images=image_batch,
             return_tensors="pt",
             padding=True,
         )

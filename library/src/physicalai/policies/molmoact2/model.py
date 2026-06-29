@@ -22,9 +22,247 @@ from physicalai.policies.base import Model
 
 from .backbones import MolmoAct2ForConditionalGeneration
 from .config import MolmoAct2Config
+from .processors.image import MolmoAct2ImageProcessor
+from .processors.video import MolmoAct2VideoProcessor
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+
+
+def _validate_local_pooling_indices(inputs: dict[str, Any]) -> None:
+    if "pixel_values" in inputs and "image_token_pooling" in inputs:
+        pixel_values = inputs["pixel_values"]
+        image_token_pooling = inputs["image_token_pooling"]
+        if torch.is_tensor(pixel_values) and pixel_values.ndim == 3 and torch.is_tensor(image_token_pooling):
+            n_patches = int(pixel_values.shape[1])
+            valid = image_token_pooling >= 0
+            if torch.any(valid):
+                max_idx = int(image_token_pooling[valid].max().item())
+                if max_idx >= n_patches:
+                    raise ValueError(
+                        "image_token_pooling contains out-of-range indices for per-image local patch IDs: "
+                        f"max_idx={max_idx}, n_patches={n_patches}."
+                    )
+
+    if "pixel_values_videos" in inputs and "video_token_pooling" in inputs:
+        pixel_values_videos = inputs["pixel_values_videos"]
+        video_token_pooling = inputs["video_token_pooling"]
+        if (
+            torch.is_tensor(pixel_values_videos)
+            and pixel_values_videos.ndim == 3
+            and torch.is_tensor(video_token_pooling)
+        ):
+            n_frame_patches_total = int(pixel_values_videos.shape[0] * pixel_values_videos.shape[1])
+            valid = video_token_pooling >= 0
+            if torch.any(valid):
+                max_idx = int(video_token_pooling[valid].max().item())
+                if max_idx >= n_frame_patches_total:
+                    raise ValueError(
+                        "video_token_pooling contains out-of-range indices for local frame patch IDs: "
+                        f"max_idx={max_idx}, total_patches={n_frame_patches_total}."
+                    )
+
+
+class MolmoAct2TorchFrontend(torch.nn.Module):
+    """Torch-only frontend that builds model-ready tensors from token and vision inputs."""
+
+    def __init__(self, config: MolmoAct2Config) -> None:
+        super().__init__()
+        self.config = config
+        self.max_sequence_length = _text_max_positions(config)
+        self.max_action_dim = int(config.max_action_dim)
+        self.env_action_dim = _env_action_dim(config)
+
+        processor_config = config.processor_config
+        if processor_config is None:
+            raise ValueError("MolmoAct2Config.processor_config must be set for torch frontend creation.")
+
+        image_cfg = processor_config.image_processor
+        video_cfg = processor_config.video_processor
+
+        self.image_processor = MolmoAct2ImageProcessor(
+            size=image_cfg.size,
+            image_mean=image_cfg.image_mean,
+            image_std=image_cfg.image_std,
+            do_convert_rgb=image_cfg.do_convert_rgb,
+            max_crops=image_cfg.max_crops,
+            overlap_margins=image_cfg.overlap_margins,
+            crop_mode=image_cfg.crop_mode,
+            patch_size=image_cfg.patch_size,
+            pooling_size=image_cfg.pooling_size,
+        )
+        self.video_processor = MolmoAct2VideoProcessor(
+            size=video_cfg.size,
+            image_mean=video_cfg.image_mean,
+            image_std=video_cfg.image_std,
+            do_convert_rgb=video_cfg.do_convert_rgb,
+            patch_size=video_cfg.patch_size,
+            pooling_size=video_cfg.pooling_size,
+            do_sample_frames=video_cfg.do_sample_frames,
+            frame_sample_mode=video_cfg.frame_sample_mode,
+            max_fps=int(video_cfg.max_fps),
+            sampling_fps=video_cfg.sampling_fps,
+        )
+
+    def _default_action_dim_is_pad(self, *, batch_size: int, device: torch.device) -> torch.Tensor:
+        action_dim_is_pad = torch.ones((batch_size, self.max_action_dim), dtype=torch.bool, device=device)
+        if self.env_action_dim > 0:
+            action_dim_is_pad[:, : self.env_action_dim] = False
+        return action_dim_is_pad
+
+    @staticmethod
+    def _ensure_tensor_or_none(name: str, value: torch.Tensor | None) -> None:
+        if value is not None and not torch.is_tensor(value):
+            raise TypeError(f"MolmoAct2 torch frontend expected tensor for '{name}', got {type(value)}")
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
+        images_bchw: torch.Tensor | None = None,
+        videos_btchw: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_token_pooling: torch.Tensor | None = None,
+        image_grids: torch.Tensor | None = None,
+        image_num_crops: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        video_token_pooling: torch.Tensor | None = None,
+        video_grids: torch.Tensor | None = None,
+        action_dim_is_pad: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if not torch.is_tensor(input_ids):
+            raise ValueError("MolmoAct2 torch frontend expects tensor input_ids.")
+        self._ensure_tensor_or_none("attention_mask", attention_mask)
+        self._ensure_tensor_or_none("token_type_ids", token_type_ids)
+        self._ensure_tensor_or_none("images_bchw", images_bchw)
+        self._ensure_tensor_or_none("videos_btchw", videos_btchw)
+        self._ensure_tensor_or_none("pixel_values", pixel_values)
+        self._ensure_tensor_or_none("image_token_pooling", image_token_pooling)
+        self._ensure_tensor_or_none("image_grids", image_grids)
+        self._ensure_tensor_or_none("image_num_crops", image_num_crops)
+        self._ensure_tensor_or_none("pixel_values_videos", pixel_values_videos)
+        self._ensure_tensor_or_none("video_token_pooling", video_token_pooling)
+        self._ensure_tensor_or_none("video_grids", video_grids)
+        self._ensure_tensor_or_none("action_dim_is_pad", action_dim_is_pad)
+        if int(input_ids.shape[1]) > self.max_sequence_length:
+            raise ValueError(
+                f"MolmoAct2 sequence length {int(input_ids.shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
+            )
+
+        if pixel_values is None and images_bchw is not None:
+            image_out = self.image_processor(images_bchw, return_tensors="pt")
+            pixel_values = image_out["pixel_values"]
+            image_token_pooling = image_out["image_token_pooling"]
+            image_grids = image_out["image_grids"]
+            image_num_crops = image_out["image_num_crops"]
+
+        if pixel_values_videos is None and videos_btchw is not None:
+            video_out = self.video_processor(videos_btchw, return_tensors="pt", return_metadata=False)
+            pixel_values_videos = video_out["pixel_values_videos"]
+            video_token_pooling = video_out["video_token_pooling"]
+            video_grids = video_out["video_grids"]
+
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+
+        if action_dim_is_pad is None:
+            action_dim_is_pad = self._default_action_dim_is_pad(batch_size=int(input_ids.shape[0]), device=input_ids.device)
+        else:
+            action_dim_is_pad = action_dim_is_pad.to(dtype=torch.bool)
+
+        model_inputs: dict[str, torch.Tensor] = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "action_dim_is_pad": action_dim_is_pad,
+        }
+        if token_type_ids is not None:
+            model_inputs["token_type_ids"] = token_type_ids
+        if pixel_values is not None:
+            model_inputs["pixel_values"] = pixel_values
+        if image_token_pooling is not None:
+            model_inputs["image_token_pooling"] = image_token_pooling
+        if image_grids is not None:
+            model_inputs["image_grids"] = image_grids
+        if image_num_crops is not None:
+            model_inputs["image_num_crops"] = image_num_crops
+        if pixel_values_videos is not None:
+            model_inputs["pixel_values_videos"] = pixel_values_videos
+        if video_token_pooling is not None:
+            model_inputs["video_token_pooling"] = video_token_pooling
+        if video_grids is not None:
+            model_inputs["video_grids"] = video_grids
+
+        _validate_local_pooling_indices(model_inputs)
+        return model_inputs
+
+    def from_batch(self, batch: dict[str, Any], *, target_device: torch.device | None = None) -> dict[str, torch.Tensor]:
+        model_inputs = self.forward(
+            input_ids=batch["input_ids"],
+            attention_mask=batch.get("attention_mask"),
+            token_type_ids=batch.get("token_type_ids"),
+            images_bchw=batch.get("images_bchw"),
+            videos_btchw=batch.get("videos_btchw"),
+            pixel_values=batch.get("pixel_values"),
+            image_token_pooling=batch.get("image_token_pooling"),
+            image_grids=batch.get("image_grids"),
+            image_num_crops=batch.get("image_num_crops"),
+            pixel_values_videos=batch.get("pixel_values_videos"),
+            video_token_pooling=batch.get("video_token_pooling"),
+            video_grids=batch.get("video_grids"),
+            action_dim_is_pad=batch.get("action_dim_is_pad"),
+        )
+        if target_device is not None:
+            for key, value in list(model_inputs.items()):
+                if torch.is_tensor(value):
+                    model_inputs[key] = value.to(device=target_device)
+        return model_inputs
+
+
+class MolmoAct2TorchInference(torch.nn.Module):
+    """Single torch module boundary: frontend + model action generation."""
+
+    def __init__(self, frontend: MolmoAct2TorchFrontend, backbone: MolmoAct2ForConditionalGeneration) -> None:
+        super().__init__()
+        self.frontend = frontend
+        self.backbone = backbone
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
+        images_bchw: torch.Tensor | None = None,
+        videos_btchw: torch.Tensor | None = None,
+        pixel_values: torch.Tensor | None = None,
+        image_token_pooling: torch.Tensor | None = None,
+        image_grids: torch.Tensor | None = None,
+        image_num_crops: torch.Tensor | None = None,
+        pixel_values_videos: torch.Tensor | None = None,
+        video_token_pooling: torch.Tensor | None = None,
+        video_grids: torch.Tensor | None = None,
+        action_dim_is_pad: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        model_inputs = self.frontend(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            images_bchw=images_bchw,
+            videos_btchw=videos_btchw,
+            pixel_values=pixel_values,
+            image_token_pooling=image_token_pooling,
+            image_grids=image_grids,
+            image_num_crops=image_num_crops,
+            pixel_values_videos=pixel_values_videos,
+            video_token_pooling=video_token_pooling,
+            video_grids=video_grids,
+            action_dim_is_pad=action_dim_is_pad,
+        )
+        return self.backbone.model.generate_actions_from_inputs(**model_inputs)
+
+    def from_batch(self, batch: dict[str, Any], *, target_device: torch.device | None = None) -> torch.Tensor:
+        model_inputs = self.frontend.from_batch(batch, target_device=target_device)
+        return self.backbone.model.generate_actions_from_inputs(**model_inputs)
 
 
 def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
@@ -106,9 +344,8 @@ class MolmoAct2Model(Model):
         super().__init__()
         self.config = config
         self.backbone = MolmoAct2ForConditionalGeneration(config)
-        self.max_sequence_length = _text_max_positions(config)
-        self.max_action_dim = int(config.max_action_dim)
-        self.env_action_dim = _env_action_dim(config)
+        self.frontend = MolmoAct2TorchFrontend(config)
+        self.torch_inference = MolmoAct2TorchInference(self.frontend, self.backbone)
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load pretrained safetensors weights from a checkpoint directory.
@@ -160,46 +397,6 @@ class MolmoAct2Model(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    @staticmethod
-    def _validate_local_pooling_indices(inputs: dict[str, Any]) -> None:
-        if "pixel_values" in inputs and "image_token_pooling" in inputs:
-            pixel_values = inputs["pixel_values"]
-            image_token_pooling = inputs["image_token_pooling"]
-            if torch.is_tensor(pixel_values) and pixel_values.ndim == 3 and torch.is_tensor(image_token_pooling):
-                n_patches = int(pixel_values.shape[1])
-                valid = image_token_pooling >= 0
-                if torch.any(valid):
-                    max_idx = int(image_token_pooling[valid].max().item())
-                    if max_idx >= n_patches:
-                        raise ValueError(
-                            "image_token_pooling contains out-of-range indices for per-image local patch IDs: "
-                            f"max_idx={max_idx}, n_patches={n_patches}."
-                        )
-
-        if "pixel_values_videos" in inputs and "video_token_pooling" in inputs:
-            pixel_values_videos = inputs["pixel_values_videos"]
-            video_token_pooling = inputs["video_token_pooling"]
-            if (
-                torch.is_tensor(pixel_values_videos)
-                and pixel_values_videos.ndim == 3
-                and torch.is_tensor(video_token_pooling)
-            ):
-                n_frame_patches_total = int(pixel_values_videos.shape[0] * pixel_values_videos.shape[1])
-                valid = video_token_pooling >= 0
-                if torch.any(valid):
-                    max_idx = int(video_token_pooling[valid].max().item())
-                    if max_idx >= n_frame_patches_total:
-                        raise ValueError(
-                            "video_token_pooling contains out-of-range indices for local frame patch IDs: "
-                            f"max_idx={max_idx}, total_patches={n_frame_patches_total}."
-                        )
-
-    def _default_action_dim_is_pad(self, *, batch_size: int, device: torch.device) -> torch.Tensor:
-        action_dim_is_pad = torch.ones((batch_size, self.max_action_dim), dtype=torch.bool, device=device)
-        if self.env_action_dim > 0:
-            action_dim_is_pad[:, : self.env_action_dim] = False
-        return action_dim_is_pad
-
     def prepare_graph_inputs(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Prepare tensor-only model inputs from processor output.
 
@@ -207,46 +404,13 @@ class MolmoAct2Model(Model):
         sequence length validation, local pooling-index validation, action mask
         defaults, and tensor device placement.
         """
-        if "input_ids" not in batch or not torch.is_tensor(batch["input_ids"]):
-            raise ValueError("MolmoAct2 model expects tensor input_ids from preprocessor output.")
-
-        if int(batch["input_ids"].shape[1]) > self.max_sequence_length:
-            raise ValueError(
-                f"MolmoAct2 sequence length {int(batch['input_ids'].shape[1])} exceeds max_sequence_length={self.max_sequence_length}.",
-            )
-
-        self._validate_local_pooling_indices(batch)
-
-        batch_size = int(batch["input_ids"].shape[0])
-        action_dim_is_pad = batch.get("action_dim_is_pad")
-        if not torch.is_tensor(action_dim_is_pad):
-            action_dim_is_pad = self._default_action_dim_is_pad(batch_size=batch_size, device=batch["input_ids"].device)
-        else:
-            action_dim_is_pad = action_dim_is_pad.to(dtype=torch.bool)
-
-        model_inputs: dict[str, Any] = {
-            key: batch[key]
-            for key in (
-                "input_ids",
-                "pixel_values",
-                "image_token_pooling",
-                "image_grids",
-                "image_num_crops",
-                "pixel_values_videos",
-                "video_token_pooling",
-                "video_grids",
-                "attention_mask",
-                "token_type_ids",
-            )
-            if key in batch and batch[key] is not None
-        }
-        model_inputs["action_dim_is_pad"] = action_dim_is_pad
-
         target_device = next(self.backbone.parameters()).device
-        for key, value in list(model_inputs.items()):
-            if torch.is_tensor(value):
-                model_inputs[key] = value.to(device=target_device)
-        return model_inputs
+        return self.frontend.from_batch(batch, target_device=target_device)
+
+    @property
+    def exported_torch_module(self) -> MolmoAct2TorchInference:
+        """Single torch inference boundary for export and runtime parity."""
+        return self.torch_inference
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> dict[str, Tensor]:
         """Convert a processed batch into a predicted action chunk.
@@ -258,10 +422,11 @@ class MolmoAct2Model(Model):
             Dictionary with an ``"actions"`` key containing the predicted
             action tensor of shape ``(batch_size, action_horizon, action_dim)``.
         """
-        model_inputs = self.prepare_graph_inputs(batch)
-
         with torch.no_grad():
-            actions = self.backbone.model.generate_actions_from_inputs(**model_inputs)
+            actions = self.torch_inference.from_batch(
+                batch,
+                target_device=next(self.backbone.parameters()).device,
+            )
         return {"actions": actions}
 
 

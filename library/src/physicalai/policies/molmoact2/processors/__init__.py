@@ -6,7 +6,7 @@
 """MolmoAct2 processor package with composable preprocessing components."""
 
 from .factory import make_molmoact2_preprocessors
-from .image import MolmoAct2ImageProcessor, MolmoAct2ImagesKwargs
+from .image import MolmoAct2ImageProcessor, MolmoAct2ImagesOptions
 from .loader import load_molmoact2_processor
 from .postprocessor import MolmoAct2Postprocessor
 from .preprocessor import MolmoAct2Preprocessor
@@ -20,7 +20,7 @@ from .preprocess_steps import (
     StateTaskImageExtractor,
 )
 from .processor import MolmoAct2Processor, MolmoAct2ProcessorOptions
-from .video import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorKwargs
+from .video import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorOptions
 
 __all__ = [
     "ActionExtractor",
@@ -31,9 +31,9 @@ __all__ = [
     "MolmoAct2Preprocessor",
     "MolmoAct2Processor",
     "MolmoAct2ProcessorOptions",
-    "MolmoAct2ImagesKwargs",
+    "MolmoAct2ImagesOptions",
     "MolmoAct2VideoProcessor",
-    "MolmoAct2VideoProcessorKwargs",
+    "MolmoAct2VideoProcessorOptions",
     "PreprocessBatchBundle",
     "PromptPack",
     "RobotPromptEncoder",
