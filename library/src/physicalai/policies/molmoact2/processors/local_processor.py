@@ -1,9 +1,9 @@
 # Copyright 2026 The Allen Institute for Artificial Intelligence and The HuggingFace Inc. team.
-
+#
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Local MolmoAct2 processor that doesn't depend on AutoProcessor or trust_remote_code."""
+"""Local MolmoAct2 processor loader scoped under the processors package."""
 
 from __future__ import annotations
 
@@ -14,26 +14,17 @@ if TYPE_CHECKING:
 
 from transformers import Qwen2Tokenizer
 
-from physicalai.policies.molmoact2.config import MolmoAct2ProcessorConfig
-from physicalai.policies.molmoact2.image_processing_local import MolmoAct2ImageProcessor
-from physicalai.policies.molmoact2.processing_local import MolmoAct2Processor
-from physicalai.policies.molmoact2.video_processing_local import MolmoAct2VideoProcessor
+from ..config import MolmoAct2ProcessorConfig
+from .image_processing_local import MolmoAct2ImageProcessor
+from .processing_local import MolmoAct2Processor
+from .video_processing_local import MolmoAct2VideoProcessor
 
 
 def load_molmoact2_processor_from_pretrained(
     tokenizer_name_or_path: str | Path,
     processor_config: MolmoAct2ProcessorConfig | dict[str, Any] | None = None,
 ) -> MolmoAct2Processor:
-    """Load MolmoAct2 processor from checkpoint tokenizer and processor config data.
-
-    Args:
-        tokenizer_name_or_path: Local checkpoint directory or HF repo id containing the tokenizer vocab.
-        processor_config: Optional pre-loaded processor config dict.
-
-    Returns:
-        Initialized MolmoAct2Processor instance.
-
-    """
+    """Load MolmoAct2 processor from checkpoint tokenizer and processor config data."""
     if processor_config is None:
         processor_config = MolmoAct2ProcessorConfig()
     elif isinstance(processor_config, dict):
@@ -44,7 +35,6 @@ def load_molmoact2_processor_from_pretrained(
         local_files_only=True,
     )
 
-    # Load image processor
     image_processor_config = processor_config.image_processor
     image_processor = MolmoAct2ImageProcessor(
         size=image_processor_config.size,
@@ -58,7 +48,6 @@ def load_molmoact2_processor_from_pretrained(
         pooling_size=image_processor_config.pooling_size,
     )
 
-    # Load video processor
     video_processor_config = processor_config.video_processor
     video_processor = MolmoAct2VideoProcessor(
         size=video_processor_config.size,
@@ -73,7 +62,6 @@ def load_molmoact2_processor_from_pretrained(
         sampling_fps=video_processor_config.sampling_fps,
     )
 
-    # Create processor
     return MolmoAct2Processor(
         image_processor=image_processor,
         video_processor=video_processor,

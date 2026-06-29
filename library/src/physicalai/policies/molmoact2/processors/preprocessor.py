@@ -12,9 +12,9 @@ from typing import Any
 import torch
 
 from physicalai.data.observation import ACTION, FeatureType
-from physicalai.policies.molmoact2.local_processor import load_molmoact2_processor_from_pretrained
 
 from .common import feature_by_type, text_max_positions
+from .local_processor import load_molmoact2_processor_from_pretrained
 from .preprocess_steps import (
     ActionExtractor,
     ActionPadder,
@@ -95,6 +95,38 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             return_tensors="pt",
             padding=True,
         )
+
+        if "pixel_values" in inputs and "image_token_pooling" in inputs:
+            pixel_values = inputs["pixel_values"]
+            image_token_pooling = inputs["image_token_pooling"]
+            if torch.is_tensor(pixel_values) and pixel_values.ndim == 3 and torch.is_tensor(image_token_pooling):
+                n_patches = int(pixel_values.shape[1])
+                valid = image_token_pooling >= 0
+                if torch.any(valid):
+                    max_idx = int(image_token_pooling[valid].max().item())
+                    if max_idx >= n_patches:
+                        raise ValueError(
+                            "image_token_pooling contains out-of-range indices for per-image local patch IDs: "
+                            f"max_idx={max_idx}, n_patches={n_patches}."
+                        )
+
+        if "pixel_values_videos" in inputs and "video_token_pooling" in inputs:
+            pixel_values_videos = inputs["pixel_values_videos"]
+            video_token_pooling = inputs["video_token_pooling"]
+            if (
+                torch.is_tensor(pixel_values_videos)
+                and pixel_values_videos.ndim == 3
+                and torch.is_tensor(video_token_pooling)
+            ):
+                n_frame_patches_total = int(pixel_values_videos.shape[0] * pixel_values_videos.shape[1])
+                valid = video_token_pooling >= 0
+                if torch.any(valid):
+                    max_idx = int(video_token_pooling[valid].max().item())
+                    if max_idx >= n_frame_patches_total:
+                        raise ValueError(
+                            "video_token_pooling contains out-of-range indices for local frame patch IDs: "
+                            f"max_idx={max_idx}, total_patches={n_frame_patches_total}."
+                        )
 
         if int(inputs["input_ids"].shape[1]) > self.max_sequence_length:
             raise ValueError(
