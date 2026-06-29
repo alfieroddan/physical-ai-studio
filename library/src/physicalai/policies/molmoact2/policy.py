@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
+from physicalai.inference.manifest import ComponentSpec
 
-from physicalai.data.observation import IMAGES, TASK, Feature, FeatureType, Observation
+from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
+from physicalai.export.backends import ONNXExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 
 from .config import MolmoAct2Config
@@ -123,11 +125,17 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self.hf_container.checkpoint_location if self.hf_container is not None else None
         )
 
-        self.save_hyperparameters(ignore=["config", "repo_id"])
+        # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
+        # the same pretrained source during inference adapter reload.
+        self.save_hyperparameters(ignore=["config"])
 
         self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
+
+        # Build module tree eagerly so Lightning load_from_checkpoint can restore
+        # state_dict without requiring an explicit setup() call.
+        self._initialize_model()
 
     def _initialize_model(self) -> None:
         """Initialize the model architecture, preprocessors, and pretrained weights.
@@ -155,7 +163,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             stage: Lightning stage identifier (unused; required by the interface).
         """
         del stage
-        self._initialize_model()
+        if self.model is None or self._preprocessor is None or self._postprocessor is None:
+            self._initialize_model()
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -254,7 +263,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
-        if self._model is None:
+        if self.model is None:
             return None
 
         return [
@@ -268,14 +277,87 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         ]
 
     @property
-    def extra_export_args(self) -> dict:
-        """Extra arguments for the export process.
+    def extra_export_args(self) -> dict[str, object]:
+        """Extra backend export args for inference-time pre/post graph components."""
 
-        Returns:
-            An empty dict. Override when backend-specific export parameters
-            (e.g. ONNX, OpenVINO) are required.
-        """
-        return {}
+        def _as_float_list(value: object) -> list[float]:
+            if torch.is_tensor(value):
+                return [float(x) for x in value.detach().cpu().reshape(-1).tolist()]
+            if isinstance(value, (list, tuple)):
+                return [float(x) for x in value]
+            if isinstance(value, (int, float)):
+                return [float(value)]
+            msg = f"Unsupported normalization value type: {type(value)}"
+            raise TypeError(msg)
+
+        state_feature = next((f for f in self.config.input_features if f.ftype == FeatureType.STATE), None)
+        action_feature = next((f for f in self.config.output_features if f.ftype == FeatureType.ACTION), None)
+        visual_features = [f for f in self.config.input_features if f.ftype == FeatureType.VISUAL and f.name]
+
+        state_stats: dict[str, list[float]] | None = None
+        if state_feature is not None and state_feature.normalization_data is not None:
+            state_stats = {
+                "q01": _as_float_list(state_feature.normalization_data.q01),
+                "q99": _as_float_list(state_feature.normalization_data.q99),
+            }
+            if state_feature.normalization_data.mask is not None:
+                state_stats["mask"] = _as_float_list(state_feature.normalization_data.mask)
+
+        action_stats: dict[str, list[float]] | None = None
+        if action_feature is not None and action_feature.normalization_data is not None:
+            action_stats = {
+                "q01": _as_float_list(action_feature.normalization_data.q01),
+                "q99": _as_float_list(action_feature.normalization_data.q99),
+            }
+            if action_feature.normalization_data.mask is not None:
+                action_stats["mask"] = _as_float_list(action_feature.normalization_data.mask)
+
+        image_keys = [feature.name for feature in visual_features if feature.name]
+        env_action_dim = int(action_feature.shape[0]) if action_feature is not None and action_feature.shape else int(
+            self.config.max_action_dim,
+        )
+
+        molmoact2_pre = ComponentSpec.model_validate(
+            {
+                "type": "molmoact2_pre",
+                "tokenizer_name_or_path": str(self.config.tokenizer_name_or_path),
+                "num_state_tokens": int(self.config.num_state_tokens),
+                "setup_type": str(self.config.setup_type or ""),
+                "control_mode": str(self.config.control_mode or ""),
+                "add_setup_tokens": bool(self.config.add_setup_tokens),
+                "add_control_tokens": bool(self.config.add_control_tokens),
+                "state_stats": state_stats,
+                "image_keys": image_keys,
+            },
+        )
+        molmoact2_post = ComponentSpec.model_validate(
+            {
+                "type": "molmoact2_post",
+                "action_key": ACTION,
+                "env_action_dim": env_action_dim,
+                "action_stats": action_stats,
+            },
+        )
+
+        output_names = [feature.name for feature in (self.outputs_schema or [])]
+
+        return {
+            "onnx": ONNXExportParameters(
+                exporter_kwargs={
+                    "output_names": output_names,
+                },
+                preprocessors_specs=[molmoact2_pre],
+                postprocessors_specs=[molmoact2_post],
+                export_tokenizer=False,
+            ),
+            "openvino": OpenVINOExportParameters(
+                outputs=output_names,
+                preprocessors_specs=[molmoact2_pre],
+                postprocessors_specs=[molmoact2_post],
+                export_tokenizer=False,
+            ),
+            "torch": TorchExportParameters(),
+        }
 
     @staticmethod
     def get_supported_export_backends() -> list[str | ExportBackend]:
