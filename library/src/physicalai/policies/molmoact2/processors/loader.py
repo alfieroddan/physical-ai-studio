@@ -15,12 +15,12 @@ if TYPE_CHECKING:
 from transformers import Qwen2Tokenizer
 
 from ..config import MolmoAct2ProcessorConfig
-from .image_processing_local import MolmoAct2ImageProcessor
-from .processing_local import MolmoAct2Processor
-from .video_processing_local import MolmoAct2VideoProcessor
+from .image import MolmoAct2ImageProcessor
+from .processor import MolmoAct2Processor
+from .video import MolmoAct2VideoProcessor
 
 
-def load_molmoact2_processor_from_pretrained(
+def load_molmoact2_processor(
     tokenizer_name_or_path: str | Path,
     processor_config: MolmoAct2ProcessorConfig | dict[str, Any] | None = None,
 ) -> MolmoAct2Processor:

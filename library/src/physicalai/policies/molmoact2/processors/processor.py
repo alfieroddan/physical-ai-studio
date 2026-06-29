@@ -7,16 +7,13 @@
 
 from __future__ import annotations
 
-import numpy as np
-from transformers import AutoTokenizer
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.image_utils import ImageInput
-from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
-from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
-from transformers.video_utils import VideoInput
+from typing import Any, TypedDict
 
-from .image_processing_local import MolmoAct2ImageProcessor, MolmoAct2ImagesKwargs
-from .video_processing_local import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorKwargs
+import numpy as np
+import torch
+
+from .image import MolmoAct2ImageProcessor, MolmoAct2ImagesKwargs
+from .video import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorKwargs
 
 IMAGE_PATCH_TOKEN = "<im_patch>"
 IMAGE_LOW_RES_TOKEN = "<im_low>"
@@ -41,39 +38,21 @@ IMAGE_TOKENS = [
 ]
 
 
-class MolmoAct2ProcessorKwargs(ProcessingKwargs, total=False):
-	images_kwargs: MolmoAct2ImagesKwargs
-	videos_kwargs: MolmoAct2VideoProcessorKwargs
-	_defaults = {
-		"text_kwargs": {
-			"padding": False,
-			"return_mm_token_type_ids": True,
-		},
-		"videos_kwargs": {"return_metadata": True},
-	}
+class MolmoAct2ProcessorOptions(TypedDict, total=False):
+    images_kwargs: MolmoAct2ImagesKwargs
+    videos_kwargs: MolmoAct2VideoProcessorKwargs
+    text_kwargs: dict[str, Any]
+    return_metadata: bool
 
 
-class MolmoAct2Processor(ProcessorMixin):
+class MolmoAct2Processor:
 	"""MolmoAct2 multimodal processor composed from local tokenizer/image/video processors."""
-
-	attributes = ["image_processor", "video_processor", "tokenizer"]
-	optional_attributes = [
-		"chat_template",
-		"image_use_col_tokens",
-		"use_single_crop_col_tokens",
-		"use_single_crop_start_token",
-		"video_use_col_tokens",
-		"use_frame_special_tokens",
-	]
-	image_processor_class = "AutoImageProcessor"
-	video_processor_class = "AutoVideoProcessor"
-	tokenizer_class = "AutoTokenizer"
 
 	def __init__(
 		self,
 		image_processor: MolmoAct2ImageProcessor,
 		video_processor: MolmoAct2VideoProcessor,
-		tokenizer: AutoTokenizer,
+		tokenizer: Any,
 		chat_template: str | None = None,
 		image_use_col_tokens: bool | None = True,
 		use_single_crop_col_tokens: bool | None = None,
@@ -81,12 +60,10 @@ class MolmoAct2Processor(ProcessorMixin):
 		video_use_col_tokens: bool | None = False,
 		use_frame_special_tokens: bool | None = True,
 	) -> None:
-		super().__init__(
-			image_processor,
-			video_processor,
-			tokenizer,
-			chat_template=chat_template,
-		)
+		self.image_processor = image_processor
+		self.video_processor = video_processor
+		self.tokenizer = tokenizer
+		self.chat_template = chat_template
 		self.image_use_col_tokens = image_use_col_tokens
 		self.use_single_crop_col_tokens = use_single_crop_col_tokens
 		self.use_single_crop_start_token = use_single_crop_start_token
@@ -159,11 +136,11 @@ class MolmoAct2Processor(ProcessorMixin):
 
 	def __call__(
 		self,
-		text: TextInput | PreTokenizedInput | list[TextInput] | list[PreTokenizedInput] | None = None,
-		images: ImageInput | None = None,
-		videos: VideoInput | None = None,
-		**kwargs: Unpack[MolmoAct2ProcessorKwargs],
-	) -> BatchFeature:
+		text: str | list[str] | None = None,
+		images: Any = None,
+		videos: Any = None,
+		**kwargs: Any,
+	) -> dict[str, Any]:
 		explicit_return_metadata = "return_metadata" in kwargs or (
 			isinstance(kwargs.get("videos_kwargs"), dict) and "return_metadata" in kwargs["videos_kwargs"]
 		)
@@ -213,10 +190,32 @@ class MolmoAct2Processor(ProcessorMixin):
 		text_inputs["input_ids"] = input_ids.tolist()
 		text_inputs["attention_mask"] = attention_mask.tolist()
 
-		return BatchFeature(
-			data={**text_inputs, **image_inputs, **videos_inputs},
-			tensor_type=return_tensors,
-		)
+		data = {**text_inputs, **image_inputs, **videos_inputs}
+		if return_tensors == "pt":
+			return {key: _to_torch(value) for key, value in data.items()}
+		return data
 
 
-__all__ = ["MolmoAct2Processor", "MolmoAct2ProcessorKwargs"]
+__all__ = ["MolmoAct2Processor", "MolmoAct2ProcessorOptions"]
+
+
+def _to_torch(value: Any) -> Any:
+	if torch.is_tensor(value):
+		return value
+	if isinstance(value, np.ndarray):
+		if value.dtype.kind in {"U", "S", "O"}:
+			return value
+		return torch.from_numpy(value)
+	if isinstance(value, (list, tuple)):
+		if not value:
+			return value
+		first = value[0]
+		if isinstance(first, (str, bytes, dict)):
+			return value
+		if hasattr(first, "__dict__") and not isinstance(first, (int, float, bool, list, tuple, np.ndarray)):
+			return value
+		try:
+			return torch.as_tensor(value)
+		except (TypeError, ValueError):
+			return value
+	return value

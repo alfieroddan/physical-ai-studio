@@ -17,7 +17,7 @@ from transformers.processing_utils import Unpack
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoInput
 
-from .image_processing_local import MolmoAct2ImageProcessor
+from .image import MolmoAct2ImageProcessor
 
 
 @dataclass
