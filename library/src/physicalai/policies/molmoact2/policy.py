@@ -59,8 +59,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
-        repo_id: str | Path | None = None,
-        norm_tag: str | None = None,
+        repo_id: str | Path | None = "allenai/MolmoAct2",
+        norm_tag: str | None = "so100_so101_molmoact2",
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
     ) -> None:
@@ -78,7 +78,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 a pretrained checkpoint. When given, weights are loaded during
                 :meth:`_initialize_model`.
             norm_tag: Tag used to select normalisation statistics from
-                ``norm_stats.json``. Required when loading from HuggingFace.
+                ``norm_stats.json`` from repo_id.
             n_obs_steps: Number of observation steps.
             n_action_steps: Number of action steps.
 
