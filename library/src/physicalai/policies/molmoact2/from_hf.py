@@ -428,13 +428,17 @@ def build_config_from_hf_config(
         "text_config": _hf_component_config(hf_config, "text_config"),
         "action_expert_config": _hf_component_config(hf_config, "action_expert_config"),
     }
-    pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
-        hf_config,
-        norm_stats,
-        norm_tag,
-    )
-    config_data["input_features"] = _resolve_feature_overrides(pretrained_input_features, input_features)
-    config_data["output_features"] = _resolve_feature_overrides(pretrained_output_features, output_features)
+    if norm_tag is not None:
+        pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
+            hf_config,
+            norm_stats,
+            norm_tag,
+        )
+        config_data["input_features"] = _resolve_feature_overrides(pretrained_input_features, input_features)
+        config_data["output_features"] = _resolve_feature_overrides(pretrained_output_features, output_features)
+    else:
+        config_data["input_features"] = list(input_features or [])
+        config_data["output_features"] = list(output_features or [])
 
     top_level_keys = (
         "action_mode",

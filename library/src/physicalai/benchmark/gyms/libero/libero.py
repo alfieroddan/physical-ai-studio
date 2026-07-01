@@ -83,6 +83,7 @@ class LiberoBenchmark(Benchmark):
         self,
         task_suite: str = "libero_10",
         task_ids: list[int] | None = None,
+        camera_name_mapping: dict[str, str] | None = None,
         num_episodes: int = 20,
         max_steps: int | None = None,
         seed: int = 42,
@@ -94,6 +95,7 @@ class LiberoBenchmark(Benchmark):
         """Initialize LIBERO benchmark with task suite configuration."""
         self.task_suite = task_suite
         self.task_ids = task_ids
+        self.camera_name_mapping = camera_name_mapping
         self.observation_height = observation_height
         self.observation_width = observation_width
 
@@ -124,6 +126,7 @@ class LiberoBenchmark(Benchmark):
         return create_libero_gyms(
             task_suites=self.task_suite,
             task_ids=self.task_ids,
+            camera_name_mapping=self.camera_name_mapping,
             observation_height=self.observation_height,
             observation_width=self.observation_width,
         )

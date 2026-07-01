@@ -162,6 +162,7 @@ class LiberoGym(Gym):
         task_suite: str,
         task_id: int,
         camera_names: list[str] | None = None,
+        camera_name_mapping: dict[str, str] | None = None,
         obs_type: str = "pixels_agent_pos",
         observation_height: int = 256,
         observation_width: int = 256,
@@ -176,6 +177,9 @@ class LiberoGym(Gym):
             task_suite: Suite name ("libero_spatial", "libero_object", etc.)
             task_id: Task index within suite (0-based)
             camera_names: Cameras to include ["agentview_image", "robot0_eye_in_hand_image"]
+            camera_name_mapping: Optional remap from default output camera keys
+                (for example ``{"image2": "wrist_image"}``). Keys must refer
+                to keys that already exist after applying CAMERA_NAME_MAPPING.
             obs_type: "pixels_agent_pos" for images + state, "pixels" for images only
             observation_height: Image height in pixels (default: 256)
             observation_width: Image width in pixels (default: 256)
@@ -193,6 +197,7 @@ class LiberoGym(Gym):
         self.task_suite_name = task_suite
         self.task_id = task_id
         self.camera_names = camera_names
+        self.camera_name_mapping = self._validate_camera_name_mapping(camera_name_mapping)
         self.obs_type = obs_type
         self.observation_height = observation_height
         self.observation_width = observation_width
@@ -228,6 +233,35 @@ class LiberoGym(Gym):
             self.task_name,
         )
 
+    def _validate_camera_name_mapping(self, mapping: dict[str, str] | None) -> dict[str, str]:
+        if mapping is None:
+            return {}
+
+        default_output_keys = [self.CAMERA_NAME_MAPPING[camera] for camera in self.camera_names]
+        unknown_keys = sorted(set(mapping) - set(default_output_keys))
+        if unknown_keys:
+            msg = (
+                "camera_name_mapping keys must map from existing output keys. "
+                f"Unknown keys: {unknown_keys}. Existing keys: {sorted(set(default_output_keys))}"
+            )
+            raise ValueError(msg)
+
+        remapped_values = [value for value in mapping.values() if value]
+        if len(remapped_values) != len(mapping):
+            msg = "camera_name_mapping values must be non-empty strings."
+            raise ValueError(msg)
+
+        final_output_keys = [mapping.get(key, key) for key in default_output_keys]
+        if len(final_output_keys) != len(set(final_output_keys)):
+            msg = f"camera_name_mapping creates duplicate output keys: {final_output_keys}"
+            raise ValueError(msg)
+
+        return dict(mapping)
+
+    def _mapped_output_camera_key(self, camera_name: str) -> str:
+        default_key = self.CAMERA_NAME_MAPPING[camera_name]
+        return self.camera_name_mapping.get(default_key, default_key)
+
     def _setup_spaces(self) -> None:
         """Set up observation and action spaces.
 
@@ -236,7 +270,7 @@ class LiberoGym(Gym):
         """
         images: dict[str, spaces.Space] = {}
         for cam in self.camera_names:
-            images[self.CAMERA_NAME_MAPPING[cam]] = spaces.Box(
+            images[self._mapped_output_camera_key(cam)] = spaces.Box(
                 low=0,
                 high=255,
                 shape=(self.observation_height, self.observation_width, 3),
@@ -445,7 +479,7 @@ class LiberoGym(Gym):
             image = raw_obs[camera_name]
             # Rotate 180 degrees (copy to avoid negative strides)
             image = image[::-1, ::-1].copy()
-            images[self.CAMERA_NAME_MAPPING[camera_name]] = image
+            images[self._mapped_output_camera_key(camera_name)] = image
 
         # For pixels-only mode, skip state processing
         if self.obs_type == "pixels":
@@ -527,7 +561,7 @@ class LiberoGym(Gym):
             torch.Size([1, 3, 256, 256])
         """
         if camera_keys is None:
-            camera_keys = list(self.CAMERA_NAME_MAPPING.values())
+            camera_keys = [self._mapped_output_camera_key(camera_name) for camera_name in self.camera_names]
 
         # Extract images from pixels dict (LeRobot convention)
         images = {}
@@ -597,6 +631,7 @@ def create_libero_gyms(
     task_ids: list[int] | None = None,
     *,
     camera_names: list[str] | None = None,
+    camera_name_mapping: dict[str, str] | None = None,
     observation_height: int = 256,
     observation_width: int = 256,
     init_states: bool = True,
@@ -614,6 +649,9 @@ def create_libero_gyms(
         task_suites: Suite name(s) - string for single, list for multi
         task_ids: Specific task IDs to include (None = all tasks)
         camera_names: Camera views to include
+        camera_name_mapping: Optional remap from default output camera keys
+            (for example ``{"image2": "wrist_image"}``). Keys must refer
+            to keys that already exist after applying CAMERA_NAME_MAPPING.
         observation_height: Image height in pixels (default: 256)
         observation_width: Image width in pixels (default: 256)
         init_states: Use predefined init states for reproducibility
@@ -695,6 +733,7 @@ def create_libero_gyms(
                 task_suite=suite_name,
                 task_id=task_id,
                 camera_names=camera_names,
+                camera_name_mapping=camera_name_mapping,
                 observation_height=observation_height,
                 observation_width=observation_width,
                 init_states=init_states,

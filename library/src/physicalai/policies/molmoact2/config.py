@@ -322,6 +322,7 @@ class MolmoAct2Config(Config, PretrainedConfig):
     action_end_token_id: int | None = None
     action_token_start_id: int | None = None
     num_action_tokens: int = 0
+    discrete_action_tokenizer: str = "allenai/MolmoAct2-FAST-Tokenizer"
 
     # Depth tokenization
     depth_output_token_id: int | None = None
@@ -352,6 +353,24 @@ class MolmoAct2Config(Config, PretrainedConfig):
 
     # Runtime options
     compile_model: bool = False
+
+    # Fine-tuning controls
+    freeze_embedding: bool = True
+    train_action_expert_only: bool = False
+    gradient_checkpointing: bool = False
+
+    optimizer_lr: float = 1e-5
+    optimizer_vit_lr: float = 5e-6
+    optimizer_connector_lr: float = 5e-6
+    optimizer_action_expert_lr: float = 5e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_eps: float = 1e-6
+    optimizer_weight_decay: float = 0.0
+    optimizer_grad_clip_norm: float = 1.0
+
+    scheduler_warmup_steps: int = 200
+    scheduler_decay_steps: int | None = 100_000
+    scheduler_decay_lr: float = 1e-6
 
     @property
     def max_action_horizon(self) -> int:
@@ -447,6 +466,9 @@ class MolmoAct2Config(Config, PretrainedConfig):
         if self.max_action_dim < 1:
             msg = f"max_action_dim must be >= 1, got {self.max_action_dim}"
             raise ValueError(msg)
+        if self.train_action_expert_only and self.action_mode != "continuous":
+            msg = "MolmoAct2 train_action_expert_only requires action_mode='continuous'."
+            raise ValueError(msg)
 
     def _validate_flow_matching_settings(self) -> None:
         if self.flow_matching_num_steps < 1:
@@ -466,6 +488,30 @@ class MolmoAct2Config(Config, PretrainedConfig):
             raise ValueError(msg)
         if self.flow_matching_beta_beta <= 0.0:
             msg = f"flow_matching_beta_beta must be > 0.0, got {self.flow_matching_beta_beta}"
+            raise ValueError(msg)
+        if self.scheduler_warmup_steps < 0:
+            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
+            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
+            raise ValueError(msg)
+        if self.optimizer_action_expert_lr <= 0.0:
+            msg = f"optimizer_action_expert_lr must be > 0.0, got {self.optimizer_action_expert_lr}"
+            raise ValueError(msg)
+        if self.optimizer_lr <= 0.0:
+            msg = f"optimizer_lr must be > 0.0, got {self.optimizer_lr}"
+            raise ValueError(msg)
+        if self.optimizer_vit_lr <= 0.0:
+            msg = f"optimizer_vit_lr must be > 0.0, got {self.optimizer_vit_lr}"
+            raise ValueError(msg)
+        if self.optimizer_connector_lr <= 0.0:
+            msg = f"optimizer_connector_lr must be > 0.0, got {self.optimizer_connector_lr}"
+            raise ValueError(msg)
+        if self.optimizer_eps <= 0.0:
+            msg = f"optimizer_eps must be > 0.0, got {self.optimizer_eps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_lr < 0.0:
+            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
             raise ValueError(msg)
 
     def _validate_depth_and_token_settings(self) -> None:
