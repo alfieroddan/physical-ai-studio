@@ -14,7 +14,7 @@ from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
 from physicalai.data.dataset import Dataset
-from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ONNXExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy

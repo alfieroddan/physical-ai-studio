@@ -11,7 +11,6 @@
 import json
 import os
 from typing import Any
-from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -89,30 +88,7 @@ def _masked_loss_mean(
     return (loss * valid).sum() / valid.sum().clamp_min(1.0)
 
 
-def _is_export_or_trace_active() -> bool:
-    compiler = getattr(torch, "compiler", None)
-    is_dynamo_compiling = getattr(compiler, "is_dynamo_compiling", None)
-    if callable(is_dynamo_compiling) and is_dynamo_compiling():
-        return True
-
-    dynamo = getattr(torch, "_dynamo", None)
-    is_compiling = getattr(dynamo, "is_compiling", None)
-    if callable(is_compiling) and is_compiling():
-        return True
-
-    onnx = getattr(torch, "onnx", None)
-    is_in_onnx_export = getattr(onnx, "is_in_onnx_export", None)
-    if callable(is_in_onnx_export) and is_in_onnx_export():
-        return True
-
-    return torch.jit.is_tracing()
-
-
 def _validate_local_pooling_indices(inputs: dict[str, Any]) -> None:
-    # Export backends execute symbolic traces that cannot branch on tensor data.
-    if _is_export_or_trace_active():
-        return
-
     if "pixel_values" in inputs and "image_token_pooling" in inputs:
         pixel_values = inputs["pixel_values"]
         image_token_pooling = inputs["image_token_pooling"]
@@ -498,10 +474,6 @@ class MolmoAct2TorchInference(torch.nn.Module):
         super().__init__()
         self.frontend = frontend
         self.backbone = backbone
-        self._generate_actions: Callable[..., torch.Tensor] = self.backbone.model.generate_actions_from_inputs
-
-    def set_generate_actions_callable(self, fn: Callable[..., torch.Tensor]) -> None:
-        self._generate_actions = fn
 
     def forward(
         self,
@@ -537,12 +509,12 @@ class MolmoAct2TorchInference(torch.nn.Module):
             action_dim_is_pad=action_dim_is_pad,
         )
         model_inputs.pop("labels", None)
-        return self._generate_actions(**model_inputs)
+        return self.backbone.model.generate_actions_from_inputs(**model_inputs)
 
     def from_batch(self, batch: dict[str, Any], *, target_device: torch.device | None = None) -> torch.Tensor:
         model_inputs = self.frontend.from_batch(batch, target_device=target_device)
         model_inputs.pop("labels", None)
-        return self._generate_actions(**model_inputs)
+        return self.backbone.model.generate_actions_from_inputs(**model_inputs)
 
 
 def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
@@ -636,45 +608,6 @@ class MolmoAct2Model(Model):
                 ``model.safetensors`` or ``model.safetensors.index.json``.
         """
         _strict_load_safetensors_weights(self.backbone, checkpoint_location)
-
-    def enable_optimized_inference(self, *, enabled: bool = True) -> None:
-        """Enable non-CUDA-graph inference optimizations.
-
-        Currently this compiles the action-generation callable with
-        ``torch.compile`` in reduce-overhead mode.
-
-        Args:
-            enabled: Whether to apply the optimization.
-        """
-        if not enabled:
-            return
-        compile_fn = getattr(torch, "compile", None)
-        if not callable(compile_fn):
-            return
-
-        dynamo = getattr(torch, "_dynamo", None)
-        dynamo_config = getattr(dynamo, "config", None)
-        if dynamo_config is not None and hasattr(dynamo_config, "capture_scalar_outputs"):
-            dynamo_config.capture_scalar_outputs = True
-
-        compile_attempts: list[dict[str, Any]] = [
-            # Static-shape compile path with cudagraphs disabled.
-            # Cudagraph partition/codegen can fail on this model with non-GPU ops.
-            {"fullgraph": False, "dynamic": False, "options": {"triton.cudagraphs": False}},
-            # Broad fallback for wrappers/builds that reject options.
-            {"fullgraph": False, "mode": "reduce-overhead"},
-        ]
-
-        for attempt in compile_attempts:
-            try:
-                optimized_generate = compile_fn(
-                    self.backbone.model.generate_actions_from_inputs,
-                    **attempt,
-                )
-                self.torch_inference.set_generate_actions_callable(optimized_generate)
-                return
-            except (TypeError, RuntimeError):
-                continue
 
     @property
     def action_delta_indices(self) -> list | None:
@@ -1132,10 +1065,6 @@ class MolmoAct2Model(Model):
             Dictionary with an ``"actions"`` key containing the predicted
             action tensor of shape ``(batch_size, action_horizon, action_dim)``.
         """
-        cudagraph_mark_step_begin = getattr(getattr(torch, "compiler", None), "cudagraph_mark_step_begin", None)
-        if callable(cudagraph_mark_step_begin):
-            cudagraph_mark_step_begin()
-
         with torch.no_grad():
             actions = self.torch_inference.from_batch(
                 batch,
