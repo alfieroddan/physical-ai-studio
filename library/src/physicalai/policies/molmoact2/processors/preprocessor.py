@@ -306,11 +306,16 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         data: dict[str, object] = {
             "input_ids": input_ids.tolist(),
             "attention_mask": attention_mask.tolist(),
+            # Keep this as a Python int so export paths do not need to
+            # specialize a symbolic scalar tensor into a concrete integer.
             "image_placeholder_token_id": image_placeholder_token_id,
             "images_bchw": image_batch,
         }
 
-        packed = {key: _to_torch(value) for key, value in data.items()}
+        packed = {
+            key: (value if key == "image_placeholder_token_id" else _to_torch(value))
+            for key, value in data.items()
+        }
         if build_labels:
             input_ids_tensor = packed["input_ids"]
             attention_mask_tensor = packed["attention_mask"]
@@ -323,11 +328,27 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             )
         return packed
 
+    @staticmethod
+    def _flatten_observation_batch(batch: dict[str, object]) -> dict[str, object]:
+        """Normalize nested observation dictionaries into flat dot-key format."""
+        flattened: dict[str, object] = {}
+        for key, value in batch.items():
+            if isinstance(value, dict):
+                nested_keys: list[str] = []
+                for nested_key, nested_value in value.items():
+                    flat_key = f"{key}.{nested_key}"
+                    flattened[flat_key] = nested_value
+                    nested_keys.append(flat_key)
+                flattened[f"_{key}_keys"] = nested_keys
+            else:
+                flattened[key] = value
+        return flattened
+
     def forward(self, batch: dict[str, object]) -> dict[str, object]:
         """Convert a normalized observation batch into MolmoAct2 training or inference inputs.
 
         Args:
-            batch: Flattened observation dictionary.
+            batch: Observation dictionary, flattened or nested.
 
         Returns:
             Model-ready MolmoAct2 tensors and optional supervision targets.
@@ -340,7 +361,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             msg = f"MolmoAct2Preprocessor.forward expects dict[str, object], got {type(batch)}"
             raise TypeError(msg)
 
-        normalized_batch = self._normalizer_step(batch)
+        normalized_batch = self._normalizer_step(self._flatten_observation_batch(batch))
         bundle = self._extractor_step.extract(normalized_batch)
         prompt_pack = self._prompt_step.encode(bundle)
 

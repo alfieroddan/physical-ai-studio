@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
+from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType, Observation
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
 from .common import build_discrete_state_string, build_robot_text, normalize_text
@@ -67,17 +67,24 @@ class StateTaskImageExtractor:
         self.image_keys = image_keys
 
     def _resolve_image_keys(self, observation: dict[str, Any]) -> list[str]:
-        requested = [f"{IMAGES}.{name}" for name in self.image_keys if f"{IMAGES}.{name}" in observation]
+        candidate_keys = Observation.get_flattened_keys(observation, IMAGES)
+        expanded_keys: list[str] = []
+        for key in candidate_keys:
+            key_str = str(key)
+            if key_str == IMAGES and isinstance(observation.get(IMAGES), dict):
+                expanded_keys.extend([f"{IMAGES}.{nested_key}" for nested_key in observation[IMAGES]])
+            else:
+                expanded_keys.append(key_str)
+
+        requested = [f"{IMAGES}.{name}" for name in self.image_keys if f"{IMAGES}.{name}" in expanded_keys]
         if requested:
             return requested
         fallback = [
-            key
-            for key in observation
-            if str(key).startswith(f"{IMAGES}.") or str(key).startswith("observation.images.")
+            key for key in expanded_keys if key.startswith(f"{IMAGES}.") or key.startswith("observation.images.")
         ]
         if not fallback:
             raise ValueError("MolmoAct2 requires at least one image observation.")
-        return sorted(str(key) for key in fallback)
+        return sorted(fallback)
 
     @staticmethod
     def _as_chw_tensor(image: Any) -> torch.Tensor:

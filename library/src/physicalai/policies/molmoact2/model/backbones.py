@@ -54,6 +54,24 @@ from ..config import (
 
 logger = logging.get_logger(__name__)
 
+def _is_export_or_trace_active() -> bool:
+    compiler = getattr(torch, "compiler", None)
+    is_dynamo_compiling = getattr(compiler, "is_dynamo_compiling", None)
+    if callable(is_dynamo_compiling) and is_dynamo_compiling():
+        return True
+
+    dynamo = getattr(torch, "_dynamo", None)
+    is_compiling = getattr(dynamo, "is_compiling", None)
+    if callable(is_compiling) and is_compiling():
+        return True
+
+    onnx = getattr(torch, "onnx", None)
+    is_in_onnx_export = getattr(onnx, "is_in_onnx_export", None)
+    if callable(is_in_onnx_export) and is_in_onnx_export():
+        return True
+
+    return torch.jit.is_tracing()
+
 
 @dataclass
 class _ActionFlowInputs:
@@ -1981,6 +1999,34 @@ class MolmoAct2RotaryEmbedding(nn.Module):
             self._pos_sin_cache = emb.sin()[None, None, :, :] * self.attention_scaling
             self._pos_cos_cache = emb.cos()[None, None, :, :] * self.attention_scaling
 
+    def _build_rope_cache_for_trace(
+        self,
+        *,
+        device: torch.device,
+        seq_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        inv_freq = self.inv_freq
+        attention_scaling = self.attention_scaling
+        expected = int(self.config.head_dim) // 2
+
+        inv_freq_invalid = (
+            inv_freq is None
+            or inv_freq.device.type == "meta"
+            or inv_freq.device != device
+            or inv_freq.numel() != expected
+        )
+        if inv_freq_invalid:
+            inv_freq, attention_scaling = self.rope_init_fn(self.config, device)
+
+        device_type = device.type if device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            seq = torch.arange(seq_len, device=device, dtype=torch.float)
+            freqs = torch.einsum("i,j->ij", seq, inv_freq.to(device=device, dtype=torch.float))
+            emb = torch.cat((freqs, freqs), dim=-1)
+            pos_sin = emb.sin()[None, None, :, :] * attention_scaling
+            pos_cos = emb.cos()[None, None, :, :] * attention_scaling
+        return pos_cos, pos_sin
+
     @torch.no_grad()
     def prepare_rope_cache(
         self,
@@ -2019,6 +2065,15 @@ class MolmoAct2RotaryEmbedding(nn.Module):
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         seq_len = self._target_cache_seq_len(x, position_ids)
+        if torch.jit.is_tracing():
+            pos_cos, pos_sin = self._build_rope_cache_for_trace(device=x.device, seq_len=seq_len)
+            if position_ids is None:
+                cos = pos_cos[0, 0, : x.shape[-2], :]
+                sin = pos_sin[0, 0, : x.shape[-2], :]
+            else:
+                cos = pos_cos[0, 0][position_ids].view(position_ids.shape + (pos_cos.shape[-1],))
+                sin = pos_sin[0, 0][position_ids].view(position_ids.shape + (pos_sin.shape[-1],))
+            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
         if not self._rope_cache_ready(x.device, seq_len):
             self._refresh_inv_freq_if_needed(x.device)
             self._build_rope_cache(x.device, seq_len)
@@ -2768,6 +2823,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         start_id: int | None,
         end_id: int | None,
     ) -> None:
+        if _is_export_or_trace_active():
+            return
         if start_id is None or end_id is None:
             return
         start_positions = (row_ids == start_id).nonzero(as_tuple=False).flatten().tolist()
@@ -2801,6 +2858,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         eos_id = getattr(self.config, "eos_token_id", None)
         if eos_id is not None:
             mask &= input_ids != int(eos_id)
+        if _is_export_or_trace_active():
+            return mask
         for batch_idx in range(input_ids.shape[0]):
             self._mask_discrete_output_span(
                 input_ids[batch_idx],
@@ -3020,6 +3079,7 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
     ) -> torch.Tensor:
         action_expert = self._require_action_expert()
         if encoder_kv_states is None:
+            tracing = torch.jit.is_tracing()
             outputs = self(
                 input_ids=input_ids,
                 pixel_values=pixel_values,
@@ -3031,9 +3091,16 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
                 video_grids=video_grids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
-                use_cache=True,
+                use_cache=not tracing,
+                collect_layer_kv_states=tracing,
             )
-            encoder_kv_states = self._extract_kv_states(outputs.past_key_values)
+            if tracing:
+                encoder_kv_states = [
+                    (self._cache_to_sequence(key), self._cache_to_sequence(value))
+                    for key, value in outputs.past_key_values
+                ]
+            else:
+                encoder_kv_states = self._extract_kv_states(outputs.past_key_values)
             encoder_attention_mask = self._get_encoder_attention_mask(input_ids, attention_mask)
         elif encoder_attention_mask is None:
             encoder_attention_mask = self._get_encoder_attention_mask(input_ids, attention_mask)
@@ -3056,12 +3123,20 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         device = source_tensor.device
         action_horizon = self._resolve_action_horizon(action_horizon)
         trajectory_dtype = action_expert.action_embed.weight.dtype
-        trajectory = torch.randn(
-            (batch_size, action_horizon, self.config.max_action_dim),
-            device=device,
-            dtype=trajectory_dtype,
-            generator=generator,
-        )
+        trajectory_shape = (batch_size, action_horizon, self.config.max_action_dim)
+        if generator is None or _is_export_or_trace_active():
+            trajectory = torch.randn(
+                trajectory_shape,
+                device=device,
+                dtype=trajectory_dtype,
+            )
+        else:
+            trajectory = torch.randn(
+                trajectory_shape,
+                device=device,
+                dtype=trajectory_dtype,
+                generator=generator,
+            )
         trajectory = self._mask_action_dim_tensor(
             trajectory,
             action_dim_is_pad=action_dim_is_pad,
@@ -3079,10 +3154,13 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         flow_timesteps = [
             torch.full((batch_size,), idx / steps, device=device, dtype=torch.float32) for idx in range(steps)
         ]
-        modulation_cache = action_expert.get_or_prepare_modulation_cache(
-            flow_timesteps,
-            cache_key=(steps, batch_size, device, trajectory.dtype),
-        )
+        if tracing:
+            modulation_cache = action_expert.prepare_modulation_cache(flow_timesteps)
+        else:
+            modulation_cache = action_expert.get_or_prepare_modulation_cache(
+                flow_timesteps,
+                cache_key=(steps, batch_size, device, trajectory.dtype),
+            )
         flow_inputs = _ActionFlowInputs(
             trajectory=trajectory,
             context=action_context,
@@ -3100,6 +3178,32 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         image_grids: torch.Tensor,
         image_num_crops: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if _is_export_or_trace_active():
+            if input_ids.shape[0] != 1:
+                raise ValueError("MolmoAct2 export expects batch size 1 for image batching.")
+
+            n_patches = pixel_values.shape[1]
+            num_pooled_patches_per_image = (image_grids[:, :2].prod(dim=1) + image_grids[:, 2:].prod(dim=1)).to(
+                image_num_crops.dtype
+            )
+            patches_per_image = image_num_crops * n_patches
+            index_offset_per_image = torch.zeros_like(patches_per_image)
+            if patches_per_image.numel() > 1:
+                index_offset_per_image[1:] = patches_per_image.cumsum(dim=0)[:-1]
+
+            per_image_ids = torch.arange(
+                num_pooled_patches_per_image.shape[0],
+                device=image_token_pooling.device,
+                dtype=torch.long,
+            ).repeat_interleave(num_pooled_patches_per_image.to(dtype=torch.long))
+            index_offsets = index_offset_per_image.index_select(0, per_image_ids).unsqueeze(1)
+            adjusted_token_pooling = torch.where(
+                image_token_pooling >= 0,
+                image_token_pooling + index_offsets.to(dtype=image_token_pooling.dtype),
+                image_token_pooling,
+            )
+            return pixel_values.unsqueeze(0), adjusted_token_pooling.unsqueeze(0)
+
         # 1) Count the number of images in each example
         raw_counts = (input_ids == self.config.image_end_token_id).sum(1)  # [N]
         total_images = int(image_grids.size(0))
@@ -3150,12 +3254,14 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
 
         # 2-3) Compute per-example per-image patch offsets
         counts_list = counts.tolist()
-        index_offset_per_example_list = []
+        index_offset_per_example_list: list[torch.Tensor] = []
         offset_img = 0
         for c in counts_list:
             per_img_patches = patches_per_image[offset_img : offset_img + c]  # [c]
             # Offsets: [0, img0_total_patches, img0+img1_total_patches, ...]
-            index_offset = [0] + per_img_patches.cumsum(0).tolist()[:-1]
+            index_offset = torch.zeros_like(per_img_patches)
+            if per_img_patches.numel() > 1:
+                index_offset[1:] = per_img_patches.cumsum(0)[:-1]
             index_offset_per_example_list.append(index_offset)
             offset_img += c
 
@@ -3216,22 +3322,22 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
             # Subsequence of pooled tokens belonging to this example
             cur = image_token_pooling[patch_offset : patch_offset + num_patches].clone()  # [num_patches, dim]
 
-            index_offset_per_example = index_offset_per_example_list[i]  # length = c
+            index_offset_per_example = index_offset_per_example_list[i]  # [c]
             per_img_pooled = num_pooled_patches_per_image[img_offset : img_offset + c]  # [c]
 
-            assert len(index_offset_per_example) == per_img_pooled.numel()
+            assert index_offset_per_example.numel() == per_img_pooled.numel()
 
             # Apply per-image offsets to the (ragged) subsequence
             offset = 0
             for j in range(c):
-                index_offset = int(index_offset_per_example[j])
+                index_offset = index_offset_per_example[j]
                 n = int(per_img_pooled[j].item())
                 cur_slice = cur[offset : offset + n]
 
                 # Apply offset across all columns
                 cur[offset : offset + n] = torch.where(
                     cur_slice >= 0,
-                    cur_slice + index_offset,
+                    cur_slice + index_offset.to(cur_slice.dtype),
                     cur_slice,
                 )
                 offset += n
@@ -3254,6 +3360,11 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         video_token_pooling: torch.Tensor,
         video_grids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if _is_export_or_trace_active():
+            if input_ids.shape[0] != 1:
+                raise ValueError("MolmoAct2 export expects batch size 1 for video batching.")
+            return pixel_values_videos.unsqueeze(0), video_token_pooling.unsqueeze(0)
+
         # 1) Count the number of videos in each example
         if self.config.use_frame_special_tokens:
             end_token_id = self.config.frame_end_token_id
@@ -3401,7 +3512,7 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         if images is not None:
             image_features = self.vision_backbone(images, token_pooling).to(x.device)
             is_image_patch = input_ids.reshape(-1) == self.config.image_patch_id
-            if is_image_patch.sum() != len(image_features):
+            if not _is_export_or_trace_active() and is_image_patch.sum() != len(image_features):
                 raise RuntimeError(
                     f"Expected {int(is_image_patch.sum())} image patch embeddings, got {len(image_features)}."
                 )

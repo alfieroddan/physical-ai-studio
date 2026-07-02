@@ -9,16 +9,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch import Tensor
-from physicalai.data.dataset import Dataset
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
 from physicalai.inference.manifest import ComponentSpec
-from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
+from torch import Tensor
 
+from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ONNXExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
+from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 def make_molmoact2_config(
     *,
-    input_features: list[Feature],
-    output_features: list[Feature],
+    input_features: list[Feature] | None,
+    output_features: list[Feature] | None,
     n_obs_steps: int,
     n_action_steps: int,
 ) -> MolmoAct2Config:
@@ -57,34 +57,6 @@ def make_molmoact2_config(
     )
 
 
-def _identity_normalization_for_feature(feature: Feature) -> Feature:
-    if feature.normalization_data is not None or feature.ftype not in {FeatureType.STATE, FeatureType.ACTION}:
-        return feature
-
-    feature_shape = tuple(feature.shape or ())
-    dim = int(feature_shape[0]) if feature_shape else 1
-    return Feature(
-        name=feature.name,
-        ftype=feature.ftype,
-        shape=feature.shape,
-        normalization_data=NormalizationParameters(
-            mean=[0.0] * dim,
-            std=[1.0] * dim,
-            q01=[-1.0] * dim,
-            q99=[1.0] * dim,
-        ),
-    )
-
-
-def attach_identity_normalization(features: list[Feature] | None) -> list[Feature]:
-    """Attach identity-like normalization to state/action features missing stats.
-
-    Returns:
-        Feature list with identity-like normalization attached where needed.
-    """
-    return [_identity_normalization_for_feature(feature) for feature in (features or [])]
-
-
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
@@ -93,94 +65,46 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
         repo_id: str | Path | None = "allenai/MolmoAct2",
-        norm_tag: str | None = "so100_so101_molmoact2",
+        norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
+        torch_compile: bool = False,
     ) -> None:
-        """Initialize MolmoAct2 policy.
-
-        When ``repo_id`` is provided the config is built
-        from the HuggingFace checkpoint and ``norm_tag`` is required to resolve
-        normalisation statistics. Otherwise a fresh config is built from the
-        provided features and step counts.
-
-        Args:
-            input_features: Input features the policy consumes. Required.
-            output_features: Output features the policy produces. Required.
-            repo_id: HuggingFace repo ID or local path to
-                a pretrained checkpoint. When given, weights are loaded during
-                :meth:`_initialize_model`.
-            norm_tag: Tag used to select normalisation statistics from
-                ``norm_stats.json`` from repo_id.
-            n_obs_steps: Number of observation steps.
-            n_action_steps: Number of action steps.
-
-        Raises:
-            ValueError: If ``input_features`` or ``output_features`` are not
-                provided and cannot be resolved from pretrained metadata or the
-                attached dataset.
-        """
         super().__init__(n_action_steps=n_action_steps)
 
+        # check both exist, raise error if not
+        if bool(input_features) != bool(output_features):
+            msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
+            raise ValueError(msg)
+
+        # if pretrained find hf container
         self.hf_container = None
-        self._repo_id = repo_id
-        self._norm_tag = norm_tag
-        self._n_obs_steps = n_obs_steps
-        self._n_action_steps = n_action_steps
-
-        eager_input_features = attach_identity_normalization(input_features)
-        eager_output_features = attach_identity_normalization(output_features)
-
         if repo_id is not None:
             self.hf_container = load_hf_pretrained_container(repo_id)
-
-        self.config = make_molmoact2_config(
-            input_features=eager_input_features,
-            output_features=eager_output_features,
-            n_obs_steps=n_obs_steps,
-            n_action_steps=n_action_steps,
-        )
-
-        can_initialize_eagerly = bool(eager_input_features and eager_output_features)
-        if repo_id is not None and norm_tag is not None:
-            hf_container = self.hf_container
-            if hf_container is None:
+            if self.hf_container is None:
                 msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
                 raise RuntimeError(msg)
+
+        # if self.hf_container exists - we should resolve the config
+        if self.hf_container:
             self.config = build_config_from_hf_config(
-                hf_container.hf_config,
-                norm_stats=hf_container.norm_stats,
-                input_features=eager_input_features or None,
-                output_features=eager_output_features or None,
+                self.hf_container.hf_config,
+                norm_stats=self.hf_container.norm_stats,
+                input_features=input_features,
+                output_features=output_features,
+                checkpoint_path=self.hf_container.checkpoint_location,
+                processor_config=self.hf_container.processor_config,
                 n_obs_steps=n_obs_steps,
                 norm_tag=norm_tag,
                 n_action_steps=n_action_steps,
-                checkpoint_path=hf_container.checkpoint_location,
-                processor_config=hf_container.processor_config,
-            )
-            can_initialize_eagerly = True
-        elif repo_id is not None and can_initialize_eagerly:
-            hf_container = self.hf_container
-            if hf_container is None:
-                msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
-                raise RuntimeError(msg)
-            self.config = build_config_from_hf_config(
-                hf_container.hf_config,
-                norm_stats=hf_container.norm_stats,
-                input_features=eager_input_features,
-                output_features=eager_output_features,
-                n_obs_steps=n_obs_steps,
-                norm_tag=None,
-                n_action_steps=n_action_steps,
-                checkpoint_path=hf_container.checkpoint_location,
-                processor_config=hf_container.processor_config,
             )
         else:
-            can_initialize_eagerly = can_initialize_eagerly and repo_id is None
-
-        if repo_id is None and not can_initialize_eagerly:
-            msg = "Model requires input and output features when repo_id is not provided."
-            raise ValueError(msg)
+            self.config = make_molmoact2_config(
+                input_features=input_features,
+                output_features=output_features,
+                n_obs_steps=n_obs_steps,
+                n_action_steps=n_action_steps,
+            )
 
         self._checkpoint_location: str | None = (
             self.hf_container.checkpoint_location if self.hf_container is not None else None
@@ -193,45 +117,23 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
+        self._torch_compile = bool(torch_compile)
 
-        if can_initialize_eagerly:
-            # Build module tree eagerly so Lightning load_from_checkpoint can restore
-            # state_dict without requiring an explicit setup() call.
+        # eagerly load
+        if (input_features and output_features) or (repo_id and norm_tag):
             self._initialize_model()
-
-    def _attach_features(
-        self,
-        *,
-        input_features: list[Feature],
-        output_features: list[Feature],
-    ) -> None:
-        attached_input_features = attach_identity_normalization(input_features)
-        attached_output_features = attach_identity_normalization(output_features)
-
-        if self.hf_container is not None:
-            self.config = build_config_from_hf_config(
-                self.hf_container.hf_config,
-                norm_stats=self.hf_container.norm_stats,
-                input_features=attached_input_features,
-                output_features=attached_output_features,
-                n_obs_steps=self._n_obs_steps,
-                norm_tag=self._norm_tag,
-                n_action_steps=self._n_action_steps,
-                checkpoint_path=self.hf_container.checkpoint_location,
-                processor_config=self.hf_container.processor_config,
-            )
-            return
-
-        self.config = make_molmoact2_config(
-            input_features=attached_input_features,
-            output_features=attached_output_features,
-            n_obs_steps=self._n_obs_steps,
-            n_action_steps=self._n_action_steps,
-        )
 
     @staticmethod
     def _dataset_features(train_dataset: Dataset) -> tuple[list[Feature], list[Feature]]:
-        return list(train_dataset.observation_features.values()), list(train_dataset.action_features.values())
+        input_features = [
+            MolmoAct2._coerce_dataset_feature(feature)
+            for feature in train_dataset.observation_features.values()
+        ]
+        output_features = [
+            MolmoAct2._coerce_dataset_feature(feature)
+            for feature in train_dataset.action_features.values()
+        ]
+        return input_features, output_features
 
     def _initialize_model(self) -> None:
         """Initialize the model architecture, preprocessors, and pretrained weights.
@@ -243,23 +145,25 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         2. Construct the :class:`MolmoAct2Model` (architecture only, no weights).
         3. Load pretrained weights if a checkpoint path is present in the config.
         """
-        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(
-            config=self.config,
-        )
-
+        # make pre, post and model from config
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
         self.model = MolmoAct2Model(self.config)
 
+        # load pretrained weights if exist
         if self._checkpoint_location is not None:
             self.model.load_pretrained_weights(self._checkpoint_location)
 
+        # parameter setting based on config
         if self.config.freeze_embedding:
             self._freeze_input_embeddings()
         if self.config.train_action_expert_only:
             self._freeze_non_action_expert_parameters()
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
+        if self._torch_compile or self.config.compile_model:
+            self.model.enable_optimized_inference(enabled=True)
 
-    def _backbone(self):
+    def _backbone(self) -> torch.nn.Module:
         if self.model is None:
             msg = "Model is not initialized"
             raise RuntimeError(msg)
@@ -367,17 +271,19 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is not None and self._preprocessor is not None and self._postprocessor is not None:
             return
 
-        datamodule = self.trainer.datamodule  # type: ignore[attr-defined]
-        train_dataset = datamodule.train_dataset
-        if not isinstance(train_dataset, Dataset):
-            msg = f"Expected physicalai Dataset, got {type(train_dataset)}"
-            raise TypeError(msg)
+        if not self.config.input_features or not self.config.output_features:
+            datamodule = self.trainer.datamodule  # type: ignore[attr-defined]
+            train_dataset = datamodule.train_dataset
+            if not isinstance(train_dataset, Dataset):
+                msg = f"Expected physicalai Dataset, got {type(train_dataset)}"
+                raise TypeError(msg)
 
-        input_features, output_features = self._dataset_features(train_dataset)
-        self._attach_features(
-            input_features=input_features,
-            output_features=output_features,
-        )
+            dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
+            if not self.config.input_features:
+                self.config.input_features = dataset_input_features
+            if not self.config.output_features:
+                self.config.output_features = dataset_output_features
+
         if self.model is None or self._preprocessor is None or self._postprocessor is None:
             self._initialize_model()
 
@@ -400,19 +306,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self._preprocessor is None or self._postprocessor is None:
             raise ValueError("Processors are not initialized. Call setup() first.")
 
-        processed_batch = self._preprocessor(batch.to_dict(flatten=True))
+        processed_batch = self._preprocessor(batch.to_dict())
         actions = self.model.predict_action_chunk(processed_batch)
         return self._postprocessor(actions)
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
-        """Forward pass through the policy.
-
-        Args:
-            batch: Observation batch.
-
-        Returns:
-            Predicted action tensor, or a tuple of (loss, metrics) during training.
-        """
         if self.training:
             if self.model is None or self._preprocessor is None:
                 msg = "Model is not initialized"
@@ -433,10 +331,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         return loss
 
     def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, float]]:
-        """Compute validation loss on a batch.
-
-        Delegates to the model's ``compute_val_loss`` without toggling train mode.
-        """
         if self.model is None or self._preprocessor is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
@@ -445,11 +339,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         return self.model.compute_val_loss(processed_batch)
 
     def configure_optimizers(self) -> dict[str, Any]:
-        """Configure MolmoAct2 fine-tuning optimizer and scheduler.
-
-        Uses LeRobot's MolmoAct2 parameter-group learning rates and a cosine
-        decay schedule with linear warmup as the local best-guess preset.
-        """
         optimizer = torch.optim.AdamW(
             self.get_optim_params(),
             lr=self.config.optimizer_lr,
@@ -468,8 +357,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             peak_lr=self.config.optimizer_lr,
             decay_lr=self.config.scheduler_decay_lr,
             num_warmup_steps=self.config.scheduler_warmup_steps,
-            num_decay_steps=num_decay_steps,
-            num_training_steps=num_training_steps,
+            num_decay_steps=int(num_decay_steps),
+            num_training_steps=int(num_training_steps),
         )
 
         return {

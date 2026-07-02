@@ -277,8 +277,8 @@ class MolmoAct2Config(Config, PretrainedConfig):
     n_action_steps: int = 30
 
     # Input / output features
-    input_features: list[Feature] = field(default_factory=list)
-    output_features: list[Feature] = field(default_factory=list)
+    input_features: list[Feature] | None = field(default_factory=list)
+    output_features: list[Feature] | None = field(default_factory=list)
 
     # Norm tag
     norm_tag: str | None = None
