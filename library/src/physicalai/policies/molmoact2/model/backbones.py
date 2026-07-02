@@ -54,26 +54,6 @@ from ..config import (
 
 logger = logging.get_logger(__name__)
 
-def _is_export_or_trace_active() -> bool:
-    # TODO(export): Keep tracing/export checks centralized because scattered
-    # guards make graphability and backend parity harder to reason about.
-    compiler = getattr(torch, "compiler", None)
-    is_dynamo_compiling = getattr(compiler, "is_dynamo_compiling", None)
-    if callable(is_dynamo_compiling) and is_dynamo_compiling():
-        return True
-
-    dynamo = getattr(torch, "_dynamo", None)
-    is_compiling = getattr(dynamo, "is_compiling", None)
-    if callable(is_compiling) and is_compiling():
-        return True
-
-    onnx = getattr(torch, "onnx", None)
-    is_in_onnx_export = getattr(onnx, "is_in_onnx_export", None)
-    if callable(is_in_onnx_export) and is_in_onnx_export():
-        return True
-
-    return torch.jit.is_tracing()
-
 
 @dataclass
 class _ActionFlowInputs:
@@ -2001,34 +1981,6 @@ class MolmoAct2RotaryEmbedding(nn.Module):
             self._pos_sin_cache = emb.sin()[None, None, :, :] * self.attention_scaling
             self._pos_cos_cache = emb.cos()[None, None, :, :] * self.attention_scaling
 
-    def _build_rope_cache_for_trace(
-        self,
-        *,
-        device: torch.device,
-        seq_len: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        inv_freq = self.inv_freq
-        attention_scaling = self.attention_scaling
-        expected = int(self.config.head_dim) // 2
-
-        inv_freq_invalid = (
-            inv_freq is None
-            or inv_freq.device.type == "meta"
-            or inv_freq.device != device
-            or inv_freq.numel() != expected
-        )
-        if inv_freq_invalid:
-            inv_freq, attention_scaling = self.rope_init_fn(self.config, device)
-
-        device_type = device.type if device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
-            seq = torch.arange(seq_len, device=device, dtype=torch.float)
-            freqs = torch.einsum("i,j->ij", seq, inv_freq.to(device=device, dtype=torch.float))
-            emb = torch.cat((freqs, freqs), dim=-1)
-            pos_sin = emb.sin()[None, None, :, :] * attention_scaling
-            pos_cos = emb.cos()[None, None, :, :] * attention_scaling
-        return pos_cos, pos_sin
-
     @torch.no_grad()
     def prepare_rope_cache(
         self,
@@ -2067,15 +2019,9 @@ class MolmoAct2RotaryEmbedding(nn.Module):
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         seq_len = self._target_cache_seq_len(x, position_ids)
-        if torch.jit.is_tracing():
-            pos_cos, pos_sin = self._build_rope_cache_for_trace(device=x.device, seq_len=seq_len)
-            if position_ids is None:
-                cos = pos_cos[0, 0, : x.shape[-2], :]
-                sin = pos_sin[0, 0, : x.shape[-2], :]
-            else:
-                cos = pos_cos[0, 0][position_ids].view(position_ids.shape + (pos_cos.shape[-1],))
-                sin = pos_sin[0, 0][position_ids].view(position_ids.shape + (pos_sin.shape[-1],))
-            return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        # TODO(export): RoPE currently relies on mutable cached buffers; if an
+        # export backend cannot lower that stateful path, introduce a dedicated
+        # tensor-only cache builder instead of branching in the hot path.
         if not self._rope_cache_ready(x.device, seq_len):
             self._refresh_inv_freq_if_needed(x.device)
             self._build_rope_cache(x.device, seq_len)
@@ -2572,7 +2518,7 @@ class MolmoAct2TextModel(MolmoAct2PreTrainedModel):
         # TODO(export): DynamicCache is a Python-rich state container with
         # variable lifetime/shape, which is fragile for ONNX/OpenVINO and can
         # trigger graph breaks in compile mode.
-        if use_cache and past_key_values is None and not torch.jit.is_tracing():
+        if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
         if cache_position is None:
@@ -2827,10 +2773,10 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         start_id: int | None,
         end_id: int | None,
     ) -> None:
-        if _is_export_or_trace_active():
-            return
         if start_id is None or end_id is None:
             return
+        # TODO(export): This masking walk uses Python lists and loops over
+        # matched token positions; tensorize it if export backends choke here.
         start_positions = (row_ids == start_id).nonzero(as_tuple=False).flatten().tolist()
         if not start_positions:
             return
@@ -2862,8 +2808,6 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         eos_id = getattr(self.config, "eos_token_id", None)
         if eos_id is not None:
             mask &= input_ids != int(eos_id)
-        if _is_export_or_trace_active():
-            return mask
         for batch_idx in range(input_ids.shape[0]):
             self._mask_discrete_output_span(
                 input_ids[batch_idx],
@@ -3083,9 +3027,10 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
     ) -> torch.Tensor:
         action_expert = self._require_action_expert()
         if encoder_kv_states is None:
-            # TODO(export): Tracing toggles between cache-based and explicit KV
-            # collection, so backends see different control flow/output shapes.
-            tracing = torch.jit.is_tracing()
+            # TODO(export): Generation currently extracts encoder KV states
+            # through cache objects; if export cannot lower that path, add a
+            # dedicated tensor-only KV collection path without reintroducing
+            # runtime trace branches.
             outputs = self(
                 input_ids=input_ids,
                 pixel_values=pixel_values,
@@ -3097,16 +3042,10 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
                 video_grids=video_grids,
                 attention_mask=attention_mask,
                 token_type_ids=token_type_ids,
-                use_cache=not tracing,
-                collect_layer_kv_states=tracing,
+                use_cache=True,
+                collect_layer_kv_states=False,
             )
-            if tracing:
-                encoder_kv_states = [
-                    (self._cache_to_sequence(key), self._cache_to_sequence(value))
-                    for key, value in outputs.past_key_values
-                ]
-            else:
-                encoder_kv_states = self._extract_kv_states(outputs.past_key_values)
+            encoder_kv_states = self._extract_kv_states(outputs.past_key_values)
             encoder_attention_mask = self._get_encoder_attention_mask(input_ids, attention_mask)
         elif encoder_attention_mask is None:
             encoder_attention_mask = self._get_encoder_attention_mask(input_ids, attention_mask)
@@ -3132,7 +3071,7 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         trajectory_shape = (batch_size, action_horizon, self.config.max_action_dim)
         # TODO(export): Stateful RNG with explicit generators is useful for
         # eager determinism but typically export-unfriendly.
-        if generator is None or _is_export_or_trace_active():
+        if generator is None:
             trajectory = torch.randn(
                 trajectory_shape,
                 device=device,
@@ -3164,13 +3103,13 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         flow_timesteps = [
             torch.full((batch_size,), idx / steps, device=device, dtype=torch.float32) for idx in range(steps)
         ]
-        if tracing:
-            modulation_cache = action_expert.prepare_modulation_cache(flow_timesteps)
-        else:
-            modulation_cache = action_expert.get_or_prepare_modulation_cache(
-                flow_timesteps,
-                cache_key=(steps, batch_size, device, trajectory.dtype),
-            )
+        # TODO(export): Modulation caching currently uses Python lists and a
+        # cache key tuple; switch to a tensor-only schedule if export backends
+        # cannot lower this eager path.
+        modulation_cache = action_expert.get_or_prepare_modulation_cache(
+            flow_timesteps,
+            cache_key=(steps, batch_size, device, trajectory.dtype),
+        )
         flow_inputs = _ActionFlowInputs(
             trajectory=trajectory,
             context=action_context,
@@ -3188,35 +3127,6 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         image_grids: torch.Tensor,
         image_num_crops: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if _is_export_or_trace_active():
-            # TODO(export): Export path enforces batch=1 because N>1 uses
-            # ragged, data-dependent loops/token counting that are hard to
-            # lower robustly in ONNX/OpenVINO.
-            if input_ids.shape[0] != 1:
-                raise ValueError("MolmoAct2 export expects batch size 1 for image batching.")
-
-            n_patches = pixel_values.shape[1]
-            num_pooled_patches_per_image = (image_grids[:, :2].prod(dim=1) + image_grids[:, 2:].prod(dim=1)).to(
-                image_num_crops.dtype
-            )
-            patches_per_image = image_num_crops * n_patches
-            index_offset_per_image = torch.zeros_like(patches_per_image)
-            if patches_per_image.numel() > 1:
-                index_offset_per_image[1:] = patches_per_image.cumsum(dim=0)[:-1]
-
-            per_image_ids = torch.arange(
-                num_pooled_patches_per_image.shape[0],
-                device=image_token_pooling.device,
-                dtype=torch.long,
-            ).repeat_interleave(num_pooled_patches_per_image.to(dtype=torch.long))
-            index_offsets = index_offset_per_image.index_select(0, per_image_ids).unsqueeze(1)
-            adjusted_token_pooling = torch.where(
-                image_token_pooling >= 0,
-                image_token_pooling + index_offsets.to(dtype=image_token_pooling.dtype),
-                image_token_pooling,
-            )
-            return pixel_values.unsqueeze(0), adjusted_token_pooling.unsqueeze(0)
-
         # 1) Count the number of images in each example
         raw_counts = (input_ids == self.config.image_end_token_id).sum(1)  # [N]
         total_images = int(image_grids.size(0))
@@ -3376,13 +3286,6 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         video_token_pooling: torch.Tensor,
         video_grids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if _is_export_or_trace_active():
-            # TODO(export): Same as image batching, ragged data-dependent
-            # assembly is restricted to batch=1 for export stability.
-            if input_ids.shape[0] != 1:
-                raise ValueError("MolmoAct2 export expects batch size 1 for video batching.")
-            return pixel_values_videos.unsqueeze(0), video_token_pooling.unsqueeze(0)
-
         # 1) Count the number of videos in each example
         if self.config.use_frame_special_tokens:
             end_token_id = self.config.frame_end_token_id
@@ -3468,6 +3371,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
             device=video_token_pooling.device,
         )
 
+        # TODO(export): Video batching still relies on ragged per-example
+        # slicing and Python loops; tensorize it if export backends fail here.
         # 6) Fill new token_pooling with per-examples slices from video_token_pooling
         patch_offset = 0
         for i in range(N):
@@ -3530,7 +3435,7 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         if images is not None:
             image_features = self.vision_backbone(images, token_pooling).to(x.device)
             is_image_patch = input_ids.reshape(-1) == self.config.image_patch_id
-            if not _is_export_or_trace_active() and is_image_patch.sum() != len(image_features):
+            if is_image_patch.sum() != len(image_features):
                 raise RuntimeError(
                     f"Expected {int(is_image_patch.sum())} image patch embeddings, got {len(image_features)}."
                 )
