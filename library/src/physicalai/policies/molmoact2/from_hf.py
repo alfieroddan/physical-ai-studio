@@ -31,6 +31,7 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
+from transformers import Qwen2Tokenizer
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
@@ -40,6 +41,13 @@ from .config import MolmoAct2Config, MolmoAct2ProcessorConfig
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 IMAGE_SIZE_DIMS = 2
+IMAGE_PROMPT = "<|image|>"
+
+
+def _resolve_image_placeholder_token_id(checkpoint_path: str | Path) -> int | None:
+    tokenizer = Qwen2Tokenizer.from_pretrained(str(checkpoint_path), local_files_only=True)
+    token_id = tokenizer.convert_tokens_to_ids(IMAGE_PROMPT)
+    return int(token_id) if isinstance(token_id, int) else None
 
 
 def _ensure_processor_assets_downloaded(
@@ -515,6 +523,7 @@ def build_config_from_hf_config(
     config_data["norm_tag"] = norm_tag
     config_data["tokenizer_name_or_path"] = checkpoint_path
     config_data["processor_assets_path"] = checkpoint_path
+    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)
     if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
         processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
     config_data["processor_config"] = processor_config

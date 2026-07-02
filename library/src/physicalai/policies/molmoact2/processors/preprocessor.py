@@ -13,7 +13,8 @@ import numpy as np
 import torch
 from transformers import Qwen2Tokenizer
 
-from physicalai.data.observation import ACTION, FeatureType
+from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
+from physicalai.data.observation import ACTION, IMAGES, STATE, FeatureType
 from physicalai.policies.molmoact2.action_tokenizer import UniversalActionProcessor
 
 from .common import feature_by_type
@@ -25,7 +26,6 @@ from .preprocess_steps import (
     StateTaskImageExtractor,
 )
 
-IMAGE_PROMPT = "<|image|>"
 _ACTION_TOKENIZER_BATCH_DIMS = 2
 
 if TYPE_CHECKING:
@@ -70,7 +70,10 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         super().__init__()
         self.config = config
 
-        self.state_feature = feature_by_type(config.input_features, FeatureType.STATE)
+        input_features = list(config.input_features or [])
+        output_features = list(config.output_features or [])
+
+        self.state_feature = feature_by_type(input_features, FeatureType.STATE)
 
         self.num_state_tokens = int(config.num_state_tokens) if int(config.num_state_tokens) > 0 else 256
         self.setup_type = str(config.setup_type or "")
@@ -78,12 +81,12 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self.add_setup_tokens = bool(config.add_setup_tokens)
         self.add_control_tokens = bool(config.add_control_tokens)
         self.image_keys = [
-            feature.name for feature in config.input_features if feature.ftype == FeatureType.VISUAL and feature.name
+            feature.name for feature in input_features if feature.ftype == FeatureType.VISUAL and feature.name
         ]
 
         self._normalizer_step = FeatureBatchNormalizer(
-            input_features=config.input_features,
-            output_features=config.output_features,
+            input_features=input_features,
+            output_features=output_features,
         )
         self._extractor_step = StateTaskImageExtractor(image_keys=self.image_keys)
         self._action_extractor = ActionExtractor()
@@ -98,7 +101,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         self._tokenizer: Qwen2Tokenizer | None = None
         self._action_tokenizer: UniversalActionProcessor | None = None
-        self.image_placeholder_token = IMAGE_PROMPT
         self.action_mode = str(getattr(config, "action_mode", "both"))
         self.discrete_action_tokenizer = str(getattr(config, "discrete_action_tokenizer", "")).strip()
         self._action_start_id: int | None = None
@@ -269,11 +271,44 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         return (out_ids[0], out_mask[0]) if squeeze else (out_ids, out_mask)
 
+    @staticmethod
+    def _pack_images(images_by_example: list[list[torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = len(images_by_example)
+        if batch_size == 0:
+            return torch.empty((0, 0, 3, 0, 0), dtype=torch.float32), torch.empty((0, 0), dtype=torch.bool)
+
+        num_images = len(images_by_example[0])
+        if any(len(example_images) != num_images for example_images in images_by_example):
+            msg = "MolmoAct2 requires a consistent number of images per batch element."
+            raise ValueError(msg)
+
+        if num_images == 0:
+            return torch.empty((0, batch_size, 3, 0, 0), dtype=torch.float32), torch.empty(
+                (0, batch_size),
+                dtype=torch.bool,
+            )
+
+        image_slots: list[torch.Tensor] = []
+        image_masks: list[torch.Tensor] = []
+        for image_idx in range(num_images):
+            slot_images: list[torch.Tensor] = []
+            for batch_idx in range(batch_size):
+                image = images_by_example[batch_idx][image_idx]
+                image = image.to(dtype=torch.float32)
+                if images_by_example[batch_idx][image_idx].dtype == torch.uint8:
+                    image /= 255.0
+                slot_images.append(image)
+            image_slots.append(torch.stack(slot_images, dim=0))
+            image_masks.append(torch.ones(batch_size, dtype=torch.bool, device=image_slots[-1].device))
+
+        return torch.stack(image_slots, dim=0), torch.stack(image_masks, dim=0)
+
     def _tokenize_and_pack(
         self,
         *,
         texts: list[str],
-        image_batch: torch.Tensor,
+        images: torch.Tensor,
+        image_masks: torch.Tensor,
         build_labels: bool = False,
     ) -> dict[str, object]:
         text_inputs = self.tokenizer(texts, padding=True)
@@ -298,27 +333,17 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             pad_token_id,
         )
 
-        image_placeholder_token_id = self.tokenizer.convert_tokens_to_ids(self.image_placeholder_token)
-        if not isinstance(image_placeholder_token_id, int):
-            msg = "MolmoAct2 image placeholder token must map to a single token id."
-            raise TypeError(msg)
-
         data: dict[str, object] = {
-            "input_ids": input_ids.tolist(),
-            "attention_mask": attention_mask.tolist(),
-            # Keep this as a Python int so export paths do not need to
-            # specialize a symbolic scalar tensor into a concrete integer.
-            "image_placeholder_token_id": image_placeholder_token_id,
-            "images_bchw": image_batch,
+            TOKENIZED_PROMPT: input_ids.tolist(),
+            TOKENIZED_PROMPT_MASK: attention_mask.tolist(),
+            IMAGES: images,
+            IMAGE_MASKS: image_masks,
         }
 
-        packed = {
-            key: (value if key == "image_placeholder_token_id" else _to_torch(value))
-            for key, value in data.items()
-        }
+        packed = {key: _to_torch(value) for key, value in data.items()}
         if build_labels:
-            input_ids_tensor = packed["input_ids"]
-            attention_mask_tensor = packed["attention_mask"]
+            input_ids_tensor = packed[TOKENIZED_PROMPT]
+            attention_mask_tensor = packed[TOKENIZED_PROMPT_MASK]
             if not torch.is_tensor(input_ids_tensor) or not torch.is_tensor(attention_mask_tensor):
                 msg = "MolmoAct2 tokenizer outputs must convert to tensors for label construction."
                 raise TypeError(msg)
@@ -328,27 +353,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             )
         return packed
 
-    @staticmethod
-    def _flatten_observation_batch(batch: dict[str, object]) -> dict[str, object]:
-        """Normalize nested observation dictionaries into flat dot-key format."""
-        flattened: dict[str, object] = {}
-        for key, value in batch.items():
-            if isinstance(value, dict):
-                nested_keys: list[str] = []
-                for nested_key, nested_value in value.items():
-                    flat_key = f"{key}.{nested_key}"
-                    flattened[flat_key] = nested_value
-                    nested_keys.append(flat_key)
-                flattened[f"_{key}_keys"] = nested_keys
-            else:
-                flattened[key] = value
-        return flattened
-
     def forward(self, batch: dict[str, object]) -> dict[str, object]:
         """Convert a normalized observation batch into MolmoAct2 training or inference inputs.
 
         Args:
-            batch: Observation dictionary, flattened or nested.
+            batch: Flattened observation dictionary.
 
         Returns:
             Model-ready MolmoAct2 tensors and optional supervision targets.
@@ -361,15 +370,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             msg = f"MolmoAct2Preprocessor.forward expects dict[str, object], got {type(batch)}"
             raise TypeError(msg)
 
-        normalized_batch = self._normalizer_step(self._flatten_observation_batch(batch))
+        normalized_batch = self._normalizer_step(batch)
         bundle = self._extractor_step.extract(normalized_batch)
         prompt_pack = self._prompt_step.encode(bundle)
 
-        image_batch = (
-            torch.stack(prompt_pack.flat_images, dim=0)
-            if prompt_pack.flat_images
-            else torch.empty((0, 3, 0, 0))
-        )
+        images, image_masks = self._pack_images(bundle.images_by_example)
 
         action = self._action_extractor.extract(normalized_batch)
         build_action_labels = action is not None and self.action_mode in {"discrete", "both"}
@@ -386,13 +391,13 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         inputs = self._tokenize_and_pack(
             texts=texts,
-            image_batch=image_batch,
+            images=images,
+            image_masks=image_masks,
             build_labels=build_action_labels,
         )
 
         packed: dict[str, object] = dict(inputs)
-        packed["task"] = bundle.tasks
-        packed["state"] = bundle.state
+        packed[STATE] = bundle.state
 
         if action is not None:
             action_padded, action_horizon_is_pad, action_dim_is_pad = self._action_padder(action)

@@ -96,10 +96,30 @@ class StateTaskImageExtractor:
             raise ValueError(f"Expected CHW with 3 channels, got shape {tuple(image.shape)}")
         return image
 
+    @staticmethod
+    def _resolve_image_value(observation: dict[str, Any], key: str) -> Any:
+        if key in observation:
+            return observation[key]
+
+        if key.startswith(f"{IMAGES}.") and isinstance(observation.get(IMAGES), dict):
+            nested_key = key.removeprefix(f"{IMAGES}.")
+            images = observation[IMAGES]
+            if nested_key in images:
+                return images[nested_key]
+
+        if key.startswith("observation.images.") and isinstance(observation.get("observation.images"), dict):
+            nested_key = key.removeprefix("observation.images.")
+            images = observation["observation.images"]
+            if nested_key in images:
+                return images[nested_key]
+
+        msg = f"MolmoAct2 image key {key!r} was not found in observation batch."
+        raise KeyError(msg)
+
     def _extract_images(self, observation: dict[str, Any], batch_size: int) -> list[list[torch.Tensor]]:
         images_by_example: list[list[torch.Tensor]] = [[] for _ in range(batch_size)]
         for key in self._resolve_image_keys(observation):
-            value = observation[key]
+            value = self._resolve_image_value(observation, key)
             if not torch.is_tensor(value):
                 raise TypeError(f"Expected batched image tensor/ndarray at {key}, got {type(value)}")
             if getattr(value, "ndim", 0) != 4:

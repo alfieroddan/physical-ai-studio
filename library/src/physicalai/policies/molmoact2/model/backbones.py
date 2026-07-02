@@ -55,6 +55,8 @@ from ..config import (
 logger = logging.get_logger(__name__)
 
 def _is_export_or_trace_active() -> bool:
+    # TODO(export): Keep tracing/export checks centralized because scattered
+    # guards make graphability and backend parity harder to reason about.
     compiler = getattr(torch, "compiler", None)
     is_dynamo_compiling = getattr(compiler, "is_dynamo_compiling", None)
     if callable(is_dynamo_compiling) and is_dynamo_compiling():
@@ -2567,7 +2569,9 @@ class MolmoAct2TextModel(MolmoAct2PreTrainedModel):
             input_ids = input_ids * (input_ids != -1).to(input_ids.dtype)
             inputs_embeds = self.wte(input_ids)
 
-        # torch.jit.trace() doesn't support cache objects in the output
+        # TODO(export): DynamicCache is a Python-rich state container with
+        # variable lifetime/shape, which is fragile for ONNX/OpenVINO and can
+        # trigger graph breaks in compile mode.
         if use_cache and past_key_values is None and not torch.jit.is_tracing():
             past_key_values = DynamicCache(config=self.config)
 
@@ -3079,6 +3083,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
     ) -> torch.Tensor:
         action_expert = self._require_action_expert()
         if encoder_kv_states is None:
+            # TODO(export): Tracing toggles between cache-based and explicit KV
+            # collection, so backends see different control flow/output shapes.
             tracing = torch.jit.is_tracing()
             outputs = self(
                 input_ids=input_ids,
@@ -3124,6 +3130,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         action_horizon = self._resolve_action_horizon(action_horizon)
         trajectory_dtype = action_expert.action_embed.weight.dtype
         trajectory_shape = (batch_size, action_horizon, self.config.max_action_dim)
+        # TODO(export): Stateful RNG with explicit generators is useful for
+        # eager determinism but typically export-unfriendly.
         if generator is None or _is_export_or_trace_active():
             trajectory = torch.randn(
                 trajectory_shape,
@@ -3151,6 +3159,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
             device=device,
             dtype=trajectory.dtype,
         )
+        # Dynamic list caveat: Python list construction over runtime `steps`
+        # introduces host-side control flow that is difficult to fuse/lower.
         flow_timesteps = [
             torch.full((batch_size,), idx / steps, device=device, dtype=torch.float32) for idx in range(steps)
         ]
@@ -3179,6 +3189,9 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         image_num_crops: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if _is_export_or_trace_active():
+            # TODO(export): Export path enforces batch=1 because N>1 uses
+            # ragged, data-dependent loops/token counting that are hard to
+            # lower robustly in ONNX/OpenVINO.
             if input_ids.shape[0] != 1:
                 raise ValueError("MolmoAct2 export expects batch size 1 for image batching.")
 
@@ -3252,6 +3265,9 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         # 2-2) Per-image number of patches = (crops per image) * n_patches
         patches_per_image = image_num_crops * n_patches  # [num_images]
 
+        # TODO(export): Ragged packing converts counts to Python lists and
+        # nested loops; this flexibility is not graph-friendly and should be
+        # tensorized for compile/export.
         # 2-3) Compute per-example per-image patch offsets
         counts_list = counts.tolist()
         index_offset_per_example_list: list[torch.Tensor] = []
@@ -3361,6 +3377,8 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
         video_grids: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if _is_export_or_trace_active():
+            # TODO(export): Same as image batching, ragged data-dependent
+            # assembly is restricted to batch=1 for export stability.
             if input_ids.shape[0] != 1:
                 raise ValueError("MolmoAct2 export expects batch size 1 for video batching.")
             return pixel_values_videos.unsqueeze(0), video_token_pooling.unsqueeze(0)

@@ -106,6 +106,8 @@ class MolmoAct2VideoProcessor:
         video_grids: list[list[int]] = []
         metadata: list[VideoMetadata] = []
 
+        # TODO(export): Frame sampling and per-frame preprocessing remain in
+        # Python loops because sampled lengths are data-dependent per video.
         for video in videos:
             frames = _to_video_frames(video)
             should_sample = self.do_sample_frames if do_sample_frames is None else bool(do_sample_frames)
@@ -139,6 +141,8 @@ class MolmoAct2VideoProcessor:
             video_grids.append([len(sampled), pooled_h, pooled_w])
             metadata.append(VideoMetadata(timestamps=np.asarray(frame_indices, dtype=np.float32)))
 
+        # TODO(export): Final video patch/pooling tensors are built via ragged
+        # list concatenation because each sample can yield different frame counts.
         pixel_values_videos = (
             torch.cat(video_patch_batches, dim=0)
             if video_patch_batches

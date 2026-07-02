@@ -245,6 +245,8 @@ def _image_to_patches_and_grids(
 
 
 def _to_hwc_uint8(images_bchw: torch.Tensor) -> list[np.ndarray]:
+    # TODO(export): This per-image Python loop converts tensors to NumPy
+    # because export backends do not lower host-side array plumbing reliably.
     out: list[np.ndarray] = []
     for image in images_bchw:
         img = image
@@ -306,6 +308,8 @@ class MolmoAct2ImageProcessor:
         base_image_input_size = [int(self.size["height"]), int(self.size["width"])]
         pool_h, pool_w = int(self.pooling_size[0]), int(self.pooling_size[1])
 
+        # TODO(export): Ragged crop assembly uses Python/NumPy list appends and
+        # concatenation because per-image crop counts are data-dependent.
         for image in image_list:
             image_grid, crops, pooled_idx = _image_to_patches_and_grids(
                 image,

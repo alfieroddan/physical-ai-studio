@@ -17,7 +17,9 @@ import torch.nn.functional as F
 from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 from tqdm import tqdm
+from transformers import Qwen2Tokenizer
 
+from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, FeatureType
 from physicalai.policies.base import Model
 from physicalai.policies.molmoact2.action_tokenizer import UniversalActionProcessor
@@ -29,6 +31,7 @@ from ..config import MolmoAct2Config
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+IMAGE_PROMPT = "<|image|>"
 
 
 def _sample_beta_timesteps(
@@ -137,8 +140,6 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
             raise ValueError("MolmoAct2Config.processor_config must be set for torch frontend creation.")
 
         image_cfg = processor_config.image_processor
-        video_cfg = processor_config.video_processor
-
         self.image_processor = MolmoAct2ImageProcessor(
             size=image_cfg.size,
             image_mean=image_cfg.image_mean,
@@ -150,6 +151,7 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
             patch_size=image_cfg.patch_size,
             pooling_size=image_cfg.pooling_size,
         )
+        video_cfg = processor_config.video_processor
         self.video_processor = MolmoAct2VideoProcessor(
             size=video_cfg.size,
             image_mean=video_cfg.image_mean,
@@ -165,6 +167,9 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         self.image_use_col_tokens = bool(processor_config.image_use_col_tokens)
         self.use_single_crop_col_tokens = processor_config.use_single_crop_col_tokens
         self.use_single_crop_start_token = bool(processor_config.use_single_crop_start_token)
+        self._image_placeholder_token_id: int | None = (
+            int(config.image_placeholder_token_id) if config.image_placeholder_token_id is not None else None
+        )
 
     def _default_action_dim_is_pad(self, *, batch_size: int, device: torch.device) -> torch.Tensor:
         action_dim_is_pad = torch.ones((batch_size, self.max_action_dim), dtype=torch.bool, device=device)
@@ -189,6 +194,57 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
             if value.ndim == 1 and int(value.numel()) == 1:
                 return int(value.reshape(()).item())
         raise TypeError(f"MolmoAct2 torch frontend expected int-like value for '{name}', got {type(value)}")
+
+    def _resolved_image_placeholder_token_id(self) -> int | None:
+        if self._image_placeholder_token_id is not None:
+            return self._image_placeholder_token_id
+
+        tokenizer_name_or_path = str(getattr(self.config, "tokenizer_name_or_path", "") or "").strip()
+        if not tokenizer_name_or_path:
+            return None
+
+        tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_name_or_path, local_files_only=True)
+        token_id = tokenizer.convert_tokens_to_ids(IMAGE_PROMPT)
+        self._image_placeholder_token_id = int(token_id) if isinstance(token_id, int) else None
+        return self._image_placeholder_token_id
+
+    @staticmethod
+    def _flatten_images(
+        images: torch.Tensor | None,
+        image_masks: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if images is None:
+            return None
+        if images.ndim == 4:
+            images = images.unsqueeze(0)
+        if images.ndim != 5:
+            raise ValueError(f"MolmoAct2 expected images with shape [N, B, C, H, W], got {tuple(images.shape)}.")
+        if int(images.shape[2]) != 3:
+            raise ValueError(f"MolmoAct2 expected image channels in axis 2, got shape {tuple(images.shape)}.")
+
+        num_images, batch_size = int(images.shape[0]), int(images.shape[1])
+        if image_masks is None:
+            image_masks = torch.ones((num_images, batch_size), dtype=torch.bool, device=images.device)
+        elif image_masks.ndim == 1:
+            image_masks = image_masks.unsqueeze(0)
+        elif image_masks.ndim != 2:
+            raise ValueError(f"MolmoAct2 expected image_masks with shape [N, B], got {tuple(image_masks.shape)}.")
+
+        if tuple(image_masks.shape) != (num_images, batch_size):
+            raise ValueError(
+                f"MolmoAct2 image mask shape {tuple(image_masks.shape)} does not match images {(num_images, batch_size)}.",
+            )
+
+        flat_images: list[torch.Tensor] = []
+        valid_masks = image_masks.to(device=images.device, dtype=torch.bool)
+        for batch_idx in range(batch_size):
+            for image_idx in range(num_images):
+                if bool(valid_masks[image_idx, batch_idx].item()):
+                    flat_images.append(images[image_idx, batch_idx])
+
+        if not flat_images:
+            return None
+        return torch.stack(flat_images, dim=0)
 
     def _image_token_ids_for_grid(self, grid: torch.Tensor) -> list[int]:
         if grid.ndim != 1 or int(grid.numel()) != 4:
@@ -346,11 +402,12 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        tokenized_prompt: torch.Tensor,
+        tokenized_prompt_mask: torch.Tensor | None = None,
+        images: torch.Tensor | None = None,
+        image_masks: torch.Tensor | None = None,
+        state: torch.Tensor | None = None,
         token_type_ids: torch.Tensor | None = None,
-        image_placeholder_token_id: int | torch.Tensor | None = None,
-        images_bchw: torch.Tensor | None = None,
         videos_btchw: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         image_token_pooling: torch.Tensor | None = None,
@@ -362,11 +419,15 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         action_dim_is_pad: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
+        input_ids = tokenized_prompt
+        attention_mask = tokenized_prompt_mask
         if not torch.is_tensor(input_ids):
-            raise ValueError("MolmoAct2 torch frontend expects tensor input_ids.")
+            raise ValueError("MolmoAct2 torch frontend expects tensor tokenized_prompt.")
         self._ensure_tensor_or_none("attention_mask", attention_mask)
+        self._ensure_tensor_or_none("images", images)
+        self._ensure_tensor_or_none("image_masks", image_masks)
+        self._ensure_tensor_or_none("state", state)
         self._ensure_tensor_or_none("token_type_ids", token_type_ids)
-        self._ensure_tensor_or_none("images_bchw", images_bchw)
         self._ensure_tensor_or_none("videos_btchw", videos_btchw)
         self._ensure_tensor_or_none("pixel_values", pixel_values)
         self._ensure_tensor_or_none("image_token_pooling", image_token_pooling)
@@ -377,14 +438,15 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         self._ensure_tensor_or_none("video_grids", video_grids)
         self._ensure_tensor_or_none("action_dim_is_pad", action_dim_is_pad)
         self._ensure_tensor_or_none("labels", labels)
-        image_placeholder_token_id_int = self._as_int_or_none(image_placeholder_token_id, "image_placeholder_token_id")
 
-        if pixel_values is None and images_bchw is not None:
-            image_out = self.image_processor(images_bchw, return_tensors="pt")
-            pixel_values = image_out["pixel_values"]
-            image_token_pooling = image_out["image_token_pooling"]
-            image_grids = image_out["image_grids"]
-            image_num_crops = image_out["image_num_crops"]
+        if pixel_values is None:
+            flat_images = self._flatten_images(images, image_masks)
+            if flat_images is not None:
+                image_out = self.image_processor(flat_images, return_tensors="pt")
+                pixel_values = image_out["pixel_values"]
+                image_token_pooling = image_out["image_token_pooling"]
+                image_grids = image_out["image_grids"]
+                image_num_crops = image_out["image_num_crops"]
 
         if pixel_values_videos is None and videos_btchw is not None:
             video_out = self.video_processor(videos_btchw, return_tensors="pt", return_metadata=False)
@@ -395,6 +457,7 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
+        image_placeholder_token_id_int = self._resolved_image_placeholder_token_id()
         if image_grids is not None and image_placeholder_token_id_int is not None:
             input_ids, attention_mask, rebuilt_token_type_ids, labels = self._expand_image_placeholders(
                 input_ids=input_ids,
@@ -444,11 +507,12 @@ class MolmoAct2TorchFrontend(torch.nn.Module):
 
     def from_batch(self, batch: dict[str, Any], *, target_device: torch.device | None = None) -> dict[str, torch.Tensor]:
         model_inputs = self.forward(
-            input_ids=batch["input_ids"],
-            attention_mask=batch.get("attention_mask"),
+            tokenized_prompt=batch[TOKENIZED_PROMPT],
+            tokenized_prompt_mask=batch.get(TOKENIZED_PROMPT_MASK),
+            images=batch.get("images"),
+            image_masks=batch.get(IMAGE_MASKS),
+            state=batch.get("state"),
             token_type_ids=batch.get("token_type_ids"),
-            image_placeholder_token_id=batch.get("image_placeholder_token_id"),
-            images_bchw=batch.get("images_bchw"),
             videos_btchw=batch.get("videos_btchw"),
             pixel_values=batch.get("pixel_values"),
             image_token_pooling=batch.get("image_token_pooling"),
@@ -477,11 +541,12 @@ class MolmoAct2TorchInference(torch.nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
+        tokenized_prompt: torch.Tensor,
+        tokenized_prompt_mask: torch.Tensor | None = None,
+        images: torch.Tensor | None = None,
+        image_masks: torch.Tensor | None = None,
+        state: torch.Tensor | None = None,
         token_type_ids: torch.Tensor | None = None,
-        image_placeholder_token_id: int | torch.Tensor | None = None,
-        images_bchw: torch.Tensor | None = None,
         videos_btchw: torch.Tensor | None = None,
         pixel_values: torch.Tensor | None = None,
         image_token_pooling: torch.Tensor | None = None,
@@ -493,11 +558,12 @@ class MolmoAct2TorchInference(torch.nn.Module):
         action_dim_is_pad: torch.Tensor | None = None,
     ) -> torch.Tensor:
         model_inputs = self.frontend(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
+            tokenized_prompt=tokenized_prompt,
+            tokenized_prompt_mask=tokenized_prompt_mask,
+            images=images,
+            image_masks=image_masks,
+            state=state,
             token_type_ids=token_type_ids,
-            image_placeholder_token_id=image_placeholder_token_id,
-            images_bchw=images_bchw,
             videos_btchw=videos_btchw,
             pixel_values=pixel_values,
             image_token_pooling=image_token_pooling,
@@ -599,6 +665,23 @@ class MolmoAct2Model(Model):
         self.frontend = MolmoAct2TorchFrontend(config)
         self.torch_inference = MolmoAct2TorchInference(self.frontend, self.backbone)
         self._action_tokenizer: UniversalActionProcessor | None = None
+        self._optimized_inference_enabled = False
+
+    def enable_optimized_inference(self, *, enabled: bool = True) -> None:
+        """Enable torch.compile optimization for inference-only entry points."""
+        if not enabled or self._optimized_inference_enabled:
+            return
+
+        torch.set_float32_matmul_precision("high")
+        compile_mode = "default"
+        # TODO(export): Keep compile targets on tensor-heavy inference calls
+        # because wrapper-level dict plumbing frequently causes graph breaks.
+        self._inner_model.generate_actions_from_inputs = torch.compile(  # type: ignore[method-assign]
+            self._inner_model.generate_actions_from_inputs,
+            mode=compile_mode,
+        )
+        self.torch_inference.forward = torch.compile(self.torch_inference.forward, mode=compile_mode)  # type: ignore[method-assign]
+        self._optimized_inference_enabled = True
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load pretrained safetensors weights from a checkpoint directory.
@@ -1053,6 +1136,8 @@ class MolmoAct2Model(Model):
     @property
     def exported_torch_module(self) -> MolmoAct2TorchInference:
         """Single torch inference boundary for export and runtime parity."""
+        # TODO(export): Keep a single torch inference boundary because split
+        # boundaries tend to drift in input contracts between runtime/export.
         return self.torch_inference
 
     def predict_action_chunk(self, batch: dict[str, Any]) -> dict[str, Tensor]:

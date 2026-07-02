@@ -310,6 +310,7 @@ class MolmoAct2Config(Config, PretrainedConfig):
     low_res_image_start_token_id: int | None = None
     image_end_token_id: int | None = None
     image_low_res_id: int | None = None
+    image_placeholder_token_id: int | None = None
     image_patch_id: int | None = None
     image_col_id: int | None = None
     frame_start_token_id: int | None = None

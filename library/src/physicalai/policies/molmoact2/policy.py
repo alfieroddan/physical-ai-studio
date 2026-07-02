@@ -13,8 +13,9 @@ from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, I
 from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
+from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.dataset import Dataset
-from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, Observation
+from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ONNXExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
@@ -59,6 +60,27 @@ def make_molmoact2_config(
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
+
+    @staticmethod
+    def _coerce_dataset_feature(feature: Feature) -> Feature:
+        normalization_data = feature.normalization_data
+        copied_normalization: NormalizationParameters | None = None
+        if normalization_data is not None:
+            copied_normalization = NormalizationParameters(
+                mean=normalization_data.mean,
+                std=normalization_data.std,
+                q01=normalization_data.q01,
+                q99=normalization_data.q99,
+                mask=normalization_data.mask,
+            )
+
+        shape = tuple(int(dim) for dim in feature.shape) if feature.shape is not None else ()
+        return Feature(
+            name=str(feature.name),
+            ftype=FeatureType(feature.ftype),
+            shape=shape,
+            normalization_data=copied_normalization,
+        )
 
     def __init__(
         self,
@@ -512,6 +534,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 "add_control_tokens": bool(self.config.add_control_tokens),
                 "state_stats": state_stats,
                 "image_keys": image_keys,
+                "processor_config": (
+                    self.config.processor_config.to_dict() if self.config.processor_config is not None else None
+                ),
             },
         )
         molmoact2_post = ComponentSpec.model_validate(
@@ -540,7 +565,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 postprocessors_specs=[molmoact2_post],
                 export_tokenizer=False,
             ),
-            "torch": TorchExportParameters(),
+            "torch": TorchExportParameters(
+                input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
+                output_names=output_names,
+            ),
         }
 
     @staticmethod
