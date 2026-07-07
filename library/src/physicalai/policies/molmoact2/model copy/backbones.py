@@ -3098,12 +3098,14 @@ class MolmoAct2Model(MolmoAct2PreTrainedModel):
             device=device,
             dtype=trajectory.dtype,
         )
-        # Construct the diffusion schedule in tensor space and then unbind to
-        # per-step vectors consumed by the action expert.
-        flow_timestep_values = torch.arange(steps, device=device, dtype=torch.float32) / float(steps)
-        flow_timesteps = flow_timestep_values.unsqueeze(0).expand(batch_size, -1).unbind(dim=1)
-        # Reuse modulation tensors across calls with identical schedule/shape.
-        # This is backend-agnostic and reduces per-step overhead in eager mode.
+        # Dynamic list caveat: Python list construction over runtime `steps`
+        # introduces host-side control flow that is difficult to fuse/lower.
+        flow_timesteps = [
+            torch.full((batch_size,), idx / steps, device=device, dtype=torch.float32) for idx in range(steps)
+        ]
+        # TODO(export): Modulation caching currently uses Python lists and a
+        # cache key tuple; switch to a tensor-only schedule if export backends
+        # cannot lower this eager path.
         modulation_cache = action_expert.get_or_prepare_modulation_cache(
             flow_timesteps,
             cache_key=(steps, batch_size, device, trajectory.dtype),
@@ -3802,6 +3804,84 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         )
         return output, next_attention_mask
 
+    def _make_depth_decode_attention_bias(self, inputs: Mapping[str, Any], past_key_values: Cache) -> torch.Tensor:
+        layers = getattr(past_key_values, "layers", None)
+        max_cache_len = int(getattr(layers[0], "max_cache_len", 0)) if layers else 0
+        if max_cache_len <= 0:
+            raise RuntimeError("Depth decode fast path requires a cache with a fixed maximum length.")
+        input_ids = inputs["input_ids"]
+        batch_size = int(input_ids.shape[0])
+        device = input_ids.device
+        dtype = self.lm_head.weight.dtype
+
+        positions = torch.arange(max_cache_len, device=device, dtype=torch.long)
+        valid_mask = torch.ones((batch_size, max_cache_len), device=device, dtype=torch.bool)
+        attention_mask = inputs.get("attention_mask")
+        if attention_mask is not None:
+            source_mask = attention_mask.to(device=device, dtype=torch.bool)
+            copy_len = min(int(source_mask.shape[-1]), max_cache_len)
+            if copy_len > 0:
+                valid_mask[:, :copy_len] = source_mask[:, :copy_len]
+        causal_mask = positions[None, :] <= positions[:, None]
+        allowed = causal_mask.unsqueeze(0) & valid_mask[:, None, :]
+        attention_bias = torch.where(
+            allowed[:, None, :, :],
+            torch.zeros((), device=device, dtype=dtype),
+            torch.full((), torch.finfo(dtype).min, device=device, dtype=dtype),
+        )
+        return attention_bias
+
+    def _embed_base_tokens(self, input_ids: torch.Tensor) -> torch.Tensor:
+        # Skips MolmoAct2Embedding's per-call cat([base, new]); safe only for IDs
+        # below text_config.vocab_size. This includes released depth/action tokens.
+        wte = self.model.transformer.wte
+        base_embedding = getattr(wte, "embedding", None)
+        if base_embedding is None:
+            return wte(input_ids)
+        return F.embedding(input_ids, base_embedding)
+
+    def _run_ar_decode_step(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        past_key_values: Cache,
+        attention_bias: torch.Tensor,
+    ) -> tuple[torch.Tensor, Cache]:
+        if token_ids.ndim == 1:
+            next_input_ids = token_ids.unsqueeze(1)
+        elif token_ids.ndim == 2:
+            next_input_ids = token_ids
+        else:
+            raise ValueError(f"Expected token_ids to have rank 1 or 2, got {tuple(token_ids.shape)}.")
+        past_length = _cache_seq_len_int(past_key_values)
+        end = past_length + int(next_input_ids.shape[1])
+        cache_position = torch.arange(past_length, end, device=next_input_ids.device, dtype=torch.long)
+        attention_bias = attention_bias[:, :, past_length:end, :end]
+        inputs_embeds = self._embed_base_tokens(next_input_ids)
+        outputs = self.model.transformer(
+            attention_mask=attention_bias,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=True,
+            output_attentions=False,
+            output_hidden_states=False,
+            cache_position=cache_position,
+        )
+        return outputs.last_hidden_state[:, -1:, :], outputs.past_key_values
+
+    def _run_depth_decode_step(
+        self,
+        token_ids: torch.Tensor,
+        *,
+        past_key_values: Cache,
+        attention_bias: torch.Tensor,
+    ) -> tuple[torch.Tensor, Cache]:
+        return self._run_ar_decode_step(
+            token_ids,
+            past_key_values=past_key_values,
+            attention_bias=attention_bias,
+        )
+
     def _project_depth_logits(self, last_hidden: torch.Tensor) -> torch.Tensor:
         start = int(self.config.depth_token_start_id)
         end_id = start + int(self.config.num_depth_tokens)
@@ -3814,6 +3894,19 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             1,
         )
 
+    def _make_ar_decode_static_cache(self, inputs: Mapping[str, Any], max_steps: int) -> Cache:
+        prompt_len = inputs["input_ids"].shape[1]
+        del prompt_len, max_steps
+        return DynamicCache()
+
+    def _make_depth_static_cache(self, inputs: Mapping[str, Any]) -> Cache:
+        prompt_len = inputs["input_ids"].shape[1]
+        action_horizon = self.model._resolve_action_horizon()
+        max_end_steps = max(8, action_horizon)
+        action_token_budget = max(1, action_horizon * 16)
+        del prompt_len, max_end_steps, action_token_budget
+        return DynamicCache()
+
     def _continue_discrete_generation_from_output(
         self,
         initial_output: MolmoAct2CausalLMOutputWithPast,
@@ -3822,6 +3915,7 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         attention_mask: torch.Tensor | None,
         end_token_id: int,
         max_steps: int,
+        attention_bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         generated_tokens: list[torch.Tensor] = []
         current_output = initial_output
@@ -3834,12 +3928,23 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             if bool((next_token == int(end_token_id)).all()):
                 hit_end = True
                 break
-            current_output, current_attention_mask = self._consume_generation_tokens(
-                next_token,
-                past_key_values=current_past_key_values,
-                attention_mask=current_attention_mask,
-            )
-            current_past_key_values = current_output.past_key_values
+            if attention_bias is None:
+                current_output, current_attention_mask = self._consume_generation_tokens(
+                    next_token,
+                    past_key_values=current_past_key_values,
+                    attention_mask=current_attention_mask,
+                )
+                current_past_key_values = current_output.past_key_values
+            else:
+                last_hidden, current_past_key_values = self._run_ar_decode_step(
+                    next_token,
+                    past_key_values=current_past_key_values,
+                    attention_bias=attention_bias,
+                )
+                current_output = MolmoAct2CausalLMOutputWithPast(
+                    logits=self.lm_head(last_hidden),
+                    past_key_values=current_past_key_values,
+                )
         if not generated_tokens:
             raise RuntimeError("Discrete continuation generated no tokens.")
         if not hit_end:
@@ -3863,9 +3968,8 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         batch_size = int(inputs["input_ids"].shape[0])
         if batch_size != 1 and enable_adaptive_depth:
             raise ValueError("enable_adaptive_depth=True currently supports batch size 1.")
-        # Keep decoding in a single, generic PyTorch path so this method stays
-        # portable across torch.compile, ExecuTorch export, and OpenVINO export.
-        output = self(**inputs, use_cache=True)
+        static_cache = self._make_depth_static_cache(inputs)
+        output = self(**inputs, use_cache=True, past_key_values=static_cache)
         current_output = output
         current_past_key_values = output.past_key_values
         current_attention_mask = inputs.get("attention_mask")
@@ -3918,13 +4022,13 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             device=self.device,
             dtype=torch.long,
         )
+        depth_attention_bias = self._make_depth_decode_attention_bias(inputs, current_past_key_values)
         generated_tokens.append(depth_start)
-        current_output, current_attention_mask = self._consume_generation_tokens(
+        last_hidden, current_past_key_values = self._run_depth_decode_step(
             depth_start,
             past_key_values=current_past_key_values,
-            attention_mask=current_attention_mask,
+            attention_bias=depth_attention_bias,
         )
-        current_past_key_values = current_output.past_key_values
         previous_image = None
         previous_bins = None
         if depth_cache is not None:
@@ -3966,54 +4070,52 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         num_depth_codes = int(self.config.num_depth_codes)
         if not selective or update_mask is None or previous_buffer_t is None:
             for depth_idx in range(num_depth_codes):
-                depth_logits = self._project_depth_logits(current_output.logits[:, -1:, :])
+                depth_logits = self._project_depth_logits(last_hidden)
                 predicted_bins = depth_logits.squeeze(1).argmax(dim=-1)
                 depth_bins[:, depth_idx] = predicted_bins
                 chosen_token_ids = code_token_ids[predicted_bins]
                 generated_tokens.append(chosen_token_ids)
-                current_output, current_attention_mask = self._consume_generation_tokens(
+                last_hidden, current_past_key_values = self._run_depth_decode_step(
                     chosen_token_ids,
                     past_key_values=current_past_key_values,
-                    attention_mask=current_attention_mask,
+                    attention_bias=depth_attention_bias,
                 )
-                current_past_key_values = current_output.past_key_values
         else:
             for start_idx, end_idx, should_generate in _build_depth_update_spans(update_mask):
                 if should_generate:
                     for depth_idx in range(start_idx, end_idx):
-                        depth_logits = self._project_depth_logits(current_output.logits[:, -1:, :])
+                        depth_logits = self._project_depth_logits(last_hidden)
                         predicted_bins = depth_logits.squeeze(1).argmax(dim=-1)
                         depth_bins[:, depth_idx] = predicted_bins
                         chosen_token_ids = code_token_ids[predicted_bins]
                         generated_tokens.append(chosen_token_ids)
-                        current_output, current_attention_mask = self._consume_generation_tokens(
+                        last_hidden, current_past_key_values = self._run_depth_decode_step(
                             chosen_token_ids,
                             past_key_values=current_past_key_values,
-                            attention_mask=current_attention_mask,
+                            attention_bias=depth_attention_bias,
                         )
-                        current_past_key_values = current_output.past_key_values
                     continue
                 replay_bins = previous_buffer_t[:, start_idx:end_idx].expand(batch_size, -1)
                 depth_bins[:, start_idx:end_idx] = replay_bins
                 replay_token_ids = code_token_ids[replay_bins]
                 generated_tokens.extend(replay_token_ids.unbind(dim=1))
-                current_output, current_attention_mask = self._consume_generation_tokens(
+                last_hidden, current_past_key_values = self._run_depth_decode_step(
                     replay_token_ids,
                     past_key_values=current_past_key_values,
-                    attention_mask=current_attention_mask,
+                    attention_bias=depth_attention_bias,
                 )
-                current_past_key_values = current_output.past_key_values
         hit_depth_end = False
         max_depth_end_steps = max(8, self.model._resolve_action_horizon())
+        full_logits = self.lm_head(last_hidden)
         for _ in range(max_depth_end_steps):
-            next_token = current_output.logits[:, -1, :].argmax(dim=-1)
+            next_token = full_logits.squeeze(1).argmax(dim=-1)
             generated_tokens.append(next_token)
-            current_output, current_attention_mask = self._consume_generation_tokens(
+            last_hidden, current_past_key_values = self._run_depth_decode_step(
                 next_token,
                 past_key_values=current_past_key_values,
-                attention_mask=current_attention_mask,
+                attention_bias=depth_attention_bias,
             )
-            current_past_key_values = current_output.past_key_values
+            full_logits = self.lm_head(last_hidden)
             if bool((next_token == int(self.config.depth_end_token_id)).all()):
                 hit_depth_end = True
                 break
@@ -4033,6 +4135,10 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             )[:, : full_input_ids.shape[1]]
         else:
             full_attention_mask = None
+        current_output = MolmoAct2CausalLMOutputWithPast(
+            logits=full_logits,
+            past_key_values=current_past_key_values,
+        )
         encoder_kv_states = self.model._extract_kv_states(current_past_key_values)
         return _DepthPrefix(
             token_ids=depth_token_ids,
@@ -4104,6 +4210,7 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
         n_action_steps: int | None = None,
         generator: torch.Generator | None = None,
         normalize_language: bool = True,
+        enable_cuda_graph: bool = True,
         return_dict: bool = True,
     ) -> MolmoAct2ActionOutput | torch.Tensor:
         if state is None:
@@ -4195,6 +4302,7 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
             batch_size=batch_size,
             device=self.device,
         )
+        del enable_cuda_graph
 
         generated_token_ids = None
         depth_bins = None
@@ -4261,13 +4369,30 @@ class MolmoAct2ForConditionalGeneration(MolmoAct2PreTrainedModel, GenerationMixi
                     }
             else:
                 max_action_decode_steps = max(1, int(generation_horizon * 16))
-                prefill_output = self(**inputs, use_cache=True)
+                action_attention_bias = None
+                if enable_cuda_graph:
+                    action_static_cache = self._make_ar_decode_static_cache(
+                        inputs,
+                        max_steps=max_action_decode_steps,
+                    )
+                    action_attention_bias = self._make_depth_decode_attention_bias(
+                        inputs,
+                        action_static_cache,
+                    )
+                    prefill_output = self(
+                        **inputs,
+                        use_cache=True,
+                        past_key_values=action_static_cache,
+                    )
+                else:
+                    prefill_output = self(**inputs, use_cache=True)
                 action_token_ids = self._continue_discrete_generation_from_output(
                     prefill_output,
                     past_key_values=prefill_output.past_key_values,
                     attention_mask=inputs.get("attention_mask"),
                     end_token_id=self._require_eos_token_id(),
                     max_steps=max_action_decode_steps,
+                    attention_bias=action_attention_bias,
                 )
                 generated_token_ids = action_token_ids
             actions = self._decode_discrete_action_chunk(

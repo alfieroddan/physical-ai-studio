@@ -30,12 +30,34 @@ if TYPE_CHECKING:
     from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor
 
 
+def _coerce_dataset_feature(feature: Feature) -> Feature:
+    normalization_data = feature.normalization_data
+    copied_normalization: NormalizationParameters | None = None
+    if normalization_data is not None:
+        copied_normalization = NormalizationParameters(
+            mean=normalization_data.mean,
+            std=normalization_data.std,
+            q01=normalization_data.q01,
+            q99=normalization_data.q99,
+            mask=normalization_data.mask,
+        )
+
+    shape = tuple(int(dim) for dim in feature.shape) if feature.shape is not None else ()
+    return Feature(
+        name=str(feature.name),
+        ftype=FeatureType(feature.ftype),
+        shape=shape,
+        normalization_data=copied_normalization,
+    )
+
+
 def make_molmoact2_config(
     *,
     input_features: list[Feature] | None,
     output_features: list[Feature] | None,
     n_obs_steps: int,
     n_action_steps: int,
+    torch_compile: bool = False,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
 
@@ -46,6 +68,7 @@ def make_molmoact2_config(
         output_features: List of output features the model produces.
         n_obs_steps: Number of observation steps.
         n_action_steps: Number of action steps.
+        torch_compile: Whether to mark the config for optimized inference.
 
     Returns:
         A fully populated :class:`MolmoAct2Config`.
@@ -55,32 +78,12 @@ def make_molmoact2_config(
         output_features=output_features,
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
+        compile_model=torch_compile,
     )
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
-
-    @staticmethod
-    def _coerce_dataset_feature(feature: Feature) -> Feature:
-        normalization_data = feature.normalization_data
-        copied_normalization: NormalizationParameters | None = None
-        if normalization_data is not None:
-            copied_normalization = NormalizationParameters(
-                mean=normalization_data.mean,
-                std=normalization_data.std,
-                q01=normalization_data.q01,
-                q99=normalization_data.q99,
-                mask=normalization_data.mask,
-            )
-
-        shape = tuple(int(dim) for dim in feature.shape) if feature.shape is not None else ()
-        return Feature(
-            name=str(feature.name),
-            ftype=FeatureType(feature.ftype),
-            shape=shape,
-            normalization_data=copied_normalization,
-        )
 
     def __init__(
         self,
@@ -90,6 +93,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
+        *,
         torch_compile: bool = False,
     ) -> None:
         super().__init__(n_action_steps=n_action_steps)
@@ -119,6 +123,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_obs_steps=n_obs_steps,
                 norm_tag=norm_tag,
                 n_action_steps=n_action_steps,
+                torch_compile=torch_compile,
             )
         else:
             self.config = make_molmoact2_config(
@@ -126,6 +131,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 output_features=output_features,
                 n_obs_steps=n_obs_steps,
                 n_action_steps=n_action_steps,
+                torch_compile=torch_compile,
             )
 
         self._checkpoint_location: str | None = (
@@ -139,7 +145,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
-        self._torch_compile = bool(torch_compile)
 
         # eagerly load
         if (input_features and output_features) or (repo_id and norm_tag):
@@ -148,11 +153,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     @staticmethod
     def _dataset_features(train_dataset: Dataset) -> tuple[list[Feature], list[Feature]]:
         input_features = [
-            MolmoAct2._coerce_dataset_feature(feature)
+            _coerce_dataset_feature(feature)
             for feature in train_dataset.observation_features.values()
         ]
         output_features = [
-            MolmoAct2._coerce_dataset_feature(feature)
+            _coerce_dataset_feature(feature)
             for feature in train_dataset.action_features.values()
         ]
         return input_features, output_features
@@ -182,8 +187,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self._freeze_non_action_expert_parameters()
         if self.config.gradient_checkpointing:
             self._enable_gradient_checkpointing()
-        if self._torch_compile or self.config.compile_model:
-            self.model.enable_optimized_inference(enabled=True)
+        if self.config.compile_model:
+            self.model.enable_torch_compile(mode="default")
 
     def _backbone(self) -> torch.nn.Module:
         if self.model is None:
@@ -324,9 +329,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             ValueError: If the model or processors have not been initialized.
         """
         if self.model is None:
-            raise ValueError("Model is not initialized. Call setup() first.")
+            msg = "Model is not initialized. Call setup() first."
+            raise ValueError(msg)
         if self._preprocessor is None or self._postprocessor is None:
-            raise ValueError("Processors are not initialized. Call setup() first.")
+            msg = "Processors are not initialized. Call setup() first."
+            raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to_dict())
         actions = self.model.predict_action_chunk(processed_batch)
@@ -429,6 +436,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is None:
             return None
 
+        if self.config.input_features is None:
+            return None
+
         schema: list[InferenceFeature] = []
         for feature in self.config.input_features:
             if feature.ftype == FeatureType.VISUAL:
@@ -470,6 +480,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
         if self.model is None:
+            return None
+
+        if self.config.output_features is None:
             return None
 
         return [
@@ -580,4 +593,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO, ExportBackend.EXECUTORCH, ExportBackend.ONNX]

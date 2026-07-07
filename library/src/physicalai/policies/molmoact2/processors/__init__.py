@@ -7,16 +7,16 @@
 
 from .factory import make_molmoact2_preprocessors
 from .postprocessor import MolmoAct2Postprocessor
-from .preprocessor import MolmoAct2Preprocessor
 from .preprocess_steps import (
     ActionExtractor,
     ActionPadder,
     FeatureBatchNormalizer,
-    PromptPack,
     PreprocessBatchBundle,
+    PromptPack,
     RobotPromptEncoder,
     StateTaskImageExtractor,
 )
+from .preprocessor import MolmoAct2Preprocessor
 
 __all__ = [
     "ActionExtractor",

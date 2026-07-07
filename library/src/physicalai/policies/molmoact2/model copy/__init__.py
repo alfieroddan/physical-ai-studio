@@ -13,7 +13,7 @@ This package contains model-owned components:
 
 from .backbones import MolmoAct2ForConditionalGeneration
 from .image import MolmoAct2ImageProcessor, MolmoAct2ImagesOptions
-from .model import MolmoAct2Model
+from .model import MolmoAct2Model, MolmoAct2TorchFrontend, MolmoAct2TorchInference
 from .video import MolmoAct2VideoProcessor, MolmoAct2VideoProcessorOptions
 
 __all__ = [
@@ -21,6 +21,8 @@ __all__ = [
     "MolmoAct2ImageProcessor",
     "MolmoAct2ImagesOptions",
     "MolmoAct2Model",
+    "MolmoAct2TorchFrontend",
+    "MolmoAct2TorchInference",
     "MolmoAct2VideoProcessor",
     "MolmoAct2VideoProcessorOptions",
 ]
