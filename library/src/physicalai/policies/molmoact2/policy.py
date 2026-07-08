@@ -314,6 +314,17 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is None or self._preprocessor is None or self._postprocessor is None:
             self._initialize_model()
 
+    def _processed_batch_to_device(self, processed_batch: dict[str, object]) -> dict[str, object]:
+        if self.model is None:
+            msg = "Model is not initialized. Call setup() first."
+            raise ValueError(msg)
+
+        model_device = next(self.model.parameters()).device
+        return {
+            key: value.to(model_device) if torch.is_tensor(value) else value
+            for key, value in processed_batch.items()
+        }
+
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
         """Predict an action chunk from an observation batch.
@@ -336,6 +347,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to_dict())
+        processed_batch = self._processed_batch_to_device(processed_batch)
         actions = self.model.predict_action_chunk(processed_batch)
         return self._postprocessor(actions)
 
@@ -345,6 +357,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 msg = "Model is not initialized"
                 raise ValueError(msg)
             processed_batch = self._preprocessor(batch.to_dict())
+            processed_batch = self._processed_batch_to_device(processed_batch)
             return self.model(processed_batch)
         return self.predict_action_chunk(batch)
 
@@ -365,6 +378,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to_dict())
+        processed_batch = self._processed_batch_to_device(processed_batch)
         return self.model.compute_val_loss(processed_batch)
 
     def configure_optimizers(self) -> dict[str, Any]:
