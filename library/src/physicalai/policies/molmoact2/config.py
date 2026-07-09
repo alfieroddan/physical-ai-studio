@@ -285,7 +285,7 @@ class MolmoAct2Config(Config, PretrainedConfig):
 
     # Action/state core settings
     max_action_dim: int = 32
-    action_mode: Literal["continuous", "discrete", "both"] = "both"
+    action_mode: Literal["continuous", "discrete", "both"] = "continuous"
     state_format: Literal["discrete"] = "discrete"
 
     # Flow matching

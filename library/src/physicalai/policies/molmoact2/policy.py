@@ -6,7 +6,7 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -17,7 +17,7 @@ from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKE
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
-from physicalai.export.backends import ONNXExportParameters, OpenVINOExportParameters, TorchExportParameters
+from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
@@ -57,6 +57,7 @@ def make_molmoact2_config(
     output_features: list[Feature] | None,
     n_obs_steps: int,
     n_action_steps: int,
+    action_mode: str = "continuous",
     torch_compile: bool = False,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
@@ -78,8 +79,50 @@ def make_molmoact2_config(
         output_features=output_features,
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
+        action_mode=action_mode,
         compile_model=torch_compile,
     )
+
+
+def _as_float_list(value: object) -> list[float]:
+    if torch.is_tensor(value):
+        return [float(x) for x in value.detach().cpu().reshape(-1).tolist()]
+    if isinstance(value, (list, tuple)):
+        return [float(x) for x in value]
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    msg = f"Unsupported normalization value type: {type(value)}"
+    raise TypeError(msg)
+
+
+def _feature_normalization_mode(feature: Feature) -> str:
+    if feature.ftype == FeatureType.VISUAL:
+        return "identity"
+    norm = feature.normalization_data
+    if norm is None:
+        return "identity"
+    if norm.q01 is not None and norm.q99 is not None:
+        return "quantiles"
+    if norm.min is not None and norm.max is not None:
+        return "min_max"
+    if norm.mean is not None and norm.std is not None:
+        return "mean_std"
+    return "identity"
+
+
+def _feature_normalization_stats(feature: Feature, mode: str) -> dict[str, list[float]]:
+    norm = feature.normalization_data
+    if norm is None or mode == "identity":
+        return {}
+    if mode == "quantiles":
+        stats = {"q01": _as_float_list(norm.q01), "q99": _as_float_list(norm.q99)}
+    elif mode == "min_max":
+        stats = {"min": _as_float_list(norm.min), "max": _as_float_list(norm.max)}
+    else:
+        stats = {"mean": _as_float_list(norm.mean), "std": _as_float_list(norm.std)}
+    if norm.mask is not None:
+        stats["mask"] = _as_float_list(norm.mask)
+    return stats
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -93,6 +136,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
+        action_mode: str = "continuous",
         *,
         torch_compile: bool = False,
     ) -> None:
@@ -123,6 +167,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_obs_steps=n_obs_steps,
                 norm_tag=norm_tag,
                 n_action_steps=n_action_steps,
+                action_mode=action_mode,
                 torch_compile=torch_compile,
             )
         else:
@@ -131,6 +176,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 output_features=output_features,
                 n_obs_steps=n_obs_steps,
                 n_action_steps=n_action_steps,
+                action_mode=action_mode,
                 torch_compile=torch_compile,
             )
 
@@ -447,10 +493,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
-        if self.model is None:
-            return None
-
-        if self.config.input_features is None:
+        if self.model is None or self.config.input_features is None:
             return None
 
         schema: list[InferenceFeature] = []
@@ -459,7 +502,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 schema.append(
                     InferenceFeature(
                         ftype=InferenceFeatureType.VISUAL,
-                        shape=feature.shape,
+                        shape=cast("tuple", feature.shape),
                         name=f"{IMAGES}.{feature.name}",
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
@@ -468,8 +511,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 schema.append(
                     InferenceFeature(
                         ftype=InferenceFeatureType.STATE,
-                        shape=feature.shape,
-                        name=feature.name,
+                        shape=cast("tuple", feature.shape),
+                        name=cast("str", feature.shape),
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                 )
@@ -493,60 +536,71 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
-        if self.model is None:
-            return None
-
-        if self.config.output_features is None:
+        if self.model is None or self.config.output_features is None:
             return None
 
         return [
             InferenceFeature(
                 ftype=InferenceFeatureType.ACTION,
                 shape=(self.config.n_action_steps, *feature.shape),
-                name=feature.name,
+                name=ACTION,
                 dtype=InferenceFeatureDtype.FLOAT32,
             )
             for feature in self.config.output_features
         ]
 
     @property
-    def extra_export_args(self) -> dict[str, object]:
+    def extra_export_args(self) -> dict[str, ExportParameters]:
         """Extra backend export args for inference-time pre/post graph components."""
+        normalize_by_mode: dict[str, dict[str, dict[str, list[float]]]] = {}
+        for feature in self.config.input_features or []:
+            if not feature.name:
+                continue
+            mode = _feature_normalization_mode(feature)
+            normalize_by_mode.setdefault(mode, {})[feature.name] = _feature_normalization_stats(feature, mode)
 
-        def _as_float_list(value: object) -> list[float]:
-            if torch.is_tensor(value):
-                return [float(x) for x in value.detach().cpu().reshape(-1).tolist()]
-            if isinstance(value, (list, tuple)):
-                return [float(x) for x in value]
-            if isinstance(value, (int, float)):
-                return [float(value)]
-            msg = f"Unsupported normalization value type: {type(value)}"
-            raise TypeError(msg)
+        action_feature = next((f for f in (self.config.output_features or []) if f.ftype == FeatureType.ACTION), None)
+        denorm_by_mode: dict[str, dict[str, dict[str, list[float]]]] = {}
+        if action_feature is not None:
+            action_mode = _feature_normalization_mode(action_feature)
+            action_stats = _feature_normalization_stats(action_feature, action_mode)
+            denorm_by_mode.setdefault(action_mode, {})[ACTION] = action_stats
 
-        state_feature = next((f for f in self.config.input_features if f.ftype == FeatureType.STATE), None)
-        action_feature = next((f for f in self.config.output_features if f.ftype == FeatureType.ACTION), None)
+        preproc_specs = [
+            *[
+                ComponentSpec(type="normalize", mode=mode, stats=stats)
+                for mode, stats in normalize_by_mode.items()
+                if stats
+            ],
+            ComponentSpec(
+                type="molmoact2_pre",
+                tokenizer_name_or_path=self.config.tokenizer_name_or_path,
+                num_state_tokens=self.config.num_state_tokens,
+                setup_type=self.config.setup_type,
+                control_mode=self.config.control_mode,
+                add_setup_tokens=self.config.add_setup_tokens,
+                add_control_tokens=self.config.add_control_tokens,
+            ),
+        ]
 
-        state_stats: dict[str, list[float]] | None = None
-        if state_feature is not None and state_feature.normalization_data is not None:
-            state_stats = {
-                "q01": _as_float_list(state_feature.normalization_data.q01),
-                "q99": _as_float_list(state_feature.normalization_data.q99),
-            }
-            if state_feature.normalization_data.mask is not None:
-                state_stats["mask"] = _as_float_list(state_feature.normalization_data.mask)
-
-        action_stats: dict[str, list[float]] | None = None
-        if action_feature is not None and action_feature.normalization_data is not None:
-            action_stats = {
-                "q01": _as_float_list(action_feature.normalization_data.q01),
-                "q99": _as_float_list(action_feature.normalization_data.q99),
-            }
-            if action_feature.normalization_data.mask is not None:
-                action_stats["mask"] = _as_float_list(action_feature.normalization_data.mask)
+        action_dim = int(action_feature.shape[-1]) if action_feature and action_feature.shape else None
+        postproc_specs = [
+            ComponentSpec(type="molmoact2_post", env_action_dim=action_dim),
+            *[
+                ComponentSpec(type="denormalize", mode=mode, stats=stats)
+                for mode, stats in denorm_by_mode.items()
+                if stats
+            ],
+        ]
 
         output_names = [feature.name for feature in (self.outputs_schema or [])]
 
         return {
+            "openvino": OpenVINOExportParameters(
+                outputs=output_names,
+                preprocessors_specs=preproc_specs,
+                postprocessors_specs=postproc_specs,
+            ),
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
@@ -562,4 +616,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH]
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO]

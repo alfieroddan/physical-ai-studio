@@ -411,6 +411,7 @@ def build_config_from_hf_config(
     n_obs_steps: int = 30,
     n_action_steps: int = 30,
     max_action_dim: int = 32,
+    action_mode: str = "continuous",
     torch_compile: bool = False,
 ) -> MolmoAct2Config:
     """Build policy config from Hugging Face config and local overrides.
@@ -537,6 +538,7 @@ def build_config_from_hf_config(
     config_data["n_obs_steps"] = n_obs_steps
     config_data["n_action_steps"] = n_action_steps
     config_data["max_action_dim"] = max_action_dim
+    config_data["action_mode"] = action_mode
 
     if config_data.get("add_action_expert") is False:
         config_data["action_expert_config"] = None
