@@ -525,7 +525,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         state_feature = next((f for f in self.config.input_features if f.ftype == FeatureType.STATE), None)
         action_feature = next((f for f in self.config.output_features if f.ftype == FeatureType.ACTION), None)
-        visual_features = [f for f in self.config.input_features if f.ftype == FeatureType.VISUAL and f.name]
 
         state_stats: dict[str, list[float]] | None = None
         if state_feature is not None and state_feature.normalization_data is not None:
@@ -545,53 +544,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             if action_feature.normalization_data.mask is not None:
                 action_stats["mask"] = _as_float_list(action_feature.normalization_data.mask)
 
-        image_keys = [feature.name for feature in visual_features if feature.name]
-        env_action_dim = int(action_feature.shape[0]) if action_feature is not None and action_feature.shape else int(
-            self.config.max_action_dim,
-        )
-
-        molmoact2_pre = ComponentSpec.model_validate(
-            {
-                "type": "molmoact2_pre",
-                "tokenizer_name_or_path": str(self.config.tokenizer_name_or_path),
-                "num_state_tokens": int(self.config.num_state_tokens),
-                "setup_type": str(self.config.setup_type or ""),
-                "control_mode": str(self.config.control_mode or ""),
-                "add_setup_tokens": bool(self.config.add_setup_tokens),
-                "add_control_tokens": bool(self.config.add_control_tokens),
-                "state_stats": state_stats,
-                "image_keys": image_keys,
-                "processor_config": (
-                    self.config.processor_config.to_dict() if self.config.processor_config is not None else None
-                ),
-            },
-        )
-        molmoact2_post = ComponentSpec.model_validate(
-            {
-                "type": "molmoact2_post",
-                "action_key": ACTION,
-                "env_action_dim": env_action_dim,
-                "action_stats": action_stats,
-            },
-        )
-
         output_names = [feature.name for feature in (self.outputs_schema or [])]
 
         return {
-            "onnx": ONNXExportParameters(
-                exporter_kwargs={
-                    "output_names": output_names,
-                },
-                preprocessors_specs=[molmoact2_pre],
-                postprocessors_specs=[molmoact2_post],
-                export_tokenizer=False,
-            ),
-            "openvino": OpenVINOExportParameters(
-                outputs=output_names,
-                preprocessors_specs=[molmoact2_pre],
-                postprocessors_specs=[molmoact2_post],
-                export_tokenizer=False,
-            ),
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
@@ -607,4 +562,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO, ExportBackend.EXECUTORCH, ExportBackend.ONNX]
+        return [ExportBackend.TORCH]
