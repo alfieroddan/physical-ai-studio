@@ -512,7 +512,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                     InferenceFeature(
                         ftype=InferenceFeatureType.STATE,
                         shape=cast("tuple", feature.shape),
-                        name=cast("str", feature.shape),
+                        name=str(feature.name),
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                 )
