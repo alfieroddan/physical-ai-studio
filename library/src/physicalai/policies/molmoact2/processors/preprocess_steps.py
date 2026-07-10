@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torchvision.transforms.functional as tv_functional
 
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
@@ -235,13 +236,30 @@ class RobotPromptEncoder:
 
 
 class ImagePacker(torch.nn.Module):
-    """Pack per-example image lists into model image tensors."""
+    """Resize images to the model input size and pack them into batch tensors."""
+
+    def __init__(self, *, image_size: tuple[int, int]) -> None:
+        """Store the target ``(height, width)`` the images are resized to."""
+        super().__init__()
+        self.height, self.width = image_size
+
+    def _resize(self, image: torch.Tensor) -> torch.Tensor:
+        """Resize a single ``(C, H, W)`` image on the uint8 grid to ``[0, 1]``."""
+        if image.dtype == torch.uint8:
+            pixels = image
+        else:
+            pixels = image.to(torch.float32)
+            if float(pixels.max()) <= 1.0:
+                pixels = pixels * 255.0
+            pixels = pixels.clamp(0, 255).to(torch.uint8)
+        resized = tv_functional.resize(pixels, [self.height, self.width], antialias=False)
+        return resized.to(torch.float32) / 255.0
 
     def forward(self, images_by_example: list[list[torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Pack images into [N, B, C, H, W] and masks [N, B]."""
+        """Resize and pack images into [N, B, C, H, W] and masks [N, B]."""
         batch_size = len(images_by_example)
         if batch_size == 0:
-            empty_images = torch.empty((0, 0, 3, 0, 0), dtype=torch.float32)
+            empty_images = torch.empty((0, 0, 3, self.height, self.width), dtype=torch.float32)
             empty_masks = torch.empty((0, 0), dtype=torch.bool)
             return empty_images, empty_masks
 
@@ -252,22 +270,17 @@ class ImagePacker(torch.nn.Module):
                 raise ValueError(msg)
 
         if num_images == 0:
-            empty_images = torch.empty((0, batch_size, 3, 0, 0), dtype=torch.float32)
+            empty_images = torch.empty((0, batch_size, 3, self.height, self.width), dtype=torch.float32)
             empty_masks = torch.empty((0, batch_size), dtype=torch.bool)
             return empty_images, empty_masks
 
         image_slots: list[torch.Tensor] = []
         mask_slots: list[torch.Tensor] = []
         for image_index in range(num_images):
-            slot_images: list[torch.Tensor] = []
-            for batch_index in range(batch_size):
-                image = images_by_example[batch_index][image_index]
-                image = image.to(dtype=torch.float32)
-                if images_by_example[batch_index][image_index].dtype == torch.uint8:
-                    image = image / 255.0
-                slot_images.append(image)
-
-            slot_tensor = torch.stack(slot_images, dim=0)
+            slot_tensor = torch.stack(
+                [self._resize(images_by_example[batch_index][image_index]) for batch_index in range(batch_size)],
+                dim=0,
+            )
             image_slots.append(slot_tensor)
             mask_slots.append(torch.ones((batch_size,), dtype=torch.bool, device=slot_tensor.device))
 

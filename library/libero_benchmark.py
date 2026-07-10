@@ -34,6 +34,9 @@ policy = MolmoAct2(
     norm_tag="libero",
     n_action_steps=10,
 )
+# Start flow matching from sampled Gaussian noise (matches the reference model).
+# Seeded above via set_seed, so torch.randn(generator=None) stays reproducible.
+policy.config.sample_noise = True
 # policy.setup(stage="predict")
 policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
 

@@ -6,7 +6,7 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -22,7 +22,7 @@ from physicalai.policies.base import Policy
 from .config import MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
 from .model import MolmoAct2Model
-from .processors import make_molmoact2_preprocessors
+from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor, make_molmoact2_preprocessors
 
 
 def _coerce_dataset_feature(feature: Feature) -> Feature:
@@ -205,9 +205,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         # the same pretrained source during inference adapter reload.
         self.save_hyperparameters(ignore=["config"])
 
-        self.model = cast("Any", None)
-        self._preprocessor = cast("Any", None)
-        self._postprocessor = cast("Any", None)
+        self.model: MolmoAct2Model | None = None
+        self._preprocessor: MolmoAct2Preprocessor | None = None
+        self._postprocessor: MolmoAct2Postprocessor | None = None
 
         # eagerly load
         if (input_features and output_features) or (repo_id and norm_tag):
@@ -237,7 +237,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         """
         # make pre, post and model from config
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
-        # self.model = MolmoAct2Model(self.config)
+        self.model = MolmoAct2Model(self.config)
+        if self._checkpoint_location is not None:
+            self.model.load_pretrained_weights(self._checkpoint_location)
 
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path).
@@ -289,13 +291,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             msg = "Processors are not initialized. Call setup() first."
             raise ValueError(msg)
 
-        preprocessor = cast("Any", self._preprocessor)
-        model = cast("Any", self.model)
-        postprocessor = cast("Any", self._postprocessor)
-
-        processed_batch = preprocessor(batch.to_dict())
-        actions = model.predict_action_chunk(processed_batch)
-        return postprocessor({ACTION: actions})[ACTION]
+        processed_batch = self._preprocessor(batch.to_dict())
+        actions = self.model.predict_action_chunk(processed_batch)
+        return self._postprocessor({ACTION: actions})[ACTION]
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
         """Run training or inference forward pass.
@@ -314,10 +312,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             if self.model is None or self._preprocessor is None:
                 msg = "Model is not initialized"
                 raise ValueError(msg)
-            preprocessor = cast("Any", self._preprocessor)
-            model = cast("Any", self.model)
-            processed_batch = preprocessor(batch.to_dict())
-            return model(processed_batch)
+            processed_batch = self._preprocessor(batch.to_dict())
+            return self.model(processed_batch)
         return self.predict_action_chunk(batch)
 
     def training_step(self, batch: Observation, batch_idx: int) -> torch.Tensor:
@@ -347,10 +343,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             msg = "Model is not initialized"
             raise ValueError(msg)
 
-        preprocessor = cast("Any", self._preprocessor)
-        model = cast("Any", self.model)
-        processed_batch = preprocessor(batch.to_dict())
-        return model.compute_val_loss(processed_batch)
+        processed_batch = self._preprocessor(batch.to_dict())
+        return self.model.compute_val_loss(processed_batch)
 
     @property
     def input_features(self) -> list[Feature]:
@@ -395,7 +389,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
                 schema.append(
                     InferenceFeature(
                         ftype=InferenceFeatureType.VISUAL,
-                        shape=cast("tuple", feature.shape),
+                        shape=tuple(feature.shape),
                         name=f"{IMAGES}.{feature.name}",
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
@@ -404,7 +398,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
                 schema.append(
                     InferenceFeature(
                         ftype=InferenceFeatureType.STATE,
-                        shape=cast("tuple", feature.shape),
+                        shape=tuple(feature.shape),
                         name=str(feature.name),
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
@@ -435,7 +429,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         return [
             InferenceFeature(
                 ftype=InferenceFeatureType.ACTION,
-                shape=(self.config.n_action_steps, *cast("tuple", feature.shape)),
+                shape=(self.config.n_action_steps, *tuple(feature.shape)),
                 name=ACTION,
                 dtype=InferenceFeatureDtype.FLOAT32,
             )

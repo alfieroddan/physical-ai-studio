@@ -26,6 +26,21 @@ from .tokenizers import MolmoAct2Tokenizers
 if TYPE_CHECKING:
     from physicalai.policies.molmoact2.config import MolmoAct2Config
 
+_DEFAULT_IMAGE_SIZE = (378, 378)
+
+
+def _image_input_size(config: MolmoAct2Config) -> tuple[int, int]:
+    """Resolve the ``(height, width)`` images are resized to before the model.
+
+    Returns:
+        The target image ``(height, width)``.
+    """
+    processor_config = config.processor_config
+    if processor_config is None:
+        return _DEFAULT_IMAGE_SIZE
+    size = processor_config.image_processor.size
+    return int(size["height"]), int(size["width"])
+
 
 class MolmoAct2Preprocessor(torch.nn.Module):
     """Convert observations into model-ready MolmoAct2 tensors.
@@ -76,7 +91,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             add_setup_tokens=bool(config.add_setup_tokens),
             add_control_tokens=bool(config.add_control_tokens),
         )
-        self._image_packer = ImagePacker()
+        self._image_packer = ImagePacker(image_size=_image_input_size(config))
         self._tokenizers = MolmoAct2Tokenizers(
             tokenizer_name_or_path=config.tokenizer_name_or_path,
         )
