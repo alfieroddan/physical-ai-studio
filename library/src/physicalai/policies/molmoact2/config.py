@@ -21,8 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from transformers.configuration_utils import PretrainedConfig
-
 from physicalai.config import Config
 
 if TYPE_CHECKING:
@@ -97,7 +95,7 @@ class MolmoAct2AdapterConfig(Config):
 
 
 @dataclass
-class MolmoAct2TextConfig(Config, PretrainedConfig):
+class MolmoAct2TextConfig(Config):
     """Text transformer component configuration for MolmoAct2."""
 
     model_type: str = "molmoact2_text"
@@ -134,8 +132,6 @@ class MolmoAct2TextConfig(Config, PretrainedConfig):
         Raises:
             ValueError: If any attention-head setting is invalid.
         """
-        PretrainedConfig.__init__(self, tie_word_embeddings=self.tie_word_embeddings)
-
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
         if self.num_attention_heads < 1:
@@ -260,7 +256,7 @@ class MolmoAct2ProcessorConfig(Config):
 
 
 @dataclass
-class MolmoAct2Config(Config, PretrainedConfig):
+class MolmoAct2Config(Config):
     """Top-level configuration for MolmoAct2 with split component sub-configs."""
 
     model_type: str = "molmoact2"
@@ -445,7 +441,6 @@ class MolmoAct2Config(Config, PretrainedConfig):
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         self._coerce_nested_configs()
-        PretrainedConfig.__init__(self, tie_word_embeddings=self.text_config.tie_word_embeddings)
         self._validate_rollout_settings()
         self._validate_flow_matching_settings()
         self._validate_depth_and_token_settings()

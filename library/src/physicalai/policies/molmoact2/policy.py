@@ -6,28 +6,23 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, Literal, cast
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
-from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
 from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
-from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
+from physicalai.export.backends import ExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
-from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
 from .model import MolmoAct2Model
 from .processors import make_molmoact2_preprocessors
-
-if TYPE_CHECKING:
-    from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor
 
 
 def _coerce_dataset_feature(feature: Feature) -> Feature:
@@ -57,7 +52,7 @@ def make_molmoact2_config(
     output_features: list[Feature] | None,
     n_obs_steps: int,
     n_action_steps: int,
-    action_mode: str = "continuous",
+    action_mode: Literal["continuous", "discrete", "both"] = "continuous",
     torch_compile: bool = False,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
@@ -69,6 +64,7 @@ def make_molmoact2_config(
         output_features: List of output features the model produces.
         n_obs_steps: Number of observation steps.
         n_action_steps: Number of action steps.
+        action_mode: Action supervision mode.
         torch_compile: Whether to mark the config for optimized inference.
 
     Returns:
@@ -125,7 +121,7 @@ def _feature_normalization_stats(feature: Feature, mode: str) -> dict[str, list[
     return stats
 
 
-class MolmoAct2(ExportablePolicyMixin, Policy):
+class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompatibleMethodOverride,reportIncompatibleVariableOverride]
     """MolmoAct2 Policy."""
 
     def __init__(
@@ -136,11 +132,32 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
-        action_mode: str = "continuous",
+        action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
         torch_compile: bool = False,
     ) -> None:
+        """Initialize a MolmoAct2 policy wrapper.
+
+        Args:
+            input_features: Optional observation feature schema.
+            output_features: Optional action feature schema.
+            repo_id: Optional pretrained checkpoint identifier or path.
+            norm_tag: Optional normalization tag for pretrained checkpoints.
+            n_obs_steps: Number of observation steps.
+            n_action_steps: Number of predicted action steps.
+            action_mode: Training/inference action mode.
+            torch_compile: Whether to enable compile-oriented config flags.
+
+        Raises:
+            ValueError: If only one of input_features/output_features is provided.
+            RuntimeError: If pretrained checkpoint metadata cannot be resolved.
+        """
         super().__init__(n_action_steps=n_action_steps)
+
+        # TODO(alfieroddan): enable more than just continous action mode
+        if action_mode != "continous":
+            msg = "Only continous action mode is currently supported."
+            raise ValueError(msg)
 
         # check both exist, raise error if not
         if bool(input_features) != bool(output_features):
@@ -188,9 +205,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # the same pretrained source during inference adapter reload.
         self.save_hyperparameters(ignore=["config"])
 
-        self.model: MolmoAct2Model | None = None
-        self._preprocessor: MolmoAct2Preprocessor | None = None
-        self._postprocessor: MolmoAct2Postprocessor | None = None
+        self.model = cast("Any", None)
+        self._preprocessor = cast("Any", None)
+        self._postprocessor = cast("Any", None)
 
         # eagerly load
         if (input_features and output_features) or (repo_id and norm_tag):
@@ -222,115 +239,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
         self.model = MolmoAct2Model(self.config)
 
-        # load pretrained weights if exist
-        if self._checkpoint_location is not None:
-            self.model.load_pretrained_weights(self._checkpoint_location)
-
-        # parameter setting based on config
-        if self.config.freeze_embedding:
-            self._freeze_input_embeddings()
-        if self.config.train_action_expert_only:
-            self._freeze_non_action_expert_parameters()
-        if self.config.gradient_checkpointing:
-            self._enable_gradient_checkpointing()
-        if self.config.compile_model:
-            self.model.enable_torch_compile(mode="default")
-
-    def _backbone(self) -> torch.nn.Module:
-        if self.model is None:
-            msg = "Model is not initialized"
-            raise RuntimeError(msg)
-        return self.model.backbone.model
-
-    def _enable_gradient_checkpointing(self) -> None:
-        backbone = self._backbone()
-        transformer = getattr(backbone, "transformer", None)
-        if transformer is None:
-            msg = "gradient_checkpointing=true, but MolmoAct2 exposes no text transformer."
-            raise RuntimeError(msg)
-        transformer.gradient_checkpointing = True
-        vision_backbone = getattr(backbone, "vision_backbone", None)
-        if vision_backbone is not None:
-            vision_backbone.gradient_checkpointing = True
-
-    def _freeze_non_action_expert_parameters(self) -> None:
-        if self.model is None:
-            msg = "Model is not initialized"
-            raise RuntimeError(msg)
-        trainable_params = 0
-        for name, param in self.model.named_parameters():
-            param.requires_grad = "action_expert" in name
-            if param.requires_grad:
-                trainable_params += param.numel()
-        if trainable_params == 0:
-            msg = "train_action_expert_only=true, but no action_expert parameters were found."
-            raise RuntimeError(msg)
-
-    def _freeze_input_embeddings(self) -> None:
-        backbone = self._backbone()
-        embedding_modules: list[torch.nn.Module] = []
-        seen_module_ids: set[int] = set()
-        for module in (self.model.backbone, backbone):
-            get_input_embeddings = getattr(module, "get_input_embeddings", None)
-            if not callable(get_input_embeddings):
-                continue
-            embeddings = get_input_embeddings()
-            if embeddings is None or id(embeddings) in seen_module_ids:
-                continue
-            embedding_modules.append(embeddings)
-            seen_module_ids.add(id(embeddings))
-
-        if not embedding_modules:
-            msg = "freeze_embedding=true, but MolmoAct2 checkpoint exposes no input embeddings."
-            raise RuntimeError(msg)
-
-        lm_head = getattr(self.model.backbone, "lm_head", None)
-        lm_head_params = {id(param) for param in lm_head.parameters()} if lm_head is not None else set()
-        embedding_params = [param for embeddings in embedding_modules for param in embeddings.parameters()]
-        if any(id(param) in lm_head_params for param in embedding_params):
-            msg = (
-                "freeze_embedding=true would also freeze lm_head because input embeddings and lm_head "
-                "share parameters in this checkpoint."
-            )
-            raise RuntimeError(msg)
-        for param in embedding_params:
-            param.requires_grad = False
-
-    def get_optim_params(self) -> list[dict[str, Any]]:
-        if self.model is None:
-            msg = "Model is not initialized"
-            raise RuntimeError(msg)
-
-        vit_params: list[Tensor] = []
-        connector_params: list[Tensor] = []
-        action_expert_params: list[Tensor] = []
-        vlm_params: list[Tensor] = []
-
-        for name, param in self.model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if "action_expert" in name:
-                action_expert_params.append(param)
-            elif any(part in name for part in ("image_pooling_2d", "image_projector")):
-                connector_params.append(param)
-            elif any(part in name for part in ("vision", "image_encoder", "vit")):
-                vit_params.append(param)
-            elif any(part in name for part in ("multi_modal_projector", "connector", "mm_projector")):
-                connector_params.append(param)
-            else:
-                vlm_params.append(param)
-
-        groups: list[dict[str, Any]] = []
-        if vlm_params:
-            groups.append({"params": vlm_params, "lr": self.config.optimizer_lr})
-        if vit_params:
-            groups.append({"params": vit_params, "lr": self.config.optimizer_vit_lr})
-        if connector_params:
-            groups.append({"params": connector_params, "lr": self.config.optimizer_connector_lr})
-        if action_expert_params:
-            groups.append({"params": action_expert_params, "lr": self.config.optimizer_action_expert_lr})
-        return groups
-
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path).
 
@@ -341,7 +249,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             TypeError: If the attached train dataset is not a physicalai Dataset.
         """
         del stage
-        if self.model is not None and self._preprocessor is not None and self._postprocessor is not None:
+        if self.model is not None:
             return
 
         if not self.config.input_features or not self.config.output_features:
@@ -357,19 +265,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             if not self.config.output_features:
                 self.config.output_features = dataset_output_features
 
-        if self.model is None or self._preprocessor is None or self._postprocessor is None:
-            self._initialize_model()
-
-    def _processed_batch_to_device(self, processed_batch: dict[str, object]) -> dict[str, object]:
         if self.model is None:
-            msg = "Model is not initialized. Call setup() first."
-            raise ValueError(msg)
-
-        model_device = next(self.model.parameters()).device
-        return {
-            key: value.to(model_device) if torch.is_tensor(value) else value
-            for key, value in processed_batch.items()
-        }
+            self._initialize_model()
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
@@ -383,7 +280,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             ``(batch_size, action_horizon, action_dim)``.
 
         Raises:
-            ValueError: If the model or processors have not been initialized.
+            ValueError: If the model or processors ave not been initialized.
         """
         if self.model is None:
             msg = "Model is not initialized. Call setup() first."
@@ -392,19 +289,35 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = "Processors are not initialized. Call setup() first."
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch.to_dict())
-        processed_batch = self._processed_batch_to_device(processed_batch)
-        actions = self.model.predict_action_chunk(processed_batch)
-        return self._postprocessor(actions)
+        preprocessor = cast("Any", self._preprocessor)
+        model = cast("Any", self.model)
+        postprocessor = cast("Any", self._postprocessor)
+
+        processed_batch = preprocessor(batch.to_dict())
+        actions = model.predict_action_chunk(processed_batch)
+        return postprocessor({ACTION: actions})[ACTION]
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+        """Run training or inference forward pass.
+
+        Args:
+            batch: Input observation batch.
+
+        Returns:
+            Training: tuple of loss tensor and metrics dict.
+            Inference: predicted action chunk tensor.
+
+        Raises:
+            ValueError: If model or preprocessors are not initialized in training mode.
+        """
         if self.training:
             if self.model is None or self._preprocessor is None:
                 msg = "Model is not initialized"
                 raise ValueError(msg)
-            processed_batch = self._preprocessor(batch.to_dict())
-            processed_batch = self._processed_batch_to_device(processed_batch)
-            return self.model(processed_batch)
+            preprocessor = cast("Any", self._preprocessor)
+            model = cast("Any", self.model)
+            processed_batch = preprocessor(batch.to_dict())
+            return model(processed_batch)
         return self.predict_action_chunk(batch)
 
     def training_step(self, batch: Observation, batch_idx: int) -> torch.Tensor:
@@ -419,68 +332,48 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         return loss
 
     def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, float]]:
+        """Compute validation loss and metrics.
+
+        Args:
+            batch: Input observation batch.
+
+        Returns:
+            Validation loss tensor and metrics dictionary.
+
+        Raises:
+            ValueError: If model or preprocessors are not initialized.
+        """
         if self.model is None or self._preprocessor is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch.to_dict())
-        processed_batch = self._processed_batch_to_device(processed_batch)
-        return self.model.compute_val_loss(processed_batch)
-
-    def configure_optimizers(self) -> dict[str, Any]:
-        optimizer = torch.optim.AdamW(
-            self.get_optim_params(),
-            lr=self.config.optimizer_lr,
-            weight_decay=self.config.optimizer_weight_decay,
-            betas=self.config.optimizer_betas,
-            eps=self.config.optimizer_eps,
-        )
-
-        num_training_steps = self.trainer.estimated_stepping_batches
-        num_decay_steps = self.config.scheduler_decay_steps
-        if num_decay_steps is None:
-            num_decay_steps = num_training_steps
-
-        scheduler = cosine_decay_with_warmup_scheduler(
-            optimizer,
-            peak_lr=self.config.optimizer_lr,
-            decay_lr=self.config.scheduler_decay_lr,
-            num_warmup_steps=self.config.scheduler_warmup_steps,
-            num_decay_steps=int(num_decay_steps),
-            num_training_steps=int(num_training_steps),
-        )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step",
-            },
-        }
-
-    def configure_gradient_clipping(
-        self,
-        optimizer: torch.optim.Optimizer,
-        gradient_clip_val: float | None = None,
-        gradient_clip_algorithm: str | None = None,
-    ) -> None:
-        """Configure gradient clipping from policy config."""
-        clip_val = gradient_clip_val if gradient_clip_val is not None else self.config.optimizer_grad_clip_norm
-        if clip_val and clip_val > 0:
-            self.clip_gradients(
-                optimizer,
-                gradient_clip_val=clip_val,
-                gradient_clip_algorithm=gradient_clip_algorithm or "norm",
-            )
+        preprocessor = cast("Any", self._preprocessor)
+        model = cast("Any", self.model)
+        processed_batch = preprocessor(batch.to_dict())
+        return model.compute_val_loss(processed_batch)
 
     @property
     def input_features(self) -> list[Feature]:
-        """Return the explicit input feature contract."""
+        """Explicit input feature contract.
+
+        Raises:
+            ValueError: If the model has not been initialized with input features.
+        """
+        if self.config.input_features is None:
+            msg = "Model has not been initialized, no input features exist yet."
+            raise ValueError(msg)
         return self.config.input_features
 
     @property
     def output_features(self) -> list[Feature]:
-        """Return the explicit output feature contract."""
+        """Explicit output feature contract.
+
+        Raises:
+            ValueError: If the model has not been initialized with output features.
+        """
+        if self.config.output_features is None:
+            msg = "Model has not been initialized, no output features exist yet."
+            raise ValueError(msg)
         return self.config.output_features
 
     @property
@@ -493,11 +386,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
-        if self.model is None or self.config.input_features is None:
+        if self.model is None or self.input_features is None:
             return None
 
         schema: list[InferenceFeature] = []
-        for feature in self.config.input_features:
+        for feature in self.input_features:
             if feature.ftype == FeatureType.VISUAL:
                 schema.append(
                     InferenceFeature(
@@ -536,17 +429,17 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
         """
-        if self.model is None or self.config.output_features is None:
+        if self.model is None or self.output_features is None:
             return None
 
         return [
             InferenceFeature(
                 ftype=InferenceFeatureType.ACTION,
-                shape=(self.config.n_action_steps, *feature.shape),
+                shape=(self.config.n_action_steps, *cast("tuple", feature.shape)),
                 name=ACTION,
                 dtype=InferenceFeatureDtype.FLOAT32,
             )
-            for feature in self.config.output_features
+            for feature in self.output_features
         ]
 
     @property
@@ -566,41 +459,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             action_stats = _feature_normalization_stats(action_feature, action_mode)
             denorm_by_mode.setdefault(action_mode, {})[ACTION] = action_stats
 
-        preproc_specs = [
-            *[
-                ComponentSpec(type="normalize", mode=mode, stats=stats)
-                for mode, stats in normalize_by_mode.items()
-                if stats
-            ],
-            ComponentSpec(
-                type="molmoact2_pre",
-                tokenizer_name_or_path=self.config.tokenizer_name_or_path,
-                num_state_tokens=self.config.num_state_tokens,
-                setup_type=self.config.setup_type,
-                control_mode=self.config.control_mode,
-                add_setup_tokens=self.config.add_setup_tokens,
-                add_control_tokens=self.config.add_control_tokens,
-            ),
-        ]
-
-        action_dim = int(action_feature.shape[-1]) if action_feature and action_feature.shape else None
-        postproc_specs = [
-            ComponentSpec(type="molmoact2_post", env_action_dim=action_dim),
-            *[
-                ComponentSpec(type="denormalize", mode=mode, stats=stats)
-                for mode, stats in denorm_by_mode.items()
-                if stats
-            ],
-        ]
-
         output_names = [feature.name for feature in (self.outputs_schema or [])]
 
         return {
-            "openvino": OpenVINOExportParameters(
-                outputs=output_names,
-                preprocessors_specs=preproc_specs,
-                postprocessors_specs=postproc_specs,
-            ),
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
@@ -616,4 +477,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+        return [ExportBackend.TORCH]

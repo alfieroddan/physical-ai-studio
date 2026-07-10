@@ -7,13 +7,33 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from .postprocessor import MolmoAct2Postprocessor
 from .preprocessor import MolmoAct2Preprocessor
 
+if TYPE_CHECKING:
+    from physicalai.policies import MolmoAct2Config
 
-def make_molmoact2_preprocessors(config: Any) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
+
+def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
+    """Factory method to load docstring.
+
+    Args:
+        config: MolmoAct2 config describing model.
+
+    Returns:
+        pre and post processor.
+
+    Raises:
+        ValueError: if output or input features are None.
+    """
+    if (config.input_features is None) or (config.output_features is None):
+        msg = "Output features is None, please initialize model first."
+        raise ValueError(msg)
+
     preprocessor = MolmoAct2Preprocessor(config=config)
-    postprocessor = MolmoAct2Postprocessor(config=config)
+    postprocessor = MolmoAct2Postprocessor(
+        output_features=config.output_features,
+    )
     return preprocessor, postprocessor
