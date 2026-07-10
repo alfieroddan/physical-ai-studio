@@ -111,7 +111,15 @@ def make_fake_observation(device: str) -> Observation:
     )
 
 
-def run_lightning_benchmark(device: str, repeats: int, warmup: int, compile_model: bool) -> tuple[MolmoAct2, Observation]:
+def make_fake_inference_inputs() -> dict[str, object]:
+    return {
+        "state": np.zeros((1, 8), dtype=np.float32),
+        "images": {"wrist_image": np.random.rand(1, 3, 378, 378).astype(np.float32)},
+        "task": ["pick up the object"],
+    }
+
+
+def run_lightning_benchmark(device: str, repeats: int, warmup: int, compile_model: bool) -> MolmoAct2:
     print("\n=== Lightning MolmoAct2 ===")
     input_features, output_features = make_fake_features()
 
@@ -125,100 +133,35 @@ def run_lightning_benchmark(device: str, repeats: int, warmup: int, compile_mode
     policy = policy.to(device=device, dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32)
     policy.eval()
 
-    if policy.model is None or policy._preprocessor is None or policy._postprocessor is None:
-        raise RuntimeError("Policy internals are not initialized.")
-    preprocessor = policy._preprocessor
-    model = policy.model
-    postprocessor = policy._postprocessor
-
     obs = make_fake_observation(device)
-    obs_dict = obs.to_dict(flatten=False)
-
-    def pre_step() -> dict[str, object]:
-        return preprocessor(obs_dict)
-
-    processed_for_model = pre_step()
-
-    def model_step() -> dict[str, torch.Tensor]:
-        with torch.no_grad():
-            return model.predict_action_chunk(processed_for_model)
-
-    actions_for_post = model_step()
-
-    def post_step() -> torch.Tensor:
-        with torch.no_grad():
-            return postprocessor(actions_for_post)
 
     def full_step() -> torch.Tensor:
         with torch.no_grad():
             return policy.predict_action_chunk(obs)
 
-    benchmark("lightning/preprocessor", pre_step, repeats, warmup, device)
-    benchmark("lightning/model", model_step, repeats, warmup, device)
-    benchmark("lightning/postprocessor", post_step, repeats, warmup, device)
     benchmark("lightning/full_forward", full_step, repeats, warmup, device)
 
-    return policy, obs
+    return policy
 
 
 def run_exported_torch_benchmark(
     *,
     policy: MolmoAct2,
-    obs: Observation,
     device: str,
     repeats: int,
     warmup: int,
     export_dir: Path,
 ) -> None:
-    print("\n=== Exported Torch (InferenceModel) ===")
+    print("\n=== Exported Torch (InferenceModel Forward Only) ===")
 
     policy.export(str(export_dir), backend="torch")
-    inf_model = InferenceModel(str(export_dir), device=device)
+    inf_model = InferenceModel(str(export_dir), device=device, preprocessors=[], postprocessors=[])
+    fake_inputs = make_fake_inference_inputs()
 
-    # Torch adapter rehydrates the exported policy from checkpoint.
-    adapter_policy = getattr(inf_model.adapter, "_policy", None)
-    if adapter_policy is None:
-        raise RuntimeError("Torch adapter did not expose loaded policy for stage timing.")
-    if (
-        getattr(adapter_policy, "model", None) is None
-        or getattr(adapter_policy, "_preprocessor", None) is None
-        or getattr(adapter_policy, "_postprocessor", None) is None
-    ):
-        raise RuntimeError("Exported torch policy internals are not initialized.")
+    def full_step() -> dict[str, np.ndarray]:
+        return inf_model(fake_inputs)
 
-    preprocessor = adapter_policy._preprocessor
-    model = adapter_policy.model
-    postprocessor = adapter_policy._postprocessor
-
-    obs_dict = obs.to_dict(flatten=False)
-    obs_np = obs.to_numpy().to_dict(flatten=False)
-    # Inference torch adapter converts ndarray fields via torch.from_numpy;
-    # object/string numpy arrays are not supported there.
-    if isinstance(obs_np.get("task"), np.ndarray):
-        obs_np["task"] = [str(item) for item in obs_np["task"].reshape(-1).tolist()]
-
-    def pre_step() -> dict[str, object]:
-        return preprocessor(obs_dict)
-
-    processed_for_model = pre_step()
-
-    def model_step() -> dict[str, torch.Tensor]:
-        with torch.no_grad():
-            return model.predict_action_chunk(processed_for_model)
-
-    actions_for_post = model_step()
-
-    def post_step() -> torch.Tensor:
-        with torch.no_grad():
-            return postprocessor(actions_for_post)
-
-    def full_step() -> np.ndarray:
-        return inf_model.predict_action_chunk(obs_np)
-
-    benchmark("exported/preprocessor", pre_step, repeats, warmup, device)
-    benchmark("exported/model", model_step, repeats, warmup, device)
-    benchmark("exported/postprocessor", post_step, repeats, warmup, device)
-    benchmark("exported/full_forward", full_step, repeats, warmup, device)
+    benchmark("exported/forward_only", full_step, repeats, warmup, device)
 
 
 def main() -> None:
@@ -243,7 +186,7 @@ def main() -> None:
         return
 
     if args.mode == "both":
-        policy, obs = run_lightning_benchmark(
+        policy = run_lightning_benchmark(
             device=device,
             repeats=args.repeats,
             warmup=args.warmup,
@@ -251,7 +194,6 @@ def main() -> None:
         )
         run_exported_torch_benchmark(
             policy=policy,
-            obs=obs,
             device=device,
             repeats=args.repeats,
             warmup=args.warmup,
@@ -269,10 +211,8 @@ def main() -> None:
     )
     policy = policy.to(device=device, dtype=torch.bfloat16 if device.startswith("cuda") else torch.float32)
     policy.eval()
-    obs = make_fake_observation(device)
     run_exported_torch_benchmark(
         policy=policy,
-        obs=obs,
         device=device,
         repeats=args.repeats,
         warmup=args.warmup,

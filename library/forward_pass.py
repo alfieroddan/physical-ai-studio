@@ -62,7 +62,8 @@ if __name__ == "__main__":
         input_features=input_features,
         output_features=output_features,
     )
-    policy.to('xpu')
+    policy.eval()
+    policy.to("cuda")
     print(f"Init time took {time.time()-t1}")
 
     """
@@ -78,14 +79,9 @@ if __name__ == "__main__":
         images: (2, 1, 3, 378, 378)
         image_masks: (2, 1)
         state: (1, 8)
-        tokenized_prompt: (1, 96)
-        tokenized_prompt_mask: (1, 96)
-        images: (2, 1, 3, 378, 378)
-        image_masks: (2, 1)
-        state: (1, 8)
-    """
+        """
 
-    # # Forward pass to get predicted actions
+    # Forward pass to get predicted actions
     with torch.no_grad():
         actions = policy.predict_action_chunk(batch)
 

@@ -25,25 +25,17 @@ output_features = [
 ]
 
 if __name__ == "__main__":
-    # option 1 with defined features, eager init
-    # policy = MolmoAct2(
-    #     input_features=input_features,
-    #     output_features=output_features,
-    #     repo_id="allenai/MolmoAct2-SO100_101"
-    # )
-
-    # # option 2 set from pretrained, eager init
-    # policy = MolmoAct2(
-    #     repo_id="allenai/MolmoAct2-SO100_101",
-    #     norm_tag="so100_so101_molmoact2"
-    # )
-
     # # option 3 set from dataset - dataset sets input / output features
-    policy = MolmoAct2(repo_id="allenai/MolmoAct2-SO100_101")
+    policy = MolmoAct2()
+    # Memory baseline: avoid joint discrete+continuous loss, checkpoint activations,
+    # and train only the action expert parameters.
+    policy.config.action_mode = "continuous"
+    policy.config.gradient_checkpointing = True
+    policy.config.train_action_expert_only = True
 
     # datamodule
-    dm = LeRobotDataModule(repo_id="MarkRedeman/dice-cleanup-combined", train_batch_size=2, val_batch_size=2, val_split=0.1, num_workers=5, episodes=[0, 1])
+    dm = LeRobotDataModule(repo_id="MarkRedeman/dice-cleanup-combined", train_batch_size=1, val_batch_size=1, val_split=0.1, num_workers=5, episodes=[0, 1])
 
     # trainer
-    trainer = Trainer(max_steps=4, val_check_interval=2, precision="bf16-mixed")
+    trainer = Trainer(max_steps=2, val_check_interval=1, precision="bf16-mixed")
     trainer.fit(model=policy, datamodule=dm)
