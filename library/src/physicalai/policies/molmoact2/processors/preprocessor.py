@@ -12,13 +12,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
-from physicalai.data.observation import ACTION, IMAGES, STATE, FeatureType
+from physicalai.data.observation import IMAGES, STATE, TASK, FeatureType
 
 from .preprocess_steps import (
-    ActionExtractor,
-    ActionPadder,
     FeatureBatchNormalizer,
     ImagePacker,
+    PreprocessBatchBundle,
     RobotPromptEncoder,
     StateTaskImageExtractor,
 )
@@ -41,13 +40,10 @@ class MolmoAct2Preprocessor(torch.nn.Module):
            - Add setup/control wrappers.
            - Add image placeholders.
         5. Pack images into [N_images, B, C, H, W] and image masks.
-        6. Optionally extract and pad action targets to max_action_dim.
-          7. Tokenize prompt text with checkpoint tokenizer.
-          8. Insert BOS token if required.
-          9. Assemble model input dictionary.
-          10. Return packed model-ready outputs.
-
-    The implementation favors readability and clear stage boundaries.
+                6. Tokenize prompt text with checkpoint tokenizer.
+                7. Insert BOS token if required.
+                8. Assemble model input dictionary.
+                9. Return packed model-ready outputs.
     """
 
     def __init__(self, config: MolmoAct2Config) -> None:
@@ -81,9 +77,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             add_control_tokens=bool(config.add_control_tokens),
         )
         self._image_packer = ImagePacker()
-        self._action_extractor = ActionExtractor()
-        self._action_padder = ActionPadder(max_action_dim=int(config.max_action_dim))
-
         self._tokenizers = MolmoAct2Tokenizers(
             tokenizer_name_or_path=config.tokenizer_name_or_path,
         )
@@ -97,16 +90,40 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         Raises:
             TypeError: If batch is not a dictionary.
+            ValueError: If keys are not in batch which are required.
         """
+        # check is dict
         if not isinstance(batch, dict):
             msg = f"MolmoAct2Preprocessor.forward expects dict[str, object], got {type(batch)}"
             raise TypeError(msg)
 
-    def _build_token_outputs(self, prompt_texts: list[str]) -> dict[str, torch.Tensor]:
+        has_state = STATE in batch or f"observation.{STATE}" in batch
+        if not has_state:
+            msg = f"{STATE} is expected in batch. Given keys: {list(batch.keys())}"
+            raise ValueError(msg)
+
+        has_task = TASK in batch or f"observation.{TASK}" in batch or "observation.language" in batch
+        if not has_task:
+            msg = f"{TASK} is expected in batch. Given keys: {list(batch.keys())}"
+            raise ValueError(msg)
+
+        has_images_nested = isinstance(batch.get(IMAGES), dict)
+        has_images_flat = any(str(key).startswith(f"{IMAGES}.") for key in batch)
+        if not (has_images_nested or has_images_flat):
+            msg = f"{IMAGES} are expected in batch. Given keys: {list(batch.keys())}"
+            raise ValueError(msg)
+
+    def _build_token_outputs(
+        self,
+        prompt_texts: list[str],
+        *,
+        device: torch.device,
+    ) -> dict[str, torch.Tensor]:
         """Tokenize prompt text.
 
         Args:
             prompt_texts: Final prompt text list.
+            device: Target device for token tensors.
 
         Returns:
             Dictionary containing tokenized prompt tensors.
@@ -114,9 +131,42 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         input_ids, attention_mask = self._tokenizers.tokenize_prompts(prompt_texts)
 
         return {
-            TOKENIZED_PROMPT: input_ids,
-            TOKENIZED_PROMPT_MASK: attention_mask,
+            TOKENIZED_PROMPT: input_ids.to(device=device),
+            TOKENIZED_PROMPT_MASK: attention_mask.to(device=device),
         }
+
+    @staticmethod
+    def _preprocess_state(bundle: PreprocessBatchBundle) -> dict[str, torch.Tensor]:
+        """Build the state-only output mapping.
+
+        Returns:
+            Dictionary containing only the state tensor.
+        """
+        return {STATE: bundle.state}
+
+    def _preprocess_images(self, bundle: PreprocessBatchBundle) -> dict[str, torch.Tensor]:
+        """Pack visual inputs into model image tensors and masks.
+
+        Returns:
+            Dictionary containing packed images and image masks.
+        """
+        images, image_masks = self._image_packer(bundle.images_by_example)
+        return {
+            IMAGES: images,
+            IMAGE_MASKS: image_masks,
+        }
+
+    def _preprocess_task_text(self, bundle: PreprocessBatchBundle) -> dict[str, torch.Tensor]:
+        """Encode prompts and tokenize text inputs.
+
+        Returns:
+            Dictionary containing token ids and attention masks.
+        """
+        prompt_pack = self._prompt_encoder.encode(bundle)
+        return self._build_token_outputs(
+            prompt_pack.prompt_texts,
+            device=bundle.state.device,
+        )
 
     @staticmethod
     def _ensure_tensor_outputs(outputs: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -162,28 +212,16 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             A packed dictionary matching MolmoAct2 model inputs.
         """
         self._validate_batch(batch)
-
         normalized_batch = self._normalizer(batch)
         bundle = self._extractor.extract(normalized_batch)
 
-        prompt_pack = self._prompt_encoder.encode(bundle)
-        images, image_masks = self._image_packer(bundle.images_by_example)
+        state_outputs = self._preprocess_state(bundle)
+        image_outputs = self._preprocess_images(bundle)
+        text_outputs = self._preprocess_task_text(bundle)
 
-        action = self._action_extractor.extract(normalized_batch)
-        token_outputs = self._build_token_outputs(prompt_pack.prompt_texts)
-
-        packed: dict[str, Any] = {
-            TOKENIZED_PROMPT: token_outputs[TOKENIZED_PROMPT],
-            TOKENIZED_PROMPT_MASK: token_outputs[TOKENIZED_PROMPT_MASK],
-            IMAGES: images,
-            IMAGE_MASKS: image_masks,
-            STATE: bundle.state,
-        }
-
-        if action is not None:
-            action_padded, action_horizon_is_pad, action_dim_is_pad = self._action_padder(action)
-            packed[ACTION] = action_padded
-            packed["action_horizon_is_pad"] = action_horizon_is_pad
-            packed["action_dim_is_pad"] = action_dim_is_pad
+        packed: dict[str, Any] = {}
+        packed.update(text_outputs)
+        packed.update(image_outputs)
+        packed.update(state_outputs)
 
         return self._ensure_tensor_outputs(packed)

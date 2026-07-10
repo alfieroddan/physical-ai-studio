@@ -155,7 +155,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         super().__init__(n_action_steps=n_action_steps)
 
         # TODO(alfieroddan): enable more than just continous action mode
-        if action_mode != "continous":
+        if action_mode != "continuous":
             msg = "Only continous action mode is currently supported."
             raise ValueError(msg)
 
@@ -237,7 +237,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         """
         # make pre, post and model from config
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
-        self.model = MolmoAct2Model(self.config)
+        # self.model = MolmoAct2Model(self.config)
 
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path).

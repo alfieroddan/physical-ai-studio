@@ -213,15 +213,13 @@ class RobotPromptEncoder:
 
     def encode(self, bundle: PreprocessBatchBundle) -> PromptPack:
         """Encode one prompt per batch element."""
-        state_np = bundle.state.detach().cpu().numpy()
-
         prompt_texts: list[str] = []
         flat_images: list[torch.Tensor] = []
         for index in range(int(bundle.state.shape[0])):
             image_list = bundle.images_by_example[index]
             flat_images.extend(image_list)
 
-            discrete_state = build_discrete_state_string(state_np[index], self.num_state_tokens)
+            discrete_state = build_discrete_state_string(bundle.state[index], self.num_state_tokens)
             prompt = build_robot_text(
                 task=bundle.tasks[index],
                 discrete_state_string=discrete_state,

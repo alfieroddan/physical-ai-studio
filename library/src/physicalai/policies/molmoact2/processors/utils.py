@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-import numpy as np
+import torch
 
 if TYPE_CHECKING:
     from physicalai.data.observation import Feature, FeatureType
@@ -61,7 +61,7 @@ def normalize_text(text: str) -> str:
     return normalized.lower()
 
 
-def build_discrete_state_string(state: np.ndarray, num_state_tokens: int) -> str:
+def build_discrete_state_string(state: torch.Tensor, num_state_tokens: int) -> str:
     """Convert normalized state values into discrete state token text.
 
     Args:
@@ -78,12 +78,12 @@ def build_discrete_state_string(state: np.ndarray, num_state_tokens: int) -> str
         msg = f"num_state_tokens must be > 0, got {num_state_tokens}."
         raise ValueError(msg)
 
-    arr = np.asarray(state, dtype=np.float32)
-    arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=-1.0)
-    arr = np.clip(arr, -1.0, 1.0)
-    scaled = (arr + 1.0) / 2.0 * float(num_state_tokens - 1)
-    token_ids = np.clip(np.rint(scaled).astype(np.int64), 0, int(num_state_tokens) - 1).reshape(-1)
-    payload = "".join(f"{STATE_TOKEN_PREFIX}{int(token_id)}>" for token_id in token_ids)
+    tensor = torch.as_tensor(state, dtype=torch.float32)
+    tensor = torch.nan_to_num(tensor, nan=0.0, posinf=1.0, neginf=-1.0)
+    tensor = tensor.clamp(-1.0, 1.0)
+    scaled = (tensor + 1.0) / 2.0 * float(num_state_tokens - 1)
+    token_ids = scaled.round().to(dtype=torch.int64).clamp(0, int(num_state_tokens) - 1).reshape(-1)
+    payload = "".join(f"{STATE_TOKEN_PREFIX}{int(token_id.item())}>" for token_id in token_ids)
     return f"{STATE_START_TOKEN}{payload}{STATE_END_TOKEN}"
 
 
