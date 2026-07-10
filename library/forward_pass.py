@@ -1,5 +1,6 @@
-import torch
 import time
+
+import torch
 
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies import MolmoAct2
@@ -14,6 +15,7 @@ batch = Observation(
         "wrist": torch.rand(1, 3, 256, 256),
     },
     state=torch.rand(1, 6),
+    task=["example, input",],
 ).to(device)
 
 
@@ -56,34 +58,20 @@ def print_resolved_features(label: str, features: list[Feature]) -> None:
 
 
 if __name__ == "__main__":
-    t1 = time.time()
     # Initialize the policy
     policy = MolmoAct2(
         input_features=input_features,
         output_features=output_features,
-    )
+    ).to(device)
     policy.eval()
-    policy.to("cuda")
-    print(f"Init time took {time.time()-t1}")
 
-    """
-    This forward pass:
-        tokenized_prompt: (1, 57)
-        tokenized_prompt_mask: (1, 57)
-        images: (1, 1, 3, 256, 256)
-        image_masks: (1, 1)
-        state: (1, 6)
-    LIBERO:
-        tokenized_prompt: (1, 96)
-        tokenized_prompt_mask: (1, 96)
-        images: (2, 1, 3, 378, 378)
-        image_masks: (2, 1)
-        state: (1, 8)
-        """
+    # # check preprocessor
+    # transition_batch = policy._preprocessor(batch.to_dict())
+    # for k, v in transition_batch.items():
+    #     print(f"{k}: {v.shape} - {v.dtype}")
 
     # Forward pass to get predicted actions
     with torch.no_grad():
         actions = policy.predict_action_chunk(batch)
-
     print(f"Actions shape: {actions.shape}")
     print(f"Actions: {actions}")

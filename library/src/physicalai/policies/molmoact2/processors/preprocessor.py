@@ -14,6 +14,8 @@ import torch
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 
+from .image import MolmoAct2ImageProcessor
+from .inputs import build_model_inputs
 from .joint_transform import JointFrameTransform
 from .preprocess_steps import (
     ActionExtractor,
@@ -95,6 +97,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             add_control_tokens=bool(config.add_control_tokens),
         )
         self._image_packer = ImagePacker(image_size=_image_input_size(config))
+        self._image_processor = (
+            MolmoAct2ImageProcessor(config.processor_config.image_processor)
+            if config.processor_config is not None
+            else None
+        )
         self._tokenizers = MolmoAct2Tokenizers(
             tokenizer_name_or_path=config.tokenizer_name_or_path,
         )
@@ -263,7 +270,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             batch: Input observation dictionary with image tensors in BCHW format.
 
         Returns:
-            A packed dictionary matching MolmoAct2 model inputs.
+            A packed dictionary of fully-prepared, backbone-ready model inputs.
         """
         self._validate_batch(batch)
         batch = self._apply_input_joint_transform(batch)
@@ -279,5 +286,31 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         packed.update(image_outputs)
         packed.update(state_outputs)
         packed.update(self._preprocess_action(normalized_batch))
+        packed = self._ensure_tensor_outputs(packed)
 
-        return self._ensure_tensor_outputs(packed)
+        return self._build_model_inputs(packed)
+
+    def _build_model_inputs(self, packed: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Turn packed prompt/images/state/action into backbone-ready model inputs.
+
+        This runs the value-dependent host prep (image patchify, ``<|image|>``
+        placeholder expansion, per-example image batching) that must live outside
+        the exported model graph. ``state`` is intentionally dropped: it has
+        already been discretized into ``input_ids``, so the exported model never
+        consumes it as a separate input.
+
+        Returns:
+            A dict of fully-prepared model input tensors and, when training, the
+            padded ``action`` target and its horizon mask.
+
+        Raises:
+            ValueError: If the processor config is missing.
+        """
+        if self._image_processor is None:
+            msg = "MolmoAct2Preprocessor requires processor_config to build model inputs."
+            raise ValueError(msg)
+        prepared = build_model_inputs(packed, config=self.config, image_processor=self._image_processor)
+        if ACTION in packed:
+            prepared[ACTION] = packed[ACTION]
+            prepared["action_horizon_is_pad"] = packed["action_horizon_is_pad"]
+        return prepared

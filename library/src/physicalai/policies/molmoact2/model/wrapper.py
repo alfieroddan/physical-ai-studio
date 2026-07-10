@@ -21,18 +21,36 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 
 from physicalai.data.constants import ACTION
+from physicalai.data.observation import FeatureType
 from physicalai.policies.base import Model
 
 from .backbone import MolmoAct2ForConditionalGeneration
-from .image import MolmoAct2ImageProcessor
-from .inputs import _env_action_dim, build_model_inputs
-from .video import MolmoAct2VideoProcessor
 
 if TYPE_CHECKING:
     from physicalai.policies.molmoact2.config import MolmoAct2Config
 
 _SAFE_WEIGHTS_NAME = "model.safetensors"
 _SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+
+
+def _env_action_dim(config: MolmoAct2Config) -> int:
+    """Return the environment action dimension from the output features."""
+    for feature in config.output_features or []:
+        if feature.ftype == FeatureType.ACTION and feature.shape:
+            return int(feature.shape[0])
+    return 0
+
+# Keys of the fully-prepared, traceable tensors the backbone consumes. All
+# value-dependent host prep runs in the preprocessor, so the model graph only
+# sees these fixed-shape tensors (keeping it exportable).
+_MODEL_INPUT_KEYS = (
+    "input_ids",
+    "attention_mask",
+    "token_type_ids",
+    "images",
+    "token_pooling",
+    "action_dim_is_pad",
+)
 
 
 def _masked_flow_loss(
@@ -89,33 +107,14 @@ class MolmoAct2Model(Model):
     """Inference frontend wrapping :class:`MolmoAct2ForConditionalGeneration`."""
 
     def __init__(self, config: MolmoAct2Config) -> None:
-        """Build the backbone and the image/video processors."""
+        """Build the backbone."""
         super().__init__()
         self.config = config
         self.backbone = MolmoAct2ForConditionalGeneration(config)
-        self.image_processor: MolmoAct2ImageProcessor | None = None
-        self.video_processor: MolmoAct2VideoProcessor | None = None
-        if config.processor_config is not None:
-            self.image_processor = MolmoAct2ImageProcessor(config.processor_config.image_processor)
-            self.video_processor = MolmoAct2VideoProcessor(config.processor_config.video_processor)
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load safetensors weights into the backbone (strict key match)."""
         _strict_load_safetensors_weights(self.backbone, checkpoint_location)
-
-    def prepare_graph_inputs(self, batch: dict[str, Any]) -> dict[str, Tensor]:
-        """Build backbone-ready inputs (text + preprocessed images).
-
-        Returns:
-            The model input tensors for the backbone.
-
-        Raises:
-            ValueError: If the processor config is missing.
-        """
-        if self.image_processor is None:
-            msg = "MolmoAct2 requires processor_config to build model inputs."
-            raise ValueError(msg)
-        return build_model_inputs(batch, config=self.config, image_processor=self.image_processor)
 
     @torch.no_grad()
     def predict_action_chunk(
@@ -128,7 +127,7 @@ class MolmoAct2Model(Model):
         """Generate an action chunk from a preprocessed inference batch.
 
         Args:
-            batch: Preprocessed inference batch.
+            batch: Preprocessed inference batch of backbone-ready model inputs.
             sample_noise: Start flow matching from sampled Gaussian noise instead
                 of zeros. Defaults to ``config.sample_noise``.
             generator: Optional RNG used when ``sample_noise`` is enabled.
@@ -136,7 +135,7 @@ class MolmoAct2Model(Model):
         Returns:
             Actions of shape ``(batch, n_action_steps, env_action_dim)``.
         """
-        model_inputs = self.prepare_graph_inputs(batch)
+        model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
         actions = self.backbone.model.generate_actions_from_inputs(
             **model_inputs,
             action_horizon=int(self.config.n_action_steps),
@@ -163,13 +162,12 @@ class MolmoAct2Model(Model):
         Returns:
             The scalar loss and a metrics dict.
         """
-        model_inputs = self.prepare_graph_inputs(batch)
         predicted, target = self.backbone.model.predict_flow_velocity(
-            input_ids=model_inputs["input_ids"],
-            attention_mask=model_inputs.get("attention_mask"),
-            token_type_ids=model_inputs.get("token_type_ids"),
-            images=model_inputs.get("images"),
-            token_pooling=model_inputs.get("token_pooling"),
+            input_ids=batch["input_ids"],
+            attention_mask=batch.get("attention_mask"),
+            token_type_ids=batch.get("token_type_ids"),
+            images=batch.get("images"),
+            token_pooling=batch.get("token_pooling"),
             actions=batch[ACTION],
             action_dim_is_pad=batch.get("action_dim_is_pad"),
             freeze_encoder=bool(self.config.train_action_expert_only),

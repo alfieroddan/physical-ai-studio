@@ -13,7 +13,6 @@ one-per-file for readability:
 - :mod:`action_expert`  flow-matching action expert
 - :mod:`backbone`       assembly + action generation entrypoint
 - :mod:`wrapper`        physicalai ``Model`` frontend
-- :mod:`image`/:mod:`video`  PyTorch preprocessing
 """
 
 from .backbone import MolmoAct2Backbone, MolmoAct2ForConditionalGeneration

@@ -29,8 +29,6 @@ if __name__ == "__main__":
     policy = MolmoAct2()
     # Memory baseline: avoid joint discrete+continuous loss, checkpoint activations,
     # and train only the action expert parameters.
-    policy.config.action_mode = "continuous"
-    policy.config.gradient_checkpointing = True
     policy.config.train_action_expert_only = True
 
     # datamodule
