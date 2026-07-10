@@ -12,9 +12,12 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
-from physicalai.data.observation import IMAGES, STATE, TASK, FeatureType
+from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 
+from .joint_transform import JointFrameTransform
 from .preprocess_steps import (
+    ActionExtractor,
+    ActionPadder,
     FeatureBatchNormalizer,
     ImagePacker,
     PreprocessBatchBundle,
@@ -95,6 +98,9 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self._tokenizers = MolmoAct2Tokenizers(
             tokenizer_name_or_path=config.tokenizer_name_or_path,
         )
+        self._action_extractor = ActionExtractor()
+        self._action_padder = ActionPadder(max_action_dim=int(config.max_action_dim))
+        self._joint_transform = JointFrameTransform(config.joint_signs, config.joint_offsets)
 
     @staticmethod
     def _validate_batch(batch: dict[str, Any]) -> None:
@@ -183,6 +189,39 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             device=bundle.state.device,
         )
 
+    def _apply_input_joint_transform(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Map SO-101 joint state/actions into the checkpoint frame before normalizing.
+
+        Returns:
+            The batch with joint state/actions transformed when ``adapt_to_so101``
+            is enabled, otherwise the batch unchanged.
+        """
+        if not self.config.adapt_to_so101:
+            return batch
+        batch = dict(batch)
+        for key in (STATE, f"observation.{STATE}", ACTION, f"action.{ACTION}"):
+            value = batch.get(key)
+            if torch.is_tensor(value):
+                batch[key] = self._joint_transform.to_checkpoint(value)
+        return batch
+
+    def _preprocess_action(self, normalized_batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        """Build padded action targets and masks for training (empty at inference).
+
+        Returns:
+            Dictionary with ``action``, ``action_horizon_is_pad`` and
+            ``action_dim_is_pad`` when action targets are present, else empty.
+        """
+        action = self._action_extractor.extract(normalized_batch)
+        if action is None:
+            return {}
+        padded, action_horizon_is_pad, action_dim_is_pad = self._action_padder(action)
+        return {
+            ACTION: padded,
+            "action_horizon_is_pad": action_horizon_is_pad,
+            "action_dim_is_pad": action_dim_is_pad,
+        }
+
     @staticmethod
     def _ensure_tensor_outputs(outputs: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Ensure all output values are torch tensors.
@@ -227,6 +266,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             A packed dictionary matching MolmoAct2 model inputs.
         """
         self._validate_batch(batch)
+        batch = self._apply_input_joint_transform(batch)
         normalized_batch = self._normalizer(batch)
         bundle = self._extractor.extract(normalized_batch)
 
@@ -238,5 +278,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         packed.update(text_outputs)
         packed.update(image_outputs)
         packed.update(state_outputs)
+        packed.update(self._preprocess_action(normalized_batch))
 
         return self._ensure_tensor_outputs(packed)

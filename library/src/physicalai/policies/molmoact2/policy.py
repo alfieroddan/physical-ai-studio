@@ -6,7 +6,7 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -18,6 +18,7 @@ from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureTy
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
+from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
@@ -134,6 +135,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         n_action_steps: int = 30,
         action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
+        adapt_to_so101: bool = False,
         torch_compile: bool = False,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
@@ -146,6 +148,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             n_obs_steps: Number of observation steps.
             n_action_steps: Number of predicted action steps.
             action_mode: Training/inference action mode.
+            adapt_to_so101: Apply the SO-100/101 joint frame transform to joint
+                observations/actions (needed for zero-shot and fine-tuning from the
+                pre-#777 LeRobot calibration checkpoint).
             torch_compile: Whether to enable compile-oriented config flags.
 
         Raises:
@@ -200,6 +205,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         self._checkpoint_location: str | None = (
             self.hf_container.checkpoint_location if self.hf_container is not None else None
         )
+
+        # SO-100/101 joint calibration correction (must be set before processors build).
+        self.config.adapt_to_so101 = adapt_to_so101
 
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
         # the same pretrained source during inference adapter reload.
@@ -345,6 +353,92 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
 
         processed_batch = self._preprocessor(batch.to_dict())
         return self.model.compute_val_loss(processed_batch)
+
+    def get_optim_params(self) -> list[dict[str, Any]]:
+        """Group trainable parameters by component with per-component learning rates.
+
+        Returns:
+            AdamW parameter groups for the VLM, ViT, connector and action expert.
+
+        Raises:
+            RuntimeError: If the model has not been initialized.
+        """
+        if self.model is None:
+            msg = "Model is not initialized"
+            raise RuntimeError(msg)
+
+        grouped: dict[str, list[torch.nn.Parameter]] = {
+            "vlm": [],
+            "vit": [],
+            "connector": [],
+            "action_expert": [],
+        }
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if "action_expert" in name:
+                grouped["action_expert"].append(param)
+            elif "image_pooling_2d" in name or "image_projector" in name:
+                grouped["connector"].append(param)
+            elif "vision" in name:
+                grouped["vit"].append(param)
+            else:
+                grouped["vlm"].append(param)
+
+        learning_rates = {
+            "vlm": self.config.optimizer_lr,
+            "vit": self.config.optimizer_vit_lr,
+            "connector": self.config.optimizer_connector_lr,
+            "action_expert": self.config.optimizer_action_expert_lr,
+        }
+        return [{"params": params, "lr": learning_rates[name]} for name, params in grouped.items() if params]
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        """Build the AdamW optimizer with grouped learning rates and an LR schedule.
+
+        Returns:
+            The Lightning optimizer/scheduler configuration.
+        """
+        if self.model is not None and self.config.train_action_expert_only:
+            self.model.freeze_to_action_expert()
+
+        optimizer = torch.optim.AdamW(
+            self.get_optim_params(),
+            lr=self.config.optimizer_lr,
+            weight_decay=self.config.optimizer_weight_decay,
+            betas=self.config.optimizer_betas,
+            eps=self.config.optimizer_eps,
+        )
+
+        num_training_steps = int(self.trainer.estimated_stepping_batches)
+        num_decay_steps = self.config.scheduler_decay_steps
+        if num_decay_steps is None:
+            num_decay_steps = num_training_steps
+
+        scheduler = cosine_decay_with_warmup_scheduler(
+            optimizer,
+            peak_lr=self.config.optimizer_lr,
+            decay_lr=self.config.scheduler_decay_lr,
+            num_warmup_steps=self.config.scheduler_warmup_steps,
+            num_decay_steps=int(num_decay_steps),
+            num_training_steps=num_training_steps,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
+
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """Clip gradients using the norm configured on the policy."""
+        del gradient_clip_algorithm
+        clip_val = gradient_clip_val if gradient_clip_val is not None else self.config.optimizer_grad_clip_norm
+        if clip_val and clip_val > 0:
+            self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
 
     @property
     def input_features(self) -> list[Feature]:

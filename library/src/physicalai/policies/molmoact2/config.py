@@ -284,6 +284,14 @@ class MolmoAct2Config(Config):
     action_mode: Literal["continuous", "discrete", "both"] = "continuous"
     state_format: Literal["discrete"] = "discrete"
 
+    # SO-100/101 joint frame transform (pre-#777 LeRobot calibration).
+    # When enabled, joint observations/actions are mapped robot->checkpoint on
+    # the way in and checkpoint->robot on the way out. Defaults reproduce the
+    # LeRobot backward-compatibility correction for SO-101.
+    adapt_to_so101: bool = False
+    joint_signs: list[float] = field(default_factory=lambda: [1.0, -1.0, 1.0, 1.0, 1.0, 1.0])
+    joint_offsets: list[float] = field(default_factory=lambda: [0.0, 90.0, 90.0, 0.0, 0.0, 0.0])
+
     # Flow matching
     flow_matching_num_steps: int = 10
     flow_matching_cutoff: float = 1.0

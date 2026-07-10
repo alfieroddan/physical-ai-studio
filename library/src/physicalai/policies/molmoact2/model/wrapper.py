@@ -16,9 +16,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, override
 
 import torch
+import torch.nn.functional as F  # noqa: N812
 from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 
+from physicalai.data.constants import ACTION
 from physicalai.policies.base import Model
 
 from .backbone import MolmoAct2ForConditionalGeneration
@@ -29,9 +31,26 @@ from .video import MolmoAct2VideoProcessor
 if TYPE_CHECKING:
     from physicalai.policies.molmoact2.config import MolmoAct2Config
 
-_TRAINING_NOT_SUPPORTED = "MolmoAct2 training loss is out of scope."
 _SAFE_WEIGHTS_NAME = "model.safetensors"
 _SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+
+
+def _masked_flow_loss(
+    predicted: Tensor,
+    target: Tensor,
+    *,
+    action_horizon_is_pad: Tensor | None,
+    action_dim_is_pad: Tensor | None,
+) -> Tensor:
+    """Mean squared error over valid action steps and dimensions only."""
+    loss = F.mse_loss(predicted, target, reduction="none")
+    mask = torch.ones_like(loss, dtype=torch.bool)
+    if action_horizon_is_pad is not None:
+        mask = mask & (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, :, None]
+    if action_dim_is_pad is not None:
+        mask = mask & (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :]
+    valid = mask.to(loss.dtype)
+    return (loss * valid).sum() / valid.sum().clamp_min(1.0)
 
 
 def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
@@ -118,7 +137,7 @@ class MolmoAct2Model(Model):
             Actions of shape ``(batch, n_action_steps, env_action_dim)``.
         """
         model_inputs = self.prepare_graph_inputs(batch)
-        actions = self.backbone.generate_actions_from_inputs(
+        actions = self.backbone.model.generate_actions_from_inputs(
             **model_inputs,
             action_horizon=int(self.config.n_action_steps),
             sample_noise=bool(self.config.sample_noise) if sample_noise is None else sample_noise,
@@ -139,9 +158,57 @@ class MolmoAct2Model(Model):
 
     @override
     def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
-        """Training loss. Not implemented — inference-only for now."""
-        del batch
-        raise NotImplementedError(_TRAINING_NOT_SUPPORTED)
+        """Continuous flow-matching training loss.
+
+        Returns:
+            The scalar loss and a metrics dict.
+        """
+        model_inputs = self.prepare_graph_inputs(batch)
+        predicted, target = self.backbone.model.predict_flow_velocity(
+            input_ids=model_inputs["input_ids"],
+            attention_mask=model_inputs.get("attention_mask"),
+            token_type_ids=model_inputs.get("token_type_ids"),
+            images=model_inputs.get("images"),
+            token_pooling=model_inputs.get("token_pooling"),
+            actions=batch[ACTION],
+            action_dim_is_pad=batch.get("action_dim_is_pad"),
+            freeze_encoder=bool(self.config.train_action_expert_only),
+        )
+        loss = _masked_flow_loss(
+            predicted,
+            target,
+            action_horizon_is_pad=batch.get("action_horizon_is_pad"),
+            action_dim_is_pad=batch.get("action_dim_is_pad") if self.config.mask_action_dim_padding else None,
+        )
+        value = float(loss.detach().float())
+        return loss, {"action_flow_loss": value, "loss": value}
+
+    @override
+    @torch.no_grad()
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+        """Validation MSE between predicted and ground-truth action chunks.
+
+        Returns:
+            The scalar loss and a metrics dict.
+        """
+        gt_actions = batch[ACTION]
+        predicted = self.predict_action_chunk(batch)
+        horizon = min(int(gt_actions.shape[1]), int(predicted.shape[1]))
+        action_dim = min(int(gt_actions.shape[2]), int(predicted.shape[2]))
+        target = gt_actions[:, :horizon, :action_dim].to(device=predicted.device, dtype=predicted.dtype)
+        loss = F.mse_loss(predicted[:, :horizon, :action_dim], target)
+        return loss, {"loss": float(loss.detach().float())}
+
+    def freeze_to_action_expert(self) -> None:
+        """Freeze every parameter except the action expert (memory-lean fine-tuning)."""
+        trainable = 0
+        for name, param in self.named_parameters():
+            is_action_expert = "action_expert" in name
+            param.requires_grad_(is_action_expert)
+            trainable += param.numel() if is_action_expert else 0
+        if trainable == 0:
+            msg = "train_action_expert_only=True, but no action_expert parameters were found."
+            raise RuntimeError(msg)
 
     # Unused delta-index properties.
 
