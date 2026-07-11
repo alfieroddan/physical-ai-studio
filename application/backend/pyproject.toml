@@ -1,7 +1,7 @@
 [project]
-name = "physical-ai-studio"
+name = "physicalai-studio"
 version = "0.1.0"
-description = "Physical AI Studio server"
+description = "Physical AI Studio"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
 
@@ -9,7 +9,7 @@ dependencies = [
   "opencv-python",
   "cv2-enumerate-cameras",
   'harvesters; sys_platform != "darwin"',
-  "fastapi[standard]",
+  "fastapi[standard]<1",
   "physicalai-train[pi0,smolvla]",
   "physicalai[robots, capture]",
   "lerobot[feetech]==0.5.1",
@@ -35,6 +35,25 @@ dependencies = [
   # uv doesn't select XPU local-version wheels (e.g. 0.15.0+xpu) for CUDA runs.
   "torchao===0.15.0",
 ]
+
+[project.scripts]
+physicalai-studio = "cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src"]
+sources = ["src"]
+exclude = [
+  "src/**/*.egg-info/**",
+  "src/**/__pycache__/**",
+]
+
+[tool.hatch.build.hooks.custom]
+path = "scripts/hatch_build.py"
+
 
 [project.optional-dependencies]
 cpu = [
@@ -87,6 +106,7 @@ explicit = false
 
 [tool.uv.sources]
 physicalai-train = { path = "../../library", editable = true }
+physicalai = { git = "https://github.com/openvinotoolkit/physicalai.git", rev = "9881601325f724a0f00b1bf43f134d7f34fdef55" }
 # Keep torchao on PyPI for all extras.
 # The XPU index publishes `torchao` local-version wheels (e.g. `+xpu`) that can
 # be selected via unsafe-best-match even for non-XPU installs (like `--extra cuda`),
@@ -124,9 +144,9 @@ all = [
 ]
 
 [tool.uv]
+package = true
 default-groups = ["all"]
 exclude-newer = "7 days"
-exclude-newer-package = { physicalai = false }
 # The pytorch-xpu index is non-explicit (explicit = false) because
 # transitive deps like pytorch-triton-xpu only exist on the XPU index.
 # unsafe-best-match is required because PyTorch indexes can host stale
@@ -141,6 +161,8 @@ override-dependencies = [
     # Safe to override because executorch
     # production code does not import pytest at runtime.
     "pytest>=9.0.3",
+    # lerobot==0.5.1 caps diffusers at <0.36.0, 0.38.0 contains CVE-2026-44827 fix
+    "diffusers>=0.38.0",
 ]
 conflicts = [
     [

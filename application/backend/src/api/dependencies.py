@@ -24,11 +24,11 @@ from services.event_processor import EventProcessor
 from services.job_service import JobService
 from services.log_service import LogService
 from services.robot_calibration_service import RobotCalibrationService
+from services.robot_catalog_service import RobotCatalogService
 from services.system_service import SystemService
 from settings import get_settings
 from utils.serial_robot_tools import RobotConnectionManager
 from workers.model_worker_registry import ModelWorkerRegistry
-from workers.robot_worker_registry import RobotWorkerRegistry
 
 
 def is_valid_uuid(identifier: str) -> bool:
@@ -81,6 +81,15 @@ def get_robot_calibration_service(robot_manager: RobotConnectionManagerDep) -> R
 
 
 RobotCalibrationServiceDep = Annotated[RobotCalibrationService, Depends(get_robot_calibration_service)]
+
+
+@lru_cache
+def get_robot_catalog_service() -> RobotCatalogService:
+    """Provide a RobotCatalogService instance for the robot catalog."""
+    return RobotCatalogService()
+
+
+RobotCatalogServiceDep = Annotated[RobotCatalogService, Depends(get_robot_catalog_service)]
 
 
 @lru_cache
@@ -216,6 +225,9 @@ def get_scheduler(request: HTTPConnection) -> Scheduler:
     return request.app.state.scheduler
 
 
+SchedulerDep = Annotated[Scheduler, Depends(get_scheduler)]
+
+
 def get_scheduler_ws(request: HTTPConnection) -> Scheduler:
     """Provide the global Scheduler instance for WebSocket."""
     return request.app.state.scheduler
@@ -224,17 +236,6 @@ def get_scheduler_ws(request: HTTPConnection) -> Scheduler:
 def get_event_processor_ws(request: HTTPConnection) -> EventProcessor:
     """Provide the global event_processor instance for WebSocket."""
     return request.app.state.event_processor
-
-
-def get_robot_registry(request: HTTPConnection) -> RobotWorkerRegistry:
-    """Dependency to get robot worker registry."""
-    registry = getattr(request.app.state, "robot_registry", None)
-    if registry is None:
-        raise RuntimeError("Robot worker registry not initialized")
-    return registry
-
-
-RobotRegistryDep = Annotated[RobotWorkerRegistry, Depends(get_robot_registry)]
 
 
 def get_recording_locked_camera_fingerprints(request: HTTPConnection) -> set[str]:
