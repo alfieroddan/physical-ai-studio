@@ -588,8 +588,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
-                preprocessors_specs=preproc_specs,
-                postprocessors_specs=postproc_specs,
             ),
         }
 
