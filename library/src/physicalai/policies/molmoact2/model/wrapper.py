@@ -112,6 +112,12 @@ class MolmoAct2Model(Model):
         self.config = config
         self.backbone = MolmoAct2ForConditionalGeneration(config)
 
+        if self.config.compile_model:
+            torch.set_float32_matmul_precision("high")
+            compile_mode = "default"
+            self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
+            self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
+
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load safetensors weights into the backbone (strict key match)."""
         _strict_load_safetensors_weights(self.backbone, checkpoint_location)
