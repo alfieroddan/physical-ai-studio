@@ -251,6 +251,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         if self._checkpoint_location is not None:
             self.model.load_pretrained_weights(self._checkpoint_location)
 
+        # parameter setting based on config
+        if self.config.train_action_expert_only:
+            self._freeze_non_action_expert_parameters()
+
     def setup(self, stage: str) -> None:
         """Set up model from datamodule (lazy or fine-tuning path).
 
@@ -274,11 +278,32 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
             dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
             if not self.config.input_features:
                 self.config.input_features = dataset_input_features
+                self.hparams["input_features"] = self.config.input_features
             if not self.config.output_features:
                 self.config.output_features = dataset_output_features
+                self.hparams["output_features"] = self.config.output_features
 
         if self.model is None:
             self._initialize_model()
+
+    def _backbone(self) -> torch.nn.Module:
+        if self.model is None:
+            msg = "Model is not initialized"
+            raise RuntimeError(msg)
+        return self.model.backbone.model
+
+    def _freeze_non_action_expert_parameters(self) -> None:
+        if self.model is None:
+            msg = "Model is not initialized"
+            raise RuntimeError(msg)
+        trainable_params = 0
+        for name, param in self.model.named_parameters():
+            param.requires_grad = "action_expert" in name
+            if param.requires_grad:
+                trainable_params += param.numel()
+        if trainable_params == 0:
+            msg = "train_action_expert_only=true, but no action_expert parameters were found."
+            raise RuntimeError(msg)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> torch.Tensor:

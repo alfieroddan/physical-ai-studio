@@ -363,15 +363,15 @@ class MolmoAct2Config(Config):
     compile_model: bool = False
 
     # Fine-tuning controls
-    freeze_embedding: bool = True
-    train_action_expert_only: bool = False
+    freeze_embedding: bool = False
+    train_action_expert_only: bool = True
     gradient_checkpointing: bool = False
 
     optimizer_lr: float = 1e-5
     optimizer_vit_lr: float = 5e-6
     optimizer_connector_lr: float = 5e-6
-    optimizer_action_expert_lr: float = 5e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_action_expert_lr: float = 1e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.99)
     optimizer_eps: float = 1e-6
     optimizer_weight_decay: float = 0.0
     optimizer_grad_clip_norm: float = 1.0
