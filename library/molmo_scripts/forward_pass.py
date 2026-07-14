@@ -1,14 +1,10 @@
-import time
-
 import torch
 
-from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data import Feature, FeatureType, Observation
 from physicalai.policies import MolmoAct2
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-
-# SO100 pretrained stats expect state-only inputs with 6 values.
 batch = Observation(
     images={
         "overview": torch.rand(1, 3, 256, 256),
@@ -42,27 +38,12 @@ output_features = [
 ]
 
 
-def print_resolved_features(label: str, features: list[Feature]) -> None:
-    print(f"{label}:")
-    for feature in features:
-        normalization_data = feature.normalization_data
-        has_normalization = isinstance(normalization_data, NormalizationParameters)
-        print(
-            f"  - name={feature.name}, type={feature.ftype}, shape={feature.shape}, "
-            f"has_normalization={has_normalization}",
-        )
-        if has_normalization:
-            print(
-                f"    q01={normalization_data.q01}, q99={normalization_data.q99}",
-            )
-
-
 if __name__ == "__main__":
     # Initialize the policy
     policy = MolmoAct2(
         input_features=input_features,
         output_features=output_features,
-    ).to(device)
+    ).to(device, dtype=torch.bfloat16)
     policy.eval()
 
     # Forward pass to get predicted actions
