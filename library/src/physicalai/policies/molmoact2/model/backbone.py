@@ -284,7 +284,6 @@ class MolmoAct2Backbone(nn.Module):
         return self._require_action_expert().prepare_context(
             encoder_kv_states=encoder_kv,
             encoder_attention_mask=encoder_mask,
-            batch_size=batch_size,
             seq_len=seq_len,
             device=device,
             dtype=dtype,
