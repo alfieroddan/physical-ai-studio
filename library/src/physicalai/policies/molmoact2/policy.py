@@ -5,20 +5,18 @@
 
 """MolmoAct2 policy implementation."""
 
-from os import PathLike
 from pathlib import Path
 from typing import Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
-from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
 from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
-from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
+from physicalai.export.backends import ExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
@@ -124,7 +122,7 @@ def _feature_normalization_stats(feature: Feature, mode: str) -> dict[str, list[
     return stats
 
 
-class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompatibleMethodOverride,reportIncompatibleVariableOverride]
+class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
     def __init__(
@@ -161,7 +159,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         """
         super().__init__(n_action_steps=n_action_steps)
 
-        # TODO(alfieroddan): enable more than just continous action mode
+        # Currently continuous mode is only supported
         if action_mode != "continuous":
             msg = "Only continous action mode is currently supported."
             raise ValueError(msg)
@@ -554,184 +552,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
         """Extra backend export args for inference-time pre/post graph components."""
-        normalize_by_mode: dict[str, dict[str, dict[str, list[float]]]] = {}
-        for feature in self.config.input_features or []:
-            if not feature.name:
-                continue
-            mode = _feature_normalization_mode(feature)
-            normalize_by_mode.setdefault(mode, {})[feature.name] = _feature_normalization_stats(feature, mode)
-
-        action_feature = next((f for f in (self.config.output_features or []) if f.ftype == FeatureType.ACTION), None)
-        denorm_by_mode: dict[str, dict[str, dict[str, list[float]]]] = {}
-        if action_feature is not None:
-            action_mode = _feature_normalization_mode(action_feature)
-            action_stats = _feature_normalization_stats(action_feature, action_mode)
-            denorm_by_mode.setdefault(action_mode, {})[ACTION] = action_stats
-
         output_names = [feature.name for feature in (self.outputs_schema or [])]
 
-        preproc_specs = [
-            *[
-                ComponentSpec(type="normalize", mode=mode, stats=stats)
-                for mode, stats in normalize_by_mode.items()
-                if stats
-            ],
-            ComponentSpec(
-                type="molmoact2_pre",
-                tokenizer_name_or_path=self.config.tokenizer_name_or_path,
-                num_state_tokens=self.config.num_state_tokens,
-                setup_type=self.config.setup_type,
-                control_mode=self.config.control_mode,
-                add_setup_tokens=self.config.add_setup_tokens,
-                add_control_tokens=self.config.add_control_tokens,
-                image_processor_config=self._export_image_processor_config(),
-                model_input_config=self._export_model_input_config(),
-            ),
-        ]
-
-        postproc_specs = [
-            ComponentSpec(type="molmoact2_post"),
-            *[
-                ComponentSpec(type="denormalize", mode=mode, stats=stats)
-                for mode, stats in denorm_by_mode.items()
-                if stats
-            ],
-        ]
-
         return {
-            "openvino": OpenVINOExportParameters(
-                outputs=output_names,
-                preprocessors_specs=preproc_specs,
-                postprocessors_specs=postproc_specs,
-            ),
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
             ),
         }
-
-    def _export_image_processor_config(self) -> dict[str, Any] | None:
-        """Serialize the image patchify config for the inference-side preprocessor.
-
-        Returns:
-            A JSON-serializable image-processor config, or ``None`` when the
-            processor config is unavailable.
-        """
-        processor_config = self.config.processor_config
-        if processor_config is None:
-            return None
-        image_processor = processor_config.image_processor
-        return {
-            "size": dict(image_processor.size),
-            "image_mean": list(image_processor.image_mean),
-            "image_std": list(image_processor.image_std),
-            "patch_size": int(image_processor.patch_size),
-            "pooling_size": list(image_processor.pooling_size),
-            "crop_mode": str(image_processor.crop_mode),
-        }
-
-    def _export_model_input_config(self) -> dict[str, Any] | None:
-        """Serialize token ids and layout flags for the inference-side preprocessor.
-
-        Returns:
-            A JSON-serializable model-input config, or ``None`` when the
-            processor config is unavailable.
-        """
-        processor_config = self.config.processor_config
-        if processor_config is None:
-            return None
-        action_feature = next(
-            (f for f in (self.config.output_features or []) if f.ftype == FeatureType.ACTION),
-            None,
-        )
-        env_action_dim = int(action_feature.shape[-1]) if action_feature and action_feature.shape else 0
-        return {
-            "image_placeholder_token_id": self.config.image_placeholder_token_id,
-            "image_patch_id": self.config.image_patch_id,
-            "image_start_token_id": self.config.image_start_token_id,
-            "image_end_token_id": self.config.image_end_token_id,
-            "image_col_id": self.config.image_col_id,
-            "low_res_image_start_token_id": self.config.low_res_image_start_token_id,
-            "frame_start_token_id": self.config.frame_start_token_id,
-            "frame_end_token_id": self.config.frame_end_token_id,
-            "image_low_res_id": self.config.image_low_res_id,
-            "image_use_col_tokens": bool(processor_config.image_use_col_tokens),
-            "use_single_crop_col_tokens": processor_config.use_single_crop_col_tokens,
-            "use_single_crop_start_token": bool(processor_config.use_single_crop_start_token),
-            "max_action_dim": int(self.config.max_action_dim),
-            "env_action_dim": env_action_dim,
-        }
-
-    @torch.no_grad()
-    def to_openvino(
-        self,
-        output_path: PathLike | str,
-        input_sample: dict[str, torch.Tensor] | None = None,
-        **export_kwargs: dict,
-    ) -> None:
-        """Export to OpenVINO, then canonicalize the model's input tensor names.
-
-        The base export names inputs from the traced graph. MolmoAct2 passes
-        ``images`` and ``action_dim_is_pad`` straight through to reused/aliased
-        ops, so their canonical ``any_name`` can resolve to a numeric alias even
-        though the friendly name is present. That breaks name-based input
-        matching in ``InferenceModel``. This override re-pins each input tensor to
-        its friendly name after the base export completes.
-
-        Args:
-            output_path: Directory or file path for the exported ``.xml``.
-            input_sample: Optional sample used for tracing; defaults to the
-                policy's preprocessed sample input.
-            **export_kwargs: Forwarded to the base OpenVINO export.
-        """
-        super().to_openvino(output_path, input_sample=input_sample, **export_kwargs)
-        self._canonicalize_openvino_input_names(output_path, input_sample)
-
-    def _canonicalize_openvino_input_names(
-        self,
-        output_path: PathLike | str,
-        input_sample: dict[str, torch.Tensor] | None,
-    ) -> None:
-        """Re-pin exported OpenVINO input tensors to their friendly names.
-
-        The renamed model is written to sibling temp files and then atomically
-        moved over the originals. Saving directly back over the just-read
-        ``.xml``/``.bin`` would overwrite the memory-mapped weights while they are
-        still mapped, which crashes the process with ``SIGBUS`` and leaves an
-        empty ``.xml``.
-
-        Args:
-            output_path: The export path passed to :meth:`to_openvino`.
-            input_sample: The tracing sample, or ``None`` to reuse the default.
-        """
-        import openvino  # noqa: PLC0415
-
-        sample = input_sample if input_sample is not None else self._get_default_export_input_sample()
-        if not sample:
-            return
-
-        expected_names = list(sample.keys())
-        model_path = self._prepare_export_path(output_path, ".xml")
-        ov_model = openvino.Core().read_model(str(model_path))
-
-        renamed = False
-        for model_input in ov_model.inputs:
-            current_names = set(model_input.get_names())
-            match = next((name for name in expected_names if name in current_names), None)
-            if match is not None and model_input.get_any_name() != match:
-                model_input.tensor.set_names({match})
-                renamed = True
-
-        if not renamed:
-            return
-
-        tmp_xml = model_path.parent / f"{model_path.stem}_named.xml"
-        tmp_bin = tmp_xml.with_suffix(".bin")
-        openvino.save_model(ov_model, str(tmp_xml))
-        # Release the mmap on the original weights before replacing them.
-        del ov_model
-        tmp_xml.replace(model_path)
-        tmp_bin.replace(model_path.with_suffix(".bin"))
 
     @staticmethod
     def get_supported_export_backends() -> list[str | ExportBackend]:
@@ -742,4 +570,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH, ExportBackend.OPENVINO]
+        return [ExportBackend.TORCH]
