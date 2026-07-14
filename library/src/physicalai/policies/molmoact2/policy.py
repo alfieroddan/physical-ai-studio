@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
+from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
 from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
@@ -559,6 +560,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             "torch": TorchExportParameters(
                 input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
                 output_names=output_names,
+                preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
             ),
         }
 
