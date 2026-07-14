@@ -5,7 +5,7 @@ import torch
 from physicalai.data import Feature, FeatureType, Observation
 from physicalai.policies import MolmoAct2
 
-DEVICE = "xpu"
+DEVICE = "cuda"
 COMPILE = True
 NUM_WARMUP = 5
 NUM_ITERS = 50

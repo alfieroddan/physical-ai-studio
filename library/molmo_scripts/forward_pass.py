@@ -1,7 +1,12 @@
+import time
+
 import torch
 
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies import MolmoAct2
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
 
 # SO100 pretrained stats expect state-only inputs with 6 values.
 batch = Observation(
@@ -57,8 +62,7 @@ if __name__ == "__main__":
     policy = MolmoAct2(
         input_features=input_features,
         output_features=output_features,
-        torch_compile=True,
-    ).to("xpu", dtype=torch.bfloat16)
+    ).to(device)
     policy.eval()
 
     # Forward pass to get predicted actions
