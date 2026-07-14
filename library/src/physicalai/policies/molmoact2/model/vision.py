@@ -70,7 +70,11 @@ class VisionMultiHeadAttention(nn.Module):
         inputs_kv: torch.Tensor | None = None,
         attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Attend ``inputs_q`` over ``inputs_kv`` (defaults to self-attention)."""
+        """Attend ``inputs_q`` over ``inputs_kv`` (defaults to self-attention).
+
+        Returns:
+            Multi head attention for vision stack.
+        """
         inputs_kv = inputs_q if inputs_kv is None else inputs_kv
         batch, q_len, _ = inputs_q.shape
 
@@ -108,7 +112,11 @@ class VisionMLP(nn.Module):
         self.w2 = nn.Linear(hidden_dim, dim, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the feed-forward transform."""
+        """Apply the feed-forward transform.
+
+        Returns:
+            Output of feedforward MLP in Vit Layer.
+        """
         return self.w2(self.act(self.w1(x)))
 
 
@@ -132,8 +140,12 @@ class VisionBlock(nn.Module):
         self.ffn_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Run attention and feed-forward with residual connections."""
-        x = x + self.attention(self.attention_norm(x))
+        """Run attention and feed-forward with residual connections.
+
+        Returns:
+            Output of ViT transformer block.
+        """
+        x = x + self.attention(self.attention_norm(x))  # noqa: PLR6104
         return x + self.feed_forward(self.ffn_norm(x))
 
 
@@ -158,7 +170,11 @@ class VisionTransformer(nn.Module):
         self.transformer = VisionBlockCollection(config)
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:
-        """Add (bicubic-resized if needed) positional embeddings to patches."""
+        """Add (bicubic-resized if needed) positional embeddings to patches.
+
+        Returns:
+            Embeddings with position embeddings added.
+        """
         side = int(math.sqrt(self.positional_embedding.shape[0]))
         pos_emb = self.positional_embedding.reshape(side, side, -1)
         if pos_emb.shape[0] != patch_num[0] or pos_emb.shape[1] != patch_num[1]:
@@ -187,7 +203,11 @@ class ImageProjectorMLP(nn.Module):
         self.act = ACT2FN[hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the gated projection."""
+        """Apply the gated projection.
+
+        Returns:
+            Output of image projection linear layer.
+        """
         return self.w2(self.act(self.w1(x)) * self.w3(x))
 
 
@@ -285,7 +305,7 @@ class MolmoAct2VisionBackbone(nn.Module):
         batch_idx = torch.arange(batch_size, device=pooled_patches_idx.device).view(batch_size, 1, 1)
         batch_idx = batch_idx.expand(-1, pooled_patches_idx.shape[1], pooled_patches_idx.shape[2])
         to_pool = image_features.reshape(batch_size, -1, dim)[batch_idx, pooled_patches_idx.clamp_min(0)]
-        to_pool = to_pool * valid.to(self.dtype)[..., None]
+        to_pool = to_pool * valid.to(self.dtype)[..., None]  # noqa: PLR6104
         to_pool = to_pool.reshape(-1, pooled_patches_idx.shape[-1], dim)
 
         if self.adapter_config.pooling_attention_mask:

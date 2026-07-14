@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
+import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
 if TYPE_CHECKING:
@@ -30,14 +30,24 @@ KVContext = tuple[torch.Tensor, torch.Tensor]
 
 
 def _round_up_multiple(value: int, multiple_of: int) -> int:
-    """Round ``value`` up to the nearest multiple of ``multiple_of``."""
+    """Round ``value`` up to the nearest multiple of ``multiple_of``.
+
+    Returns:
+        The smallest integer greater than or equal to ``value`` that is
+        a multiple of ``multiple_of``. If ``multiple_of`` is less than
+        or equal to zero, returns ``value`` unchanged.
+    """
     if multiple_of <= 0:
         return value
     return int(math.ceil(value / multiple_of) * multiple_of)
 
 
 def _modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Apply DiT-style ``shift``/``scale`` modulation over the sequence."""
+    """Apply DiT-style ``shift``/``scale`` modulation over the sequence.
+
+    Returns:
+        The modulated tensor, of the same shape as ``x``.
+    """
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
@@ -62,10 +72,16 @@ class ActionExpertRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(size)) if elementwise_affine else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize ``x`` over its last dimension."""
+        """Normalize ``x`` over its last dimension.
+
+        Returns:
+            The RMS-normalized tensor, of the same shape and dtype as
+            the input ``x``. Scaled by the learnable weight if
+            ``elementwise_affine`` was set to ``True``.
+        """
         out_dtype = x.dtype
         x = x.to(torch.float32)
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # noqa: PLR6104
         x = x.to(out_dtype)
         return x if self.weight is None else x * self.weight
 
@@ -74,7 +90,11 @@ class ActionExpertRotaryEmbedding(nn.Module):
     """Rotary embedding for the action-expert self-attention."""
 
     def __init__(self, head_dim: int, base: float = 10000.0) -> None:
-        """Store rotary parameters (``head_dim`` must be even)."""
+        """Store rotary parameters (``head_dim`` must be even).
+
+        Raises:
+            ValueError: If ``head_dim`` is not even.
+        """
         super().__init__()
         if head_dim % 2 != 0:
             msg = "RoPE requires an even head_dim."
@@ -89,7 +109,13 @@ class ActionExpertRotaryEmbedding(nn.Module):
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build the ``(cos, sin)`` cache for a given sequence length."""
+        """Build the ``(cos, sin)`` cache for a given sequence length.
+
+        Returns:
+            A tuple ``(cos, sin)`` of tensors, each of shape
+            ``(1, 1, seq_len, head_dim // 2)``, containing the cosine
+            and sine values used to rotate ``q``/``k``.
+        """
         half_dim = self.head_dim // 2
         inv_freq = 1.0 / (self.base ** (torch.arange(0, half_dim, device=device, dtype=torch.float32) / half_dim))
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
@@ -104,7 +130,13 @@ class ActionExpertRotaryEmbedding(nn.Module):
         k: torch.Tensor,
         rope_cache: tuple[torch.Tensor, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply rotary embeddings to ``q`` and ``k``."""
+        """Apply rotary embeddings to ``q`` and ``k``.
+
+        Returns:
+            A tuple ``(q_rotated, k_rotated)`` of tensors, each the same
+            shape as the corresponding input, with rotary position
+            embeddings applied.
+        """
         cos, sin = rope_cache
         half_dim = self.head_dim // 2
 
@@ -124,7 +156,13 @@ class SinusoidalTimeEmbedding(nn.Module):
         self.dim = dim
 
     def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
-        """Embed a ``(batch,)`` timestep vector into ``(batch, dim)``."""
+        """Embed a ``(batch,)`` timestep vector into ``(batch, dim)``.
+
+        Returns:
+            A tensor of shape ``(batch, dim)`` containing the
+            sinusoidal timestep embeddings. If ``dim`` is odd, the
+            result is zero-padded by one column to match ``dim``.
+        """
         half_dim = self.dim // 2
         freq = torch.exp(
             torch.arange(half_dim, device=timesteps.device, dtype=timesteps.dtype)
@@ -159,7 +197,12 @@ class ActionExpertSelfAttention(nn.Module):
         is_causal: bool,
         rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> torch.Tensor:
-        """Run masked self-attention over the action sequence."""
+        """Run masked self-attention over the action sequence.
+
+        Returns:
+            The attention output, a tensor of shape
+            ``(batch, seq_len, hidden)``.
+        """
         batch, seq_len, hidden = x.shape
         qkv = self.qkv(x).view(batch, seq_len, 3, self.num_heads, self.head_dim)
         q = qkv[:, :, 0].transpose(1, 2)
@@ -196,7 +239,11 @@ class ActionExpertCrossAttention(nn.Module):
         kv_v: torch.Tensor,
         attn_mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        """Attend action tokens into ``(kv_k, kv_v)`` context heads."""
+        """Attend action tokens into ``(kv_k, kv_v)`` context heads.
+
+        Returns:
+            Cross attended action tokens with KV.
+        """
         batch, tgt_len, hidden = x.shape
         q = self.q_proj(x).view(batch, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
         k = kv_k.transpose(1, 2)
@@ -220,7 +267,11 @@ class ActionExpertMLP(nn.Module):
         self.down_proj = nn.Linear(inner_dim, hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the gated feed-forward transform."""
+        """Apply the gated feed-forward transform.
+
+        Returns:
+            Projection of action expert.
+        """
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
@@ -234,7 +285,11 @@ class ActionExpertModulation(nn.Module):
         self.linear = nn.Linear(hidden_size, num_chunks * hidden_size)
 
     def forward(self, conditioning: torch.Tensor) -> torch.Tensor:
-        """Project the activated conditioning into modulation parameters."""
+        """Project the activated conditioning into modulation parameters.
+
+        Returns:
+            Projected and SiLu'd output of DiT.
+        """
         return self.linear(self.act(conditioning))
 
 
@@ -279,7 +334,11 @@ class ActionExpertBlock(nn.Module):
         is_causal: bool,
         rope_cache: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> torch.Tensor:
-        """Apply modulated self-attn, cross-attn and MLP with residuals."""
+        """Apply modulated self-attn, cross-attn and MLP with residuals.
+
+        Returns:
+            Self attention, cross attention fo action expert.
+        """
         (
             shift_msa,
             scale_msa,
@@ -292,13 +351,13 @@ class ActionExpertBlock(nn.Module):
             gate_mlp,
         ) = self.modulation(conditioning).chunk(9, dim=1)
 
-        x = x + gate_msa.unsqueeze(1) * self.self_attn(
+        x = x + gate_msa.unsqueeze(1) * self.self_attn(  # noqa: PLR6104
             _modulate(self.self_norm(x), shift_msa, scale_msa),
             attn_mask=self_attn_mask,
             is_causal=is_causal,
             rope_cache=rope_cache,
         )
-        x = x + gate_mca.unsqueeze(1) * self.cross_attn(
+        x = x + gate_mca.unsqueeze(1) * self.cross_attn(  # noqa: PLR6104
             _modulate(self.cross_norm(x), shift_mca, scale_mca),
             kv_k=cross_kv[0],
             kv_v=cross_kv[1],
@@ -318,7 +377,11 @@ class ActionExpertFinalLayer(nn.Module):
         self.linear = nn.Linear(hidden_size, output_dim)
 
     def forward(self, x: torch.Tensor, conditioning: torch.Tensor) -> torch.Tensor:
-        """Modulate and project to the action velocity space."""
+        """Modulate and project to the action velocity space.
+
+        Returns:
+            Ouptut of hidden states, project to action space.
+        """
         shift, scale = self.modulation(conditioning).chunk(2, dim=1)
         return self.linear(_modulate(self.norm(x), shift, scale))
 
@@ -333,7 +396,11 @@ class ActionExpert(nn.Module):
         llm_kv_dim: int,
         llm_num_layers: int,
     ) -> None:
-        """Build time/action embeddings, KV projections, blocks and final layer."""
+        """Build time/action embeddings, KV projections, blocks and final layer.
+
+        Raises:
+            ValueError: if action action expers have no block per text layer.
+        """
         super().__init__()
         if config.num_layers != llm_num_layers:
             msg = f"Action expert needs one block per text layer: {config.num_layers} != {llm_num_layers}."
@@ -369,14 +436,22 @@ class ActionExpert(nn.Module):
         self.final_layer = ActionExpertFinalLayer(config.hidden_size, config.max_action_dim)
 
     def _time_conditioning(self, timesteps: torch.Tensor) -> torch.Tensor:
-        """Embed timesteps into the modulation conditioning vector."""
+        """Embed timesteps into the modulation conditioning vector.
+
+        Returns:
+            The condition vectors from timesteps.
+        """
         conditioning = self.time_embed[0](timesteps).to(self.time_embed[1].weight.dtype)
         for module in list(self.time_embed.children())[1:]:
             conditioning = module(conditioning)
         return conditioning
 
     def _project_kv(self, x: torch.Tensor, proj: nn.Linear) -> torch.Tensor:
-        """Project text KV to the action head layout ``(batch, seq, heads, hd)``."""
+        """Project text KV to the action head layout ``(batch, seq, heads, hd)``.
+
+        Returns:
+            KV projected.
+        """
         flat = self.context_norm(proj(x))
         return flat.view(flat.shape[0], flat.shape[1], self.num_heads, self.action_head_dim)
 
@@ -385,18 +460,21 @@ class ActionExpert(nn.Module):
         *,
         encoder_kv_states: Sequence[KVContext],
         encoder_attention_mask: torch.Tensor | None,
-        batch_size: int,
         seq_len: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> ActionExpertContext:
-        """Project text KV per layer and build the attention masks and rope cache."""
+        """Project text KV per layer and build the attention masks and rope cache.
+
+        Returns:
+            ActionExpertContext per step context shared across de-nosing steps.
+        """
         kv_contexts: list[KVContext] = []
         for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states, strict=False):
             k_ctx = self._project_kv(k_in, self.context_k_proj)
             v_ctx = self._project_kv(v_in, self.context_v_proj)
-            if block.cross_attn.k_norm is not None:
-                k_ctx = block.cross_attn.k_norm(k_ctx.transpose(1, 2)).transpose(1, 2)
+            if block.cross_attn.k_norm is not None:  # pyright: ignore[reportAttributeAccessIssue]
+                k_ctx = block.cross_attn.k_norm(k_ctx.transpose(1, 2)).transpose(1, 2)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]
             kv_contexts.append((k_ctx, v_ctx))
 
         cross_mask = None
@@ -410,8 +488,8 @@ class ActionExpert(nn.Module):
             self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
 
         rope_cache = None
-        if self.blocks and self.blocks[0].self_attn.rope is not None:
-            rope_cache = self.blocks[0].self_attn.rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)
+        if self.blocks and self.blocks[0].self_attn.rope is not None:  # pyright: ignore[reportAttributeAccessIssue]
+            rope_cache = self.blocks[0].self_attn.rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]
 
         return ActionExpertContext(
             kv_contexts=kv_contexts,
@@ -428,7 +506,11 @@ class ActionExpert(nn.Module):
         *,
         context: ActionExpertContext,
     ) -> torch.Tensor:
-        """Predict the flow velocity for a single denoising step."""
+        """Predict the flow velocity for a single denoising step.
+
+        Returns:
+            Flow velocity for one de-noising step.
+        """
         conditioning = self._time_conditioning(timesteps)
         x = self.action_embed(actions)
         for block, kv_context in zip(self.blocks, context.kv_contexts, strict=False):

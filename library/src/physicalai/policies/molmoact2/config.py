@@ -50,7 +50,7 @@ class MolmoAct2VitConfig(Config):
 
     @property
     def image_num_patch(self) -> tuple[int, int]:
-        """Return (height_patches, width_patches) for configured input size."""
+        """(height_patches, width_patches) for configured input size."""
         h, w = self.image_default_input_size
         return h // self.image_patch_size, w // self.image_patch_size
 
@@ -478,6 +478,11 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
 
     def _validate_flow_matching_settings(self) -> None:
+        self._validate_flow_matching_params()
+        self._validate_scheduler_params()
+        self._validate_optimizer_params()
+
+    def _validate_flow_matching_params(self) -> None:
         if self.flow_matching_num_steps < 1:
             msg = f"flow_matching_num_steps must be >= 1, got {self.flow_matching_num_steps}"
             raise ValueError(msg)
@@ -496,12 +501,19 @@ class MolmoAct2Config(Config):
         if self.flow_matching_beta_beta <= 0.0:
             msg = f"flow_matching_beta_beta must be > 0.0, got {self.flow_matching_beta_beta}"
             raise ValueError(msg)
+
+    def _validate_scheduler_params(self) -> None:
         if self.scheduler_warmup_steps < 0:
             msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
             raise ValueError(msg)
         if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
             msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
             raise ValueError(msg)
+        if self.scheduler_decay_lr < 0.0:
+            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
+            raise ValueError(msg)
+
+    def _validate_optimizer_params(self) -> None:
         if self.optimizer_action_expert_lr <= 0.0:
             msg = f"optimizer_action_expert_lr must be > 0.0, got {self.optimizer_action_expert_lr}"
             raise ValueError(msg)
@@ -516,9 +528,6 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
         if self.optimizer_eps <= 0.0:
             msg = f"optimizer_eps must be > 0.0, got {self.optimizer_eps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_lr < 0.0:
-            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
             raise ValueError(msg)
 
     def _validate_depth_and_token_settings(self) -> None:

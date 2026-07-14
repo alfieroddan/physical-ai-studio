@@ -164,7 +164,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = "Only continous action mode is currently supported."
             raise ValueError(msg)
 
-        # check both exist, raise error if not
+        # check both either exist or both don't exit, raise error if not
         if bool(input_features) != bool(output_features):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
@@ -206,7 +206,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self.hf_container.checkpoint_location if self.hf_container is not None else None
         )
 
-        # SO-100/101 joint calibration correction (must be set before processors build).
+        # SO-101 joint calibration correction (must be set before processors build).
+        # https://huggingface.co/docs/lerobot/v0.6.0/en/molmoact2#joint-frame-transform-so-100101-zero-shot
         self.config.adapt_to_so101 = adapt_to_so101
 
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs

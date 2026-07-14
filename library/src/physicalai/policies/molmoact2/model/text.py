@@ -27,7 +27,11 @@ KVState = tuple[torch.Tensor, torch.Tensor]
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Rotate the second half of the last dimension onto the first."""
+    """Rotate the second half of the last dimension onto the first.
+
+    Returns:
+        A tensor where the second half of the tensor is reversed and prepended.
+    """
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
@@ -39,7 +43,11 @@ def apply_rotary_pos_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply rotary position embeddings to query and key tensors."""
+    """Apply rotary position embeddings to query and key tensors.
+
+    Returns:
+        The rotary version of the position embeddings.
+    """
     cos = cos.unsqueeze(1)
     sin = sin.unsqueeze(1)
     q_embed = (q * cos) + (rotate_half(q) * sin)
@@ -48,7 +56,11 @@ def apply_rotary_pos_emb(
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """Expand grouped key/value heads to the number of query heads."""
+    """Expand grouped key/value heads to the number of query heads.
+
+    Returns:
+        Repeated values of the KV values to match the number of heads.
+    """
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
@@ -66,10 +78,14 @@ class MolmoAct2RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize ``x`` over its last dimension and rescale."""
+        """Normalize ``x`` over its last dimension and rescale.
+
+        Returns:
+            Root mean squared normalization of x.
+        """
         out_dtype = x.dtype
         x = x.to(torch.float32)
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # noqa: PLR6104
         return self.weight * x.to(out_dtype)
 
 
@@ -100,10 +116,17 @@ class MolmoAct2Attention(nn.Module):
     """Grouped-query self-attention with fused QKV and QK-norm."""
 
     def __init__(self, config: MolmoAct2TextConfig) -> None:
-        """Build the fused QKV projection, output projection and QK norms."""
+        """Build the fused QKV projection, output projection and QK norms.
+
+        Raises:
+            ValueError: if the number of key value heads is None.
+        """
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.num_key_value_heads = config.num_key_value_heads
+        if self.num_key_value_heads is None:
+            msg = f"Number of key value heads can not be None {self.num_key_value_heads}"
+            raise ValueError(msg)
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.head_dim = config.head_dim
 
@@ -130,7 +153,11 @@ class MolmoAct2Attention(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_bias: torch.Tensor | None,
     ) -> tuple[torch.Tensor, KVState]:
-        """Attend and also return the post-rotary key/value states."""
+        """Attend and also return the post-rotary key/value states.
+
+        Returns:
+            Attention values of the rotary posion embeddings with KV states.
+        """
         input_shape = hidden_states.shape[:-1]
         head_shape = (*input_shape, -1, self.head_dim)
 
@@ -169,7 +196,11 @@ class LanguageModelMLP(nn.Module):
         self.act = ACT2FN[hidden_act]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the gated feed-forward transform."""
+        """Apply the gated feed-forward transform.
+
+        Returns:
+            Projection of of language with gated up projection.
+        """
         x, gate = self.ff_proj(x).chunk(2, dim=-1)
         return self.ff_out(self.act(gate) * x)
 
@@ -191,10 +222,14 @@ class MolmoAct2DecoderLayer(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor],
         attention_bias: torch.Tensor | None,
     ) -> tuple[torch.Tensor, KVState]:
-        """Run attention and feed-forward, returning hidden states and KV."""
+        """Run attention and feed-forward, returning hidden states and KV.
+
+        Returns:
+            Decoded hidden states and KV state.
+        """
         attn_out, kv_state = self.self_attn(self.attn_norm(hidden_states), position_embeddings, attention_bias)
-        hidden_states = hidden_states + attn_out
-        hidden_states = hidden_states + self.mlp(self.ff_norm(hidden_states))
+        hidden_states = hidden_states + attn_out  # noqa: PLR6104
+        hidden_states = hidden_states + self.mlp(self.ff_norm(hidden_states))  # noqa: PLR6104
         return hidden_states, kv_state
 
 
@@ -208,7 +243,11 @@ class MolmoAct2Embedding(nn.Module):
         self.new_embedding = nn.Parameter(torch.zeros(num_new_embeddings, features))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Look up token embeddings across the combined table."""
+        """Look up token embeddings across the combined table.
+
+        Returns:
+            New embeddings alongside base vocab.
+        """
         return F.embedding(x, torch.cat([self.embedding, self.new_embedding], dim=0))
 
 

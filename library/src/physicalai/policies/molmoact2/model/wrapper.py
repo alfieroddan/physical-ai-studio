@@ -61,13 +61,17 @@ def _masked_flow_loss(
     action_horizon_is_pad: Tensor | None,
     action_dim_is_pad: Tensor | None,
 ) -> Tensor:
-    """Mean squared error over valid action steps and dimensions only."""
+    """Mean squared error over valid action steps and dimensions only.
+
+    Returns:
+        loss of continous action compared to target actions.
+    """
     loss = F.mse_loss(predicted, target, reduction="none")
     mask = torch.ones_like(loss, dtype=torch.bool)
     if action_horizon_is_pad is not None:
-        mask = mask & (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, :, None]
+        mask = mask & (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, :, None]  # noqa: PLR6104
     if action_dim_is_pad is not None:
-        mask = mask & (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :]
+        mask = mask & (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :]  # noqa: PLR6104
     valid = mask.to(loss.dtype)
     return (loss * valid).sum() / valid.sum().clamp_min(1.0)
 
@@ -205,7 +209,11 @@ class MolmoAct2Model(Model):
         return loss, {"loss": float(loss.detach().float())}
 
     def freeze_to_action_expert(self) -> None:
-        """Freeze every parameter except the action expert (memory-lean fine-tuning)."""
+        """Freeze every parameter except the action expert (memory-lean fine-tuning).
+
+        Raises:
+            RuntimeError: if no action expert can be found in params.
+        """
         trainable = 0
         for name, param in self.named_parameters():
             is_action_expert = "action_expert" in name

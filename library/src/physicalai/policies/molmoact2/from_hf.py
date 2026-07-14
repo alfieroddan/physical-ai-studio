@@ -425,9 +425,9 @@ def build_config_from_hf_config(
         checkpoint_path: Local checkpoint directory containing extended tokenizer vocab.
         processor_config: Optional pre-loaded processor config dict.
         n_obs_steps: Observation horizon override.
-        chunk_size: Action chunk size override.
         n_action_steps: Number of executed action steps override.
         max_action_dim: Maximum action dimension override.
+        action_mode: continous, discrete or both action generation.
         torch_compile: Whether to enable compiled inference in the resolved config.
 
     Returns:
@@ -526,7 +526,7 @@ def build_config_from_hf_config(
     config_data["norm_tag"] = norm_tag
     config_data["tokenizer_name_or_path"] = checkpoint_path
     config_data["processor_assets_path"] = checkpoint_path
-    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)
+    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)  # pyright: ignore[reportArgumentType]
     if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
         processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
     config_data["processor_config"] = processor_config
@@ -560,6 +560,8 @@ def load_hf_pretrained_container(
 
     Args:
         pretrained_name_or_path: Local checkpoint directory or HF repo id.
+        config_filename: Local filename for config json file.
+        processor_filename: Local filename for processor config json file.
         norm_stats_filename: Normalization stats filename to resolve.
         **kwargs: Optional HF hub download kwargs.
 

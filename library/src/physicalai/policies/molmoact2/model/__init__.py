@@ -5,7 +5,7 @@
 
 """MolmoAct2 model package.
 
-Clean, inference-focused re-implementation of MolmoAct2. Components are split
+Re-implementation of MolmoAct2. Components are split
 one-per-file for readability:
 
 - :mod:`vision`         vision transformer + pooling adapter
