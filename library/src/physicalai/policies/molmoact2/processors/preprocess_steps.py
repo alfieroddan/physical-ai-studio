@@ -120,11 +120,7 @@ class StateTaskImageExtractor:
             if available_explicit:
                 return available_explicit
 
-        flat_image_keys = [
-            str(key)
-            for key in batch
-            if str(key).startswith(f"{IMAGES}.") and "is_pad" not in str(key)
-        ]
+        flat_image_keys = [str(key) for key in batch if str(key).startswith(f"{IMAGES}.") and "is_pad" not in str(key)]
         if flat_image_keys:
             return sorted(flat_image_keys)
 
@@ -331,7 +327,11 @@ class ActionPadder(torch.nn.Module):
         padded[..., : int(normalized.shape[-1])] = normalized
 
         action_horizon_is_pad = torch.zeros(normalized.shape[:2], dtype=torch.bool, device=normalized.device)
-        action_dim_is_pad = torch.ones((normalized.shape[0], self.max_action_dim), dtype=torch.bool, device=normalized.device)
+        action_dim_is_pad = torch.ones(
+            (normalized.shape[0], self.max_action_dim),
+            dtype=torch.bool,
+            device=normalized.device,
+        )
         action_dim_is_pad[:, : int(normalized.shape[-1])] = False
 
         return padded, action_horizon_is_pad, action_dim_is_pad

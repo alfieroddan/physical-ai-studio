@@ -53,9 +53,7 @@ class MolmoAct2Postprocessor(torch.nn.Module):
             inverse=True,
         )
         self._adapt_to_so101 = adapt_to_so101
-        self._joint_transform = (
-            JointFrameTransform(joint_signs or [], joint_offsets or []) if adapt_to_so101 else None
-        )
+        self._joint_transform = JointFrameTransform(joint_signs or [], joint_offsets or []) if adapt_to_so101 else None
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Denormalize, clamp and (optionally) map actions back to the robot frame.

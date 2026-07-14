@@ -59,7 +59,9 @@ def _image_token_ids(config: MolmoAct2Config) -> list[int]:
 
 
 def _build_token_type_ids(
-    config: MolmoAct2Config, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    config: MolmoAct2Config,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
 ) -> torch.Tensor | None:
     """Mark image tokens (1) vs. text tokens (0), respecting the attention mask."""
     image_token_ids = _image_token_ids(config)
@@ -290,7 +292,12 @@ def build_model_inputs(
     )
 
     batched_images, token_pooling = build_batched_images(
-        config, input_ids, pixel_values, image_token_pooling, image_grids, image_num_crops
+        config,
+        input_ids,
+        pixel_values,
+        image_token_pooling,
+        image_grids,
+        image_num_crops,
     )
     action_dim_is_pad = _default_action_dim_is_pad(config, batch_size=batch_size, device=input_ids.device)
 

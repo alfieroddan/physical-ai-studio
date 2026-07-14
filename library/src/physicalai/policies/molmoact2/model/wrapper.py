@@ -40,6 +40,7 @@ def _env_action_dim(config: MolmoAct2Config) -> int:
             return int(feature.shape[0])
     return 0
 
+
 # Keys of the fully-prepared, traceable tensors the backbone consumes. All
 # value-dependent host prep runs in the preprocessor, so the model graph only
 # sees these fixed-shape tensors (keeping it exportable).

@@ -225,14 +225,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # pyright: ignore[reportIncompa
 
     @staticmethod
     def _dataset_features(train_dataset: Dataset) -> tuple[list[Feature], list[Feature]]:
-        input_features = [
-            _coerce_dataset_feature(feature)
-            for feature in train_dataset.observation_features.values()
-        ]
-        output_features = [
-            _coerce_dataset_feature(feature)
-            for feature in train_dataset.action_features.values()
-        ]
+        input_features = [_coerce_dataset_feature(feature) for feature in train_dataset.observation_features.values()]
+        output_features = [_coerce_dataset_feature(feature) for feature in train_dataset.action_features.values()]
         return input_features, output_features
 
     def _initialize_model(self) -> None:

@@ -461,8 +461,7 @@ class FeatureType(StrEnum):
     ENV = "ENV"
 
 
-#TODO: Re-freeze and convert if needed
-@dataclass(frozen=False)
+@dataclass(frozen=True)
 class Feature:
     """A feature representation."""
 
@@ -472,8 +471,7 @@ class Feature:
     name: str | None = None
 
 
-#TODO: Re-freeze and convert if needed
-@dataclass(frozen=False)
+@dataclass(frozen=True)
 class NormalizationParameters:
     """Parameters for normalizing a tensor."""
 

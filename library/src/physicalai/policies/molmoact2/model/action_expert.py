@@ -83,7 +83,11 @@ class ActionExpertRotaryEmbedding(nn.Module):
         self.base = base
 
     def build_cache(
-        self, *, seq_len: int, device: torch.device, dtype: torch.dtype
+        self,
+        *,
+        seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Build the ``(cos, sin)`` cache for a given sequence length."""
         half_dim = self.head_dim // 2
@@ -124,7 +128,7 @@ class SinusoidalTimeEmbedding(nn.Module):
         half_dim = self.dim // 2
         freq = torch.exp(
             torch.arange(half_dim, device=timesteps.device, dtype=timesteps.dtype)
-            * (-math.log(10000.0) / max(half_dim - 1, 1))
+            * (-math.log(10000.0) / max(half_dim - 1, 1)),
         )
         args = timesteps[:, None] * freq[None, :]
         emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
@@ -254,7 +258,11 @@ class ActionExpertBlock(nn.Module):
         self.cross_norm = ActionExpertRMSNorm(hidden_size, eps=1e-6)
         self.ff_norm = ActionExpertRMSNorm(hidden_size, eps=1e-6)
         self.self_attn = ActionExpertSelfAttention(
-            hidden_size, num_heads, qk_norm=qk_norm, qk_norm_eps=qk_norm_eps, rope=rope
+            hidden_size,
+            num_heads,
+            qk_norm=qk_norm,
+            qk_norm_eps=qk_norm_eps,
+            rope=rope,
         )
         self.cross_attn = ActionExpertCrossAttention(hidden_size, num_heads, qk_norm=qk_norm, qk_norm_eps=qk_norm_eps)
         self.mlp = ActionExpertMLP(hidden_size, mlp_ratio=mlp_ratio, multiple_of=ffn_multiple_of)
@@ -384,7 +392,7 @@ class ActionExpert(nn.Module):
     ) -> ActionExpertContext:
         """Project text KV per layer and build the attention masks and rope cache."""
         kv_contexts: list[KVContext] = []
-        for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states):
+        for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states, strict=False):
             k_ctx = self._project_kv(k_in, self.context_k_proj)
             v_ctx = self._project_kv(v_in, self.context_v_proj)
             if block.cross_attn.k_norm is not None:
@@ -423,7 +431,7 @@ class ActionExpert(nn.Module):
         """Predict the flow velocity for a single denoising step."""
         conditioning = self._time_conditioning(timesteps)
         x = self.action_embed(actions)
-        for block, kv_context in zip(self.blocks, context.kv_contexts):
+        for block, kv_context in zip(self.blocks, context.kv_contexts, strict=False):
             x = block(
                 x,
                 conditioning,

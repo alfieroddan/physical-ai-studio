@@ -543,7 +543,7 @@ def build_config_from_hf_config(
     if config_data.get("add_action_expert") is False:
         config_data["action_expert_config"] = None
 
-    config_data["compile_model"] = bool(config_data.get("compile_model", False) or torch_compile)
+    config_data["compile_model"] = bool(config_data.get("compile_model") or torch_compile)
 
     return MolmoAct2Config.from_dict(config_data)
 

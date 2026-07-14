@@ -50,7 +50,7 @@ class MolmoAct2VideoProcessor:
                 image_std=list(config.image_std),
                 patch_size=int(config.patch_size),
                 pooling_size=list(config.pooling_size),
-            )
+            ),
         )
 
     def __call__(self, videos: torch.Tensor | list[torch.Tensor]) -> dict[str, torch.Tensor]:

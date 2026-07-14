@@ -79,9 +79,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         output_features = list(config.output_features or [])
 
         image_keys = [
-            feature.name
-            for feature in input_features
-            if feature.ftype == FeatureType.VISUAL and feature.name
+            feature.name for feature in input_features if feature.ftype == FeatureType.VISUAL and feature.name
         ]
 
         self._normalizer = FeatureBatchNormalizer(
