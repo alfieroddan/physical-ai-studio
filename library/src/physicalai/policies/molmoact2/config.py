@@ -370,8 +370,8 @@ class MolmoAct2Config(Config):
     optimizer_lr: float = 1e-5
     optimizer_vit_lr: float = 5e-6
     optimizer_connector_lr: float = 5e-6
-    optimizer_action_expert_lr: float = 1e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.99)
+    optimizer_action_expert_lr: float = 5e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
     optimizer_eps: float = 1e-6
     optimizer_weight_decay: float = 0.0
     optimizer_grad_clip_norm: float = 1.0
