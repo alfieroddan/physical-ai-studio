@@ -29,8 +29,7 @@ set_seed(SEED)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 policy = MolmoAct2(
-    repo_id="molmo-LIBERO",
-    # repo_id="allenai/MolmoAct2-LIBERO",
+    repo_id="allenai/MolmoAct2-LIBERO",
     norm_tag="libero",
     n_action_steps=10,
 )

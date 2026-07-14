@@ -5,8 +5,8 @@ import torch
 
 from physicalai.benchmark.gyms import LiberoBenchmark
 from physicalai.data.observation import Feature, FeatureType
-from physicalai.policies import MolmoAct2
 from physicalai.inference import InferenceModel
+from physicalai.policies import MolmoAct2
 
 SEED = 0
 
@@ -30,16 +30,16 @@ set_seed(SEED)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 policy = MolmoAct2(
-    repo_id="molmo-LIBERO",
+    repo_id="allenai/MolmoAct2-LIBERO",
     norm_tag="libero",
     n_action_steps=10,
 )
-policy.setup(stage="predict")
+policy.config.sample_noise = True
 policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
 policy.export("molmo-libero-export-torch", backend='torch')
 del policy
 
-inf_model = InferenceModel("molmo-libero-export-torch")
+inf_model = InferenceModel("molmo-libero-export-torch", device="cuda")
 
 benchmark = LiberoBenchmark(
     task_suite="libero_10",
