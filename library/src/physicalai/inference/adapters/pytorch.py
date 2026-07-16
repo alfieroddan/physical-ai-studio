@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
+import torchmetrics
 from physicalai.inference.adapters.base import RuntimeAdapter
 from physicalai.inference.adapters.registry import adapter_registry
 from physicalai.inference.manifest import Manifest
@@ -54,52 +55,41 @@ class TorchAdapter(RuntimeAdapter):
         self._output_names: list[str] = []
 
     def load(self, model_path: Path | str) -> None:
-        """Load Torch model from file.
-
-        Args:
-            model_path: Path to the .pt file created by torch.save()
-
-        Raises:
-            FileNotFoundError: If model file doesn't exist
-            RuntimeError: If model loading fails
-            KeyError: If manifest is missing required entries
-            TypeError: If imported policy class is missing callable load_from_checkpoint()
-        """
         model_path = Path(model_path)
         if not model_path.exists():
             msg = f"Model file not found: {model_path}"
             raise FileNotFoundError(msg)
-
         manifest = Manifest.load(model_path.parent)
         policy_class_path = manifest.policy.source.class_path
         if not policy_class_path:
             msg = "Manifest missing 'policy.source.class_path' entry."
             raise KeyError(msg)
-
         try:
             checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
             checkpoint_dtype = self._infer_checkpoint_dtype(checkpoint)
-
             policy_class = import_class(policy_class_path)
             load_from_checkpoint = getattr(policy_class, "load_from_checkpoint", None)
             if not callable(load_from_checkpoint):
                 msg = f"Imported class '{policy_class_path}' does not define callable load_from_checkpoint()."
                 raise TypeError(msg)  # noqa: TRY301
-
             load_from_checkpoint = cast(
                 "Callable[..., Policy]",
                 load_from_checkpoint,
             )
+            del checkpoint  # only needed it for dtype inference above; Lightning reloads the file itself
 
-            self._policy = load_from_checkpoint(model_path, map_location="cpu", weights_only=False)
+            # load_weights=False skips the pretrained HF checkpoint pull inside
+            # _initialize_model(), avoiding the transient memory spike of holding
+            # both pretrained weights and this checkpoint's weights at once.
+            # The checkpoint's own state_dict (loaded normally by Lightning
+            # right after __init__) supplies every real parameter value anyway.
+            self._policy = load_from_checkpoint(
+                model_path, map_location="cpu", weights_only=False, load_weights=False,
+            )
             if checkpoint_dtype is not None:
                 self._policy = self._policy.to(device=self.device, dtype=checkpoint_dtype).eval()
             else:
                 self._policy = self._policy.to(self.device).eval()
-
-            # ``extra_export_args`` is contributed by ``ExportablePolicyMixin``
-            # but ``nn.Module.__getattr__`` widens unknown attributes to
-            # ``Module | Tensor``; narrow it explicitly for the type checker.
             extra_export_args = cast(
                 "dict[str, Any]",
                 getattr(self._policy, "extra_export_args", {}),
@@ -108,13 +98,8 @@ class TorchAdapter(RuntimeAdapter):
                 torch_export_args = cast("TorchExportParameters", extra_export_args["torch"])
             else:
                 torch_export_args = TorchExportParameters()
-
             self._output_names = list(torch_export_args.output_names)
-            # Torch policies consume structured Observation payloads via
-            # Observation.from_dict(...) in predict(). Keep input_names empty
-            # so InferenceModel does not attempt adapter-level key filtering.
             self._input_names = []
-
         except Exception as e:
             msg = f"Failed to load Torch model from {model_path}: {e}"
             raise RuntimeError(msg) from e

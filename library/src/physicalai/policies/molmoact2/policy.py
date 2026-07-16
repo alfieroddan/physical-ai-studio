@@ -138,6 +138,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         *,
         adapt_to_so101: bool = False,
         torch_compile: bool = False,
+        load_weights: bool = True,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 
@@ -213,11 +214,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
         # the same pretrained source during inference adapter reload.
-        self.save_hyperparameters(ignore=["config"])
+        self.save_hyperparameters(ignore=["config", "load_weights"])
 
         self.model: MolmoAct2Model | None = None
         self._preprocessor: MolmoAct2Preprocessor | None = None
         self._postprocessor: MolmoAct2Postprocessor | None = None
+        self._load_weights = load_weights
 
         # eagerly load
         if (input_features and output_features) or (repo_id and norm_tag):
@@ -242,6 +244,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # make pre, post and model from config
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
         self.model = MolmoAct2Model(self.config)
+        if self._checkpoint_location is not None and self._load_weights:
+            self.model.load_pretrained_weights(self._checkpoint_location)
+
         if self._checkpoint_location is not None:
             self.model.load_pretrained_weights(self._checkpoint_location)
 
