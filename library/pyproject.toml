@@ -130,6 +130,7 @@ all = [
     "physicalai-train[pi05]",
     "physicalai-train[groot]",
     "physicalai-train[smolvla]",
+    "physicalai-train[molmoact2]",
 ]
 
 # Contribute Torch and ExecuTorch as inference backends to the registry

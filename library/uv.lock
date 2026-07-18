@@ -3616,6 +3616,7 @@ requires-dist = [
     { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=9881601325f724a0f00b1bf43f134d7f34fdef55" },
     { name = "physicalai-train", extras = ["groot"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["libero"], marker = "extra == 'all'" },
+    { name = "physicalai-train", extras = ["molmoact2"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["pi0"], marker = "extra == 'all'" },
     { name = "physicalai-train", extras = ["pi0"], marker = "extra == 'pi05'" },
     { name = "physicalai-train", extras = ["pi05"], marker = "extra == 'all'" },
