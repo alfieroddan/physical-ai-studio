@@ -109,8 +109,11 @@ smolvla = [
 ]
 
 # MolmoAct2
+# Supports LoRA fine-tuning for efficient adaptation
 molmoact2 = [
-   "transformers>=5.3.0,<5.4.0", 
+   "transformers>=5.3.0,<5.4.0",
+   "peft>=0.13.0,<1.0.0",
+   "safetensors>=0.4.3,<1.0.0",
 ]
 
 # ExecuTorch runtime for edge/mobile deployment

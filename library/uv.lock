@@ -3540,6 +3540,8 @@ libero = [
     { name = "hf-libero" },
 ]
 molmoact2 = [
+    { name = "peft" },
+    { name = "safetensors" },
     { name = "transformers" },
 ]
 pi0 = [
@@ -3609,6 +3611,7 @@ requires-dist = [
     { name = "openvino", specifier = ">=2026.0" },
     { name = "openvino-tokenizers", specifier = ">=2026.0" },
     { name = "peft", marker = "extra == 'groot'", specifier = ">=0.13.0,<1.0.0" },
+    { name = "peft", marker = "extra == 'molmoact2'", specifier = ">=0.13.0,<1.0.0" },
     { name = "peft", marker = "extra == 'pi0'", specifier = ">=0.13.0,<1.0.0" },
     { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=9881601325f724a0f00b1bf43f134d7f34fdef55" },
     { name = "physicalai-train", extras = ["groot"], marker = "extra == 'all'" },
@@ -3628,6 +3631,7 @@ requires-dist = [
     { name = "pytest-mock", marker = "extra == 'tests'" },
     { name = "pytorch-triton-xpu", marker = "(sys_platform == 'linux' and extra == 'xpu') or (sys_platform == 'win32' and extra == 'xpu')", index = "https://download.pytorch.org/whl/xpu", conflict = { package = "physicalai-train", extra = "xpu" } },
     { name = "safetensors", marker = "extra == 'groot'", specifier = ">=0.4.3,<1.0.0" },
+    { name = "safetensors", marker = "extra == 'molmoact2'", specifier = ">=0.4.3,<1.0.0" },
     { name = "safetensors", marker = "extra == 'pi0'", specifier = ">=0.4.3,<1.0.0" },
     { name = "safetensors", marker = "extra == 'smolvla'", specifier = ">=0.4.3,<1.0.0" },
     { name = "sentencepiece", marker = "extra == 'pi0'", specifier = "<=0.2.1" },

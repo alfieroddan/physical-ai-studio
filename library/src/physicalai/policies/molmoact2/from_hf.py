@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
@@ -440,7 +440,7 @@ def _resolve_feature_overrides(
     return resolved_features
 
 
-def build_config_from_hf_config(
+def build_config_from_hf_config(  # noqa: PLR0913
     hf_config: dict[str, Any],
     *,
     norm_stats: dict[str, Any] | None = None,
@@ -456,6 +456,13 @@ def build_config_from_hf_config(
     max_action_dim: int = 32,
     action_mode: str = "continuous",
     torch_compile: bool = False,
+    use_lora: bool = False,
+    enable_lora_action_expert: bool = False,
+    lora_rank: int = 64,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    lora_bias: Literal["all", "lora_only", "none"] = "none",
+    gradient_checkpointing: bool = False,
 ) -> MolmoAct2Config:
     """Build policy config from Hugging Face config and local overrides.
 
@@ -478,6 +485,13 @@ def build_config_from_hf_config(
         max_action_dim: Maximum action dimension override.
         action_mode: continous, discrete or both action generation.
         torch_compile: Whether to enable compiled inference in the resolved config.
+        use_lora: Whether to apply LoRA adapters to the VLM.
+        enable_lora_action_expert: Whether to also adapt the action expert.
+        lora_rank: LoRA rank.
+        lora_alpha: LoRA alpha scaling factor.
+        lora_dropout: LoRA dropout rate.
+        lora_bias: Which biases to train ('none', 'all', 'lora_only').
+        gradient_checkpointing: Whether to enable gradient checkpointing.
 
     Returns:
         Resolved `MolmoAct2Config` instance.
@@ -607,6 +621,14 @@ def build_config_from_hf_config(
         config_data["action_expert_config"] = None
 
     config_data["compile_model"] = bool(config_data.get("compile_model") or torch_compile)
+
+    config_data["use_lora"] = use_lora
+    config_data["enable_lora_action_expert"] = enable_lora_action_expert
+    config_data["lora_rank"] = lora_rank
+    config_data["lora_alpha"] = lora_alpha
+    config_data["lora_dropout"] = lora_dropout
+    config_data["lora_bias"] = lora_bias
+    config_data["gradient_checkpointing"] = gradient_checkpointing
 
     return MolmoAct2Config.from_dict(config_data)
 

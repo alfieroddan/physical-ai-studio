@@ -140,3 +140,7 @@ if __name__ == "__main__":
     trainer = Trainer(max_steps=2, limit_val_batches=1, val_check_interval=1, precision="bf16-mixed")
     trainer.fit(model=policy, datamodule=dm)
 ```
+
+## Video processing
+
+We also have removed video pre-processing in this implementation. Please raise an issue if this is something you would like added back.

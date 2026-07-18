@@ -28,6 +28,7 @@ from physicalai.policies.molmoact2.model.action_expert import (
 )
 from physicalai.policies.molmoact2.model.backbone import (
     MolmoAct2Backbone,
+    MolmoAct2ForConditionalGeneration,
     _sample_beta_timesteps,
 )
 from physicalai.policies.molmoact2.model.text import (
@@ -41,6 +42,7 @@ from physicalai.policies.molmoact2.model.text import (
     rotate_half,
 )
 from physicalai.policies.molmoact2.model.vision import MolmoAct2VisionBackbone
+from physicalai.policies.molmoact2.model.wrapper import MolmoAct2Model
 
 
 class TestRoundUpMultiple:
@@ -317,6 +319,206 @@ class TestMolmoAct2Backbone:
         tiny_molmoact2_config.add_action_expert = False
         backbone = MolmoAct2Backbone(tiny_molmoact2_config)
         assert backbone.action_expert is None
+
+
+peft = pytest.importorskip("peft", reason="peft is required for LoRA tests")
+
+
+class TestMolmoAct2LoRA:
+    """LoRA adapter application on the MolmoAct2 model frontend."""
+
+    def _make_model(self, config: MolmoAct2Config) -> MolmoAct2Model:
+        config.use_lora = False
+        config.train_action_expert_only = False
+        return MolmoAct2Model(config)
+
+    def test_apply_lora_wraps_backbone(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        original_backbone = model.backbone
+        model.apply_lora_adapters()
+        # PEFT wrapper replaces the backbone module.
+        assert model.backbone is not original_backbone
+        assert hasattr(model.backbone, "base_model")
+
+    def test_apply_lora_creates_trainable_lora_params(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        model.apply_lora_adapters()
+        lora_params = [
+            name
+            for name, param in model.named_parameters()
+            if param.requires_grad and "lora_" in name
+        ]
+        assert lora_params, "expected LoRA parameters to be trainable"
+
+    def test_apply_lora_freezes_non_lora_vlm_params(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        model.apply_lora_adapters()
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                continue
+            if "action_expert" in name:
+                # Action expert stays trainable when enable_lora_action_expert is False.
+                assert param.requires_grad, f"action_expert param should be trainable: {name}"
+            else:
+                assert not param.requires_grad, f"VLM param should be frozen: {name}"
+
+    def test_apply_lora_unfreezes_action_expert_when_not_targeted(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        model.apply_lora_adapters()
+        trainable_action = [
+            name
+            for name, param in model.named_parameters()
+            if param.requires_grad and "action_expert" in name
+        ]
+        assert trainable_action, "action_expert params should remain trainable"
+
+    def test_enable_lora_action_expert_freezes_non_lora_action_expert(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        tiny_molmoact2_config.enable_lora_action_expert = True
+        model = self._make_model(tiny_molmoact2_config)
+        model.apply_lora_adapters()
+        for name, param in model.named_parameters():
+            if "lora_" in name:
+                assert param.requires_grad, f"lora param should be trainable: {name}"
+            else:
+                assert not param.requires_grad, f"non-lora param should be frozen: {name}"
+
+    def test_apply_lora_raises_without_peft(
+        self, tiny_molmoact2_config: MolmoAct2Config, monkeypatch
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "peft":
+                msg = "peft not installed"
+                raise ImportError(msg)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _fake_import)
+        with pytest.raises(ImportError, match="MolmoAct2 LoRA requires peft"):
+            model.apply_lora_adapters()
+
+    def test_for_cond_gen_accessor_returns_inner_module(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        pre = model._for_cond_gen
+        assert isinstance(pre, MolmoAct2ForConditionalGeneration)
+        model.apply_lora_adapters()
+        post = model._for_cond_gen
+        assert isinstance(post, MolmoAct2ForConditionalGeneration)
+        # The accessor follows the PEFT wrapper to the same underlying instance.
+        assert post is pre
+
+
+class TestMolmoAct2GradientCheckpointing:
+    """Gradient-checkpointing enable/disable on the MolmoAct2 model frontend."""
+
+    def _make_model(self, config: MolmoAct2Config) -> MolmoAct2Model:
+        config.gradient_checkpointing = False
+        return MolmoAct2Model(config)
+
+    def test_enable_sets_submodule_flags(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        backbone = model._for_cond_gen.model
+        assert backbone.transformer.gradient_checkpointing is False
+        assert backbone.vision_backbone.gradient_checkpointing is False
+        assert backbone.action_expert.gradient_checkpointing is False
+        model.gradient_checkpointing_enable()
+        assert backbone.transformer.gradient_checkpointing is True
+        assert backbone.vision_backbone.gradient_checkpointing is True
+        assert backbone.action_expert.gradient_checkpointing is True
+
+    def test_enable_forces_eager_attention(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        model.gradient_checkpointing_enable()
+        backbone = model._for_cond_gen.model
+        assert backbone.transformer.config._attn_implementation == "eager"
+        assert backbone.vision_backbone.image_vit.config._attn_implementation == "eager"
+
+    def test_disable_clears_submodule_flags(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+        model = self._make_model(tiny_molmoact2_config)
+        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_disable()
+        backbone = model._for_cond_gen.model
+        assert backbone.transformer.gradient_checkpointing is False
+        assert backbone.vision_backbone.gradient_checkpointing is False
+        assert backbone.action_expert.gradient_checkpointing is False
+
+    def test_config_flag_enables_at_construction(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        tiny_molmoact2_config.gradient_checkpointing = True
+        model = MolmoAct2Model(tiny_molmoact2_config)
+        backbone = model._for_cond_gen.model
+        assert backbone.transformer.gradient_checkpointing is True
+        assert backbone.vision_backbone.gradient_checkpointing is True
+        assert backbone.action_expert.gradient_checkpointing is True
+
+    def test_checkpointed_text_forward_matches_eager(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        torch.manual_seed(0)
+        model_eager = self._make_model(tiny_molmoact2_config)
+        torch.manual_seed(0)
+        model_ckpt = self._make_model(tiny_molmoact2_config)
+        model_ckpt.gradient_checkpointing_enable()
+
+        config = tiny_molmoact2_config.text_config
+        inputs_embeds = torch.randn(2, 4, config.hidden_size, requires_grad=True)
+        attention_bias = None
+
+        model_eager.eval()
+        model_ckpt.eval()
+        eager_out, eager_kv = model_eager._for_cond_gen.model.transformer(inputs_embeds, attention_bias)
+        ckpt_out, ckpt_kv = model_ckpt._for_cond_gen.model.transformer(inputs_embeds, attention_bias)
+        torch.testing.assert_close(ckpt_out, eager_out)
+        assert len(ckpt_kv) == len(eager_kv)
+
+    def test_checkpointed_action_expert_forward_backward_runs(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        config = tiny_molmoact2_config.action_expert_config
+        assert config is not None
+        expert = ActionExpert(
+            config,
+            llm_kv_dim=tiny_molmoact2_config.num_key_value_heads * tiny_molmoact2_config.head_dim,
+            llm_num_layers=tiny_molmoact2_config.text_config.num_hidden_layers,
+        )
+        expert.gradient_checkpointing = True
+        expert.train()
+        batch = 2
+        seq_len = config.max_action_horizon
+        kv_states = [
+            (torch.randn(batch, seq_len, config.hidden_size), torch.randn(batch, seq_len, config.hidden_size))
+            for _ in range(tiny_molmoact2_config.text_config.num_hidden_layers)
+        ]
+        mask = torch.ones(batch, seq_len, dtype=torch.bool)
+        context = expert.prepare_context(
+            encoder_kv_states=kv_states,
+            encoder_attention_mask=mask,
+            seq_len=seq_len,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
+        actions = torch.randn(batch, seq_len, config.max_action_dim, requires_grad=True)
+        timesteps = torch.rand(batch)
+        velocity = expert.forward_with_context(actions, timesteps, context=context)
+        loss = velocity.sum()
+        loss.backward()
+        assert actions.grad is not None
 
 
 class TestSampleBetaTimesteps:

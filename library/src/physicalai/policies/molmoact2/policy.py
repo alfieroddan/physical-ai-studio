@@ -56,6 +56,13 @@ def make_molmoact2_config(
     n_action_steps: int,
     action_mode: Literal["continuous", "discrete", "both"] = "continuous",
     torch_compile: bool = False,
+    use_lora: bool = False,
+    enable_lora_action_expert: bool = False,
+    lora_rank: int = 64,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    lora_bias: Literal["all", "lora_only", "none"] = "none",
+    gradient_checkpointing: bool = False,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
 
@@ -68,6 +75,13 @@ def make_molmoact2_config(
         n_action_steps: Number of action steps.
         action_mode: Action supervision mode.
         torch_compile: Whether to mark the config for optimized inference.
+        use_lora: Whether to apply LoRA adapters to the VLM.
+        enable_lora_action_expert: Whether to also adapt the action expert.
+        lora_rank: LoRA rank.
+        lora_alpha: LoRA alpha scaling factor.
+        lora_dropout: LoRA dropout rate.
+        lora_bias: Which biases to train ('none', 'all', 'lora_only').
+        gradient_checkpointing: Whether to enable gradient checkpointing.
 
     Returns:
         A fully populated :class:`MolmoAct2Config`.
@@ -79,13 +93,20 @@ def make_molmoact2_config(
         n_action_steps=n_action_steps,
         action_mode=action_mode,
         compile_model=torch_compile,
+        use_lora=use_lora,
+        enable_lora_action_expert=enable_lora_action_expert,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        lora_bias=lora_bias,
+        gradient_checkpointing=gradient_checkpointing,
     )
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
@@ -98,6 +119,13 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         adapt_to_so101: bool = False,
         torch_compile: bool = False,
         load_weights: bool = True,
+        use_lora: bool = False,
+        enable_lora_action_expert: bool = False,
+        lora_rank: int = 64,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_bias: Literal["all", "lora_only", "none"] = "none",
+        gradient_checkpointing: bool = False,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 
@@ -115,6 +143,18 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             torch_compile: Whether to enable compile-oriented config flags.
             load_weights: Whether to eagerly load pretrained weights when a
                 checkpoint is available.
+            use_lora: Apply LoRA adapters to the VLM (text transformer +
+                vision backbone) linears for parameter-efficient
+                fine-tuning. Incompatible with ``train_action_expert_only``.
+            enable_lora_action_expert: Extend LoRA targets to the action
+                expert linears. Requires ``use_lora=True``.
+            lora_rank: LoRA rank (dimension of the low-rank update).
+            lora_alpha: LoRA alpha scaling factor.
+            lora_dropout: Dropout rate applied to the LoRA layers.
+            lora_bias: Which biases to train ('none', 'all', 'lora_only').
+            gradient_checkpointing: Enable gradient checkpointing on the text
+                transformer, vision backbone and action expert to trade
+                compute for memory during training.
 
         Raises:
             ValueError: If only one of input_features/output_features is provided.
@@ -156,6 +196,13 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_action_steps=n_action_steps,
                 action_mode=action_mode,
                 torch_compile=torch_compile,
+                use_lora=use_lora,
+                enable_lora_action_expert=enable_lora_action_expert,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_bias=lora_bias,
+                gradient_checkpointing=gradient_checkpointing,
             )
         else:
             self.config = make_molmoact2_config(
@@ -165,6 +212,13 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_action_steps=n_action_steps,
                 action_mode=action_mode,
                 torch_compile=torch_compile,
+                use_lora=use_lora,
+                enable_lora_action_expert=enable_lora_action_expert,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_bias=lora_bias,
+                gradient_checkpointing=gradient_checkpointing,
             )
 
         self._checkpoint_location: str | None = (
@@ -209,6 +263,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.model = MolmoAct2Model(self.config)
         if self._checkpoint_location is not None and self._load_weights:
             self.model.load_pretrained_weights(self._checkpoint_location)
+
+        # Apply LoRA adapters after weight loading so pretrained parameters are
+        # preserved and only the low-rank updates are trainable.
+        if self.config.use_lora:
+            self.model.apply_lora_adapters()
 
         # parameter setting based on config
         if self.config.train_action_expert_only:

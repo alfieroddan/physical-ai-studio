@@ -408,6 +408,11 @@ class ActionExpert(nn.Module):
         self.config = config
         self.num_heads = config.num_heads
         self.action_head_dim = config.hidden_size // config.num_heads
+        # Toggled by :meth:`gradient_checkpointing_enable` so each block is
+        # recomputed during the backward pass to trade compute for memory. Has
+        # no effect outside of training (``self.training`` and
+        # ``torch.is_grad_enabled()`` are both required).
+        self.gradient_checkpointing: bool = False
 
         self.time_embed = nn.Sequential(
             SinusoidalTimeEmbedding(config.timestep_embed_dim),
@@ -515,14 +520,28 @@ class ActionExpert(nn.Module):
         """
         conditioning = self._time_conditioning(timesteps)
         x = self.action_embed(actions)
+        use_gradient_checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block, kv_context in zip(self.blocks, context.kv_contexts, strict=False):
-            x = block(
-                x,
-                conditioning,
-                cross_kv=kv_context,
-                self_attn_mask=context.self_mask,
-                cross_attn_mask=context.cross_mask,
-                is_causal=self.config.causal_attn,
-                rope_cache=context.rope_cache,
-            )
+            if use_gradient_checkpointing:
+                x = torch.utils.checkpoint.checkpoint(
+                    block,
+                    x,
+                    conditioning,
+                    cross_kv=kv_context,
+                    self_attn_mask=context.self_mask,
+                    cross_attn_mask=context.cross_mask,
+                    is_causal=self.config.causal_attn,
+                    rope_cache=context.rope_cache,
+                    use_reentrant=False,
+                )
+            else:
+                x = block(
+                    x,
+                    conditioning,
+                    cross_kv=kv_context,
+                    self_attn_mask=context.self_mask,
+                    cross_attn_mask=context.cross_mask,
+                    is_causal=self.config.causal_attn,
+                    rope_cache=context.rope_cache,
+                )
         return self.final_layer(x, conditioning)

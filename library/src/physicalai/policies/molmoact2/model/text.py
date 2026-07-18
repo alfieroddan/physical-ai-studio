@@ -265,6 +265,11 @@ class MolmoAct2TextModel(nn.Module):
         self.blocks = nn.ModuleList([MolmoAct2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
         self.ln_f = MolmoAct2RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.rotary_emb = MolmoAct2RotaryEmbedding(config)
+        # Toggled by :meth:`gradient_checkpointing_enable` so each decoder
+        # block is recomputed during the backward pass to trade compute for
+        # memory. Has no effect outside of training (``self.training`` and
+        # ``torch.is_grad_enabled()`` are both required).
+        self.gradient_checkpointing: bool = False
 
     def forward(
         self,
@@ -289,7 +294,17 @@ class MolmoAct2TextModel(nn.Module):
 
         hidden_states = inputs_embeds
         kv_states: list[KVState] = []
+        use_gradient_checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block in self.blocks:
-            hidden_states, kv_state = block(hidden_states, position_embeddings, attention_bias)
+            if use_gradient_checkpointing:
+                hidden_states, kv_state = torch.utils.checkpoint.checkpoint(  # pyrefly: ignore[not-iterable]
+                    block,
+                    hidden_states,
+                    position_embeddings,
+                    attention_bias,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states, kv_state = block(hidden_states, position_embeddings, attention_bias)
             kv_states.append(kv_state)
         return self.ln_f(hidden_states), kv_states

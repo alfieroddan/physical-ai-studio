@@ -121,6 +121,25 @@ class TestMolmoact2Policy:
             _ = policy.output_features
 
 
+class TestMolmoact2LoRAArgs:
+    """Tests for the use_lora argument wiring on the policy wrapper."""
+
+    def test_use_lora_stored_in_config_and_hparams(self) -> None:
+        policy = MolmoAct2(repo_id=None, use_lora=True, lora_rank=8)
+        assert policy.config.use_lora is True
+        assert policy.config.lora_rank == 8
+        assert policy.hparams["use_lora"] is True
+        assert policy.hparams["lora_rank"] == 8
+
+    def test_enable_lora_action_expert_stored_in_config(self) -> None:
+        policy = MolmoAct2(repo_id=None, use_lora=True, enable_lora_action_expert=True)
+        assert policy.config.enable_lora_action_expert is True
+
+    def test_enable_lora_action_expert_without_use_lora_raises(self) -> None:
+        with pytest.raises(ValueError, match="enable_lora_action_expert requires use_lora"):
+            MolmoAct2(repo_id=None, enable_lora_action_expert=True)
+
+
 class TestMolmoact2SupportedExportBackends:
     def test_returns_torch_only(self) -> None:
         backends = MolmoAct2.get_supported_export_backends()

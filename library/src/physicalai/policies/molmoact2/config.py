@@ -376,8 +376,21 @@ class MolmoAct2Config(Config):
 
     # Fine-tuning controls
     freeze_embedding: bool = False
-    train_action_expert_only: bool = True
+    train_action_expert_only: bool = False
     gradient_checkpointing: bool = False
+
+    # LoRA fine-tuning. When ``use_lora`` is ``True``, low-rank adapters are
+    # applied to the VLM (text transformer + vision backbone) linears via
+    # ``peft.get_peft_model``. ``enable_lora_action_expert`` additionally
+    # extends the adapter targets to the action-expert linears; it requires
+    # ``use_lora`` to be ``True``. LoRA is incompatible with
+    # ``train_action_expert_only`` (which freezes the VLM entirely).
+    use_lora: bool = False
+    enable_lora_action_expert: bool = False
+    lora_rank: int = 64
+    lora_alpha: int = 16
+    lora_dropout: float = 0.05
+    lora_bias: Literal["all", "lora_only", "none"] = "none"
 
     optimizer_lr: float = 1e-5
     optimizer_vit_lr: float = 5e-6
@@ -487,6 +500,21 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
         if self.train_action_expert_only and self.action_mode != "continuous":
             msg = "MolmoAct2 train_action_expert_only requires action_mode='continuous'."
+            raise ValueError(msg)
+        if self.use_lora and self.train_action_expert_only:
+            msg = "MolmoAct2 use_lora is incompatible with train_action_expert_only."
+            raise ValueError(msg)
+        if self.enable_lora_action_expert and not self.use_lora:
+            msg = "MolmoAct2 enable_lora_action_expert requires use_lora=True."
+            raise ValueError(msg)
+        if self.lora_rank < 1:
+            msg = f"MolmoAct2 lora_rank must be >= 1, got {self.lora_rank}."
+            raise ValueError(msg)
+        if self.lora_dropout < 0.0 or self.lora_dropout >= 1.0:
+            msg = f"MolmoAct2 lora_dropout must be in [0.0, 1.0), got {self.lora_dropout}."
+            raise ValueError(msg)
+        if self.lora_bias not in {"none", "all", "lora_only"}:
+            msg = f"MolmoAct2 lora_bias must be one of 'none', 'all', 'lora_only', got {self.lora_bias!r}."
             raise ValueError(msg)
 
     def _validate_flow_matching_settings(self) -> None:

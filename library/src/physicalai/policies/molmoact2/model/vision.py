@@ -248,6 +248,11 @@ class MolmoAct2VisionBackbone(nn.Module):
             adapter_config.hidden_act,
         )
         self.image_feature_dropout = nn.Dropout(adapter_config.image_feature_dropout)
+        # Toggled by :meth:`gradient_checkpointing_enable` so each ViT block is
+        # recomputed during the backward pass to trade compute for memory. Has
+        # no effect outside of training (``self.training`` and
+        # ``torch.is_grad_enabled()`` are both required).
+        self.gradient_checkpointing: bool = False
 
     @property
     def dtype(self) -> torch.dtype:
@@ -275,10 +280,14 @@ class MolmoAct2VisionBackbone(nn.Module):
 
         needed = set(self.vit_layers)
         selected: dict[int, torch.Tensor] = {}
+        use_gradient_checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for layer_idx, block in enumerate(self.image_vit.transformer.resblocks):
-            x = block(x)
+            if use_gradient_checkpointing:
+                x = torch.utils.checkpoint.checkpoint(block, x, use_reentrant=False)  # pyrefly: ignore[bad-assignment]
+            else:
+                x = block(x)
             if layer_idx in needed:
-                selected[layer_idx] = x
+                selected[layer_idx] = x  # pyrefly: ignore[unsupported-operation]
 
         features = torch.cat([selected[layer] for layer in self.vit_layers], dim=-1)
         return features.view(batch_size, num_crops, num_patches, -1)

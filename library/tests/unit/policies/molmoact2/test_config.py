@@ -110,6 +110,45 @@ class TestMolmoAct2Config:
         with pytest.raises(ValueError, match="train_action_expert_only"):
             MolmoAct2Config(action_mode="discrete", train_action_expert_only=True)
 
+    def test_use_lora_defaults_off_and_train_action_expert_only_defaults_false(self) -> None:
+        config = MolmoAct2Config()
+        assert config.use_lora is False
+        assert config.enable_lora_action_expert is False
+        assert config.train_action_expert_only is False
+        assert config.lora_rank == 64
+        assert config.lora_alpha == 16
+        assert config.lora_dropout == 0.05
+        assert config.lora_bias == "none"
+
+    def test_use_lora_incompatible_with_train_action_expert_only(self) -> None:
+        with pytest.raises(ValueError, match="use_lora is incompatible with train_action_expert_only"):
+            MolmoAct2Config(use_lora=True, train_action_expert_only=True)
+
+    def test_enable_lora_action_expert_requires_use_lora(self) -> None:
+        with pytest.raises(ValueError, match="enable_lora_action_expert requires use_lora"):
+            MolmoAct2Config(enable_lora_action_expert=True)
+
+    def test_lora_rank_must_be_positive(self) -> None:
+        with pytest.raises(ValueError, match="lora_rank"):
+            MolmoAct2Config(use_lora=True, lora_rank=0)
+
+    def test_lora_dropout_range(self) -> None:
+        with pytest.raises(ValueError, match="lora_dropout"):
+            MolmoAct2Config(use_lora=True, lora_dropout=1.0)
+
+    def test_lora_bias_must_be_valid(self) -> None:
+        with pytest.raises(ValueError, match="lora_bias"):
+            MolmoAct2Config(use_lora=True, lora_bias="bogus")  # type: ignore[arg-type]
+
+    def test_use_lora_serialization_round_trip(self) -> None:
+        config = MolmoAct2Config(use_lora=True, lora_rank=8, lora_alpha=4, lora_dropout=0.1)
+        data = config.to_dict()
+        assert data["use_lora"] is True
+        assert data["lora_rank"] == 8
+        restored = MolmoAct2Config.from_dict(data)
+        assert restored.use_lora is True
+        assert restored.lora_rank == 8
+
     def test_flow_matching_num_steps_validation(self) -> None:
         with pytest.raises(ValueError, match="flow_matching_num_steps"):
             MolmoAct2Config(flow_matching_num_steps=0)

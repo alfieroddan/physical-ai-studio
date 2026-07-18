@@ -29,6 +29,48 @@ from .backbone import MolmoAct2ForConditionalGeneration
 if TYPE_CHECKING:
     from physicalai.policies.molmoact2.config import MolmoAct2Config
 
+
+# Linear-module leaves inside the VLM (text transformer + vision backbone) that
+# LoRA adapters are attached to by default. Names match the physicalai
+# re-implementation's module attributes (text: ``att_proj``/``attn_out``/
+# ``ff_proj``/``ff_out``; vision: ``wq``/``wk``/``wv``/``wo``/``w1``/``w2``/
+# ``w3``/``patch_embedding``).
+_VLM_LORA_LINEAR_LEAVES = "att_proj|attn_out|ff_proj|ff_out|wq|wk|wv|wo|w1|w2|w3|patch_embedding"
+
+# Linear-module leaves inside the action expert. The time embedding is an
+# ``nn.Sequential`` whose linears sit at indices 1 and 3.
+_ACTION_EXPERT_LORA_LINEAR_LEAVES = (
+    r"time_embed\.(1|3)|"
+    r"action_embed|"
+    r"context_k_proj|context_v_proj|"
+    r"blocks\.\d+\.self_attn\.(qkv|out_proj)|"
+    r"blocks\.\d+\.cross_attn\.(q_proj|out_proj)|"
+    r"blocks\.\d+\.mlp\.(up_proj|gate_proj|down_proj)|"
+    r"blocks\.\d+\.modulation\.linear|"
+    r"final_layer\.(modulation\.linear|linear)"
+)
+
+
+def _lora_target_modules(*, enable_action_expert: bool) -> str:
+    """Build the LoRA ``target_modules`` regex for the MolmoAct2 backbone.
+
+    The backbone root is :class:`MolmoAct2ForConditionalGeneration`, so the
+    parameter-name prefix for the inner backbone is ``model.`` (i.e.
+    ``model.transformer.*``, ``model.vision_backbone.*`` and, when enabled,
+    ``model.action_expert.*``).
+
+    Args:
+        enable_action_expert: Whether to also adapt the action-expert linears.
+
+    Returns:
+        A regex string matched against the fully-qualified module names.
+    """
+    vlm_targets = rf"model\.(transformer|vision_backbone)\.(?:.*\.)?({_VLM_LORA_LINEAR_LEAVES})$"
+    if not enable_action_expert:
+        return vlm_targets
+    return f"({vlm_targets}|model\\.action_expert\\.(?:{_ACTION_EXPERT_LORA_LINEAR_LEAVES})$)"
+
+
 _SAFE_WEIGHTS_NAME = "model.safetensors"
 _SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 
@@ -117,6 +159,9 @@ class MolmoAct2Model(Model):
         self.config = config
         self.backbone = MolmoAct2ForConditionalGeneration(config)
 
+        if self.config.gradient_checkpointing:
+            self.gradient_checkpointing_enable()
+
         if self.config.compile_model:
             torch.set_float32_matmul_precision("high")
             compile_mode = "default"
@@ -126,6 +171,111 @@ class MolmoAct2Model(Model):
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load safetensors weights into the backbone (strict key match)."""
         _strict_load_safetensors_weights(self.backbone, checkpoint_location)
+
+    def gradient_checkpointing_enable(self) -> None:
+        """Enable gradient checkpointing on the text, vision and action submodules.
+
+        Sets ``gradient_checkpointing=True`` on the inner backbone's text
+        transformer, vision backbone, and (when present) action expert so each
+        per-layer / per-block forward is recomputed during the backward pass,
+        trading compute for a smaller activation-memory footprint during
+        training. Forces the attention implementation to ``"eager"`` so
+        SDPA/Flash-Attention ops do not appear inside checkpoint regions (they
+        otherwise break the AOT autograd partitioner when ``torch.compile``
+        traces the backward graph).
+        """
+        backbone = self._for_cond_gen.model
+        backbone.transformer.gradient_checkpointing = True
+        backbone.vision_backbone.gradient_checkpointing = True
+        if backbone.action_expert is not None:
+            backbone.action_expert.gradient_checkpointing = True
+        # Force eager attention so SDPA/flash-attention ops do not appear
+        # inside checkpoint regions, which would otherwise cause a KeyError in
+        # the AOT autograd partitioner when torch.compile traces the backward
+        # graph (functionalize_rng_ops cannot map the
+        # _scaled_dot_product_flash_attention op between fwd/bwd graphs).
+        backbone.transformer.config._attn_implementation = "eager"  # noqa: SLF001
+        backbone.vision_backbone.image_vit.config._attn_implementation = "eager"  # noqa: SLF001
+
+    def gradient_checkpointing_disable(self) -> None:
+        """Disable gradient checkpointing on all submodules."""
+        backbone = self._for_cond_gen.model
+        backbone.transformer.gradient_checkpointing = False
+        backbone.vision_backbone.gradient_checkpointing = False
+        if backbone.action_expert is not None:
+            backbone.action_expert.gradient_checkpointing = False
+
+    @property
+    def _for_cond_gen(self) -> MolmoAct2ForConditionalGeneration:
+        """The unwrapped :class:`MolmoAct2ForConditionalGeneration`.
+
+        When LoRA adapters are applied, ``self.backbone`` is a PEFT wrapper
+        whose ``base_model.model`` is the original checkpoint-root module.
+        This accessor returns that underlying module so the
+        ``.model.generate_actions_from_inputs(...)`` /
+        ``.model.predict_flow_velocity(...)`` call paths keep working both
+        before and after LoRA is applied.
+        """
+        backbone = self.backbone
+        base_model = getattr(backbone, "base_model", None)
+        if base_model is not None and hasattr(base_model, "model"):
+            return base_model.model  # type: ignore[no-any-return]
+        return backbone  # type: ignore[return-value]
+
+    def apply_lora_adapters(self) -> None:
+        """Apply LoRA adapters to the backbone via ``peft.get_peft_model``.
+
+        Wraps :attr:`backbone` (:class:`MolmoAct2ForConditionalGeneration`)
+        with PEFT LoRA layers targeting the VLM linears (text transformer +
+        vision backbone) and, when ``config.enable_lora_action_expert`` is
+        set, the action-expert linears. All non-LoRA parameters are frozen.
+        When the action expert is not covered by LoRA, its parameters are
+        re-unfrozen so full fine-tuning of the action expert continues.
+
+        Raises:
+            ImportError: If the ``peft`` package is not installed.
+        """
+        try:
+            from peft import LoraConfig, get_peft_model  # noqa: PLC0415
+        except ImportError as e:
+            msg = "MolmoAct2 LoRA requires peft. Install with: pip install 'physicalai-train[molmoact2]'"
+            raise ImportError(msg) from e
+
+        target_modules = _lora_target_modules(
+            enable_action_expert=bool(self.config.enable_lora_action_expert),
+        )
+        lora_config = LoraConfig(
+            r=self.config.lora_rank,
+            lora_alpha=self.config.lora_alpha,
+            lora_dropout=self.config.lora_dropout,
+            target_modules=target_modules,
+            bias=self.config.lora_bias,
+        )
+
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        self.backbone = get_peft_model(self.backbone, lora_config)  # type: ignore[assignment, arg-type]  # pyrefly: ignore[bad-assignment]
+        if not self.config.enable_lora_action_expert:
+            self._unfreeze_action_expert_parameters()
+        self.train(self.training)
+
+    def _unfreeze_action_expert_parameters(self) -> None:
+        """Re-enable gradients for the action-expert parameters after LoRA.
+
+        Raises:
+            RuntimeError: If no action-expert parameters were found.
+        """
+        if self.config.add_action_expert is False or self.config.action_expert_config is None:
+            msg = "enable_lora_action_expert=False, but no action_expert parameters were found."
+            raise RuntimeError(msg)
+        trainable = 0
+        for name, param in self.backbone.named_parameters():
+            if "action_expert" in name:
+                param.requires_grad = True
+                trainable += param.numel()
+        if trainable == 0:
+            msg = "enable_lora_action_expert=False, but no action_expert parameters were found."
+            raise RuntimeError(msg)
 
     @torch.no_grad()
     def predict_action_chunk(
@@ -147,7 +297,7 @@ class MolmoAct2Model(Model):
             Actions of shape ``(batch, n_action_steps, env_action_dim)``.
         """
         model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
-        actions = self.backbone.model.generate_actions_from_inputs(
+        actions = self._for_cond_gen.model.generate_actions_from_inputs(
             **model_inputs,
             action_horizon=int(self.config.n_action_steps),
             sample_noise=bool(self.config.sample_noise) if sample_noise is None else sample_noise,
@@ -173,7 +323,7 @@ class MolmoAct2Model(Model):
         Returns:
             The scalar loss and a metrics dict.
         """
-        predicted, target = self.backbone.model.predict_flow_velocity(
+        predicted, target = self._for_cond_gen.model.predict_flow_velocity(
             input_ids=batch["input_ids"],
             attention_mask=batch.get("attention_mask"),
             token_type_ids=batch.get("token_type_ids"),
