@@ -6,7 +6,7 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -80,48 +80,6 @@ def make_molmoact2_config(
         action_mode=action_mode,
         compile_model=torch_compile,
     )
-
-
-def _as_float_list(value: object) -> list[float]:
-    if torch.is_tensor(value):
-        value_t = cast("Tensor", value)
-        return [float(x) for x in value_t.detach().cpu().reshape(-1).tolist()]
-    if isinstance(value, (list, tuple)):
-        return [float(x) for x in value]
-    if isinstance(value, (int, float)):
-        return [float(value)]
-    msg = f"Unsupported normalization value type: {type(value)}"
-    raise TypeError(msg)
-
-
-def _feature_normalization_mode(feature: Feature) -> str:
-    if feature.ftype == FeatureType.VISUAL:
-        return "identity"
-    norm = feature.normalization_data
-    if norm is None:
-        return "identity"
-    if norm.q01 is not None and norm.q99 is not None:
-        return "quantiles"
-    if norm.min is not None and norm.max is not None:
-        return "min_max"
-    if norm.mean is not None and norm.std is not None:
-        return "mean_std"
-    return "identity"
-
-
-def _feature_normalization_stats(feature: Feature, mode: str) -> dict[str, list[float]]:
-    norm = feature.normalization_data
-    if norm is None or mode == "identity":
-        return {}
-    if mode == "quantiles":
-        stats = {"q01": _as_float_list(norm.q01), "q99": _as_float_list(norm.q99)}
-    elif mode == "min_max":
-        stats = {"min": _as_float_list(norm.min), "max": _as_float_list(norm.max)}
-    else:
-        stats = {"mean": _as_float_list(norm.mean), "std": _as_float_list(norm.std)}
-    if norm.mask is not None:
-        stats["mask"] = _as_float_list(norm.mask)
-    return stats
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
