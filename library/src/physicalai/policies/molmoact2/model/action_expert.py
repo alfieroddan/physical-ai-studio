@@ -473,8 +473,10 @@ class ActionExpert(nn.Module):
         for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states, strict=False):
             k_ctx = self._project_kv(k_in, self.context_k_proj)
             v_ctx = self._project_kv(v_in, self.context_v_proj)
-            if block.cross_attn.k_norm is not None:  # pyright: ignore[reportAttributeAccessIssue]
-                k_ctx = block.cross_attn.k_norm(k_ctx.transpose(1, 2)).transpose(1, 2)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]
+            if block.cross_attn.k_norm is not None:  # pyright: ignore[reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute]
+                k_ctx = (
+                    block.cross_attn.k_norm(k_ctx.transpose(1, 2)).transpose(1, 2)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]  # pyrefly: ignore[not-callable, missing-attribute]
+                )
             kv_contexts.append((k_ctx, v_ctx))
 
         cross_mask = None
@@ -488,8 +490,8 @@ class ActionExpert(nn.Module):
             self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
 
         rope_cache = None
-        if self.blocks and self.blocks[0].self_attn.rope is not None:  # pyright: ignore[reportAttributeAccessIssue]
-            rope_cache = self.blocks[0].self_attn.rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]
+        if self.blocks and self.blocks[0].self_attn.rope is not None:  # pyright: ignore[reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute, not-callable]
+            rope_cache = self.blocks[0].self_attn.rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute]
 
         return ActionExpertContext(
             kv_contexts=kv_contexts,

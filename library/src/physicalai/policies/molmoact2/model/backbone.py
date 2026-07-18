@@ -99,7 +99,7 @@ class MolmoAct2Backbone(nn.Module):
             return embeddings
 
         image_features = self.vision_backbone(images, token_pooling).to(embeddings.dtype)
-        is_image_patch = (token_ids == self.config.image_patch_id).reshape(-1)
+        is_image_patch = (token_ids == self.config.image_patch_id).reshape(-1)  # pyrefly: ignore[missing-attribute]
         flat = embeddings.reshape(-1, embeddings.shape[-1]).clone()
         flat[is_image_patch] += image_features
         return flat.reshape_as(embeddings)
@@ -260,7 +260,7 @@ class MolmoAct2Backbone(nn.Module):
         token_type_ids: torch.Tensor | None,
         images: torch.Tensor | None,
         token_pooling: torch.Tensor | None,
-        batch_size: int,
+        batch_size: int,  # noqa: ARG002
         seq_len: int,
         device: torch.device,
         dtype: torch.dtype,

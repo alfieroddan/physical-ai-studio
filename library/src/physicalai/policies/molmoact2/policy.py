@@ -6,7 +6,7 @@
 """MolmoAct2 policy implementation."""
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -84,7 +84,8 @@ def make_molmoact2_config(
 
 def _as_float_list(value: object) -> list[float]:
     if torch.is_tensor(value):
-        return [float(x) for x in value.detach().cpu().reshape(-1).tolist()]
+        value_t = cast("Tensor", value)
+        return [float(x) for x in value_t.detach().cpu().reshape(-1).tolist()]
     if isinstance(value, (list, tuple)):
         return [float(x) for x in value]
     if isinstance(value, (int, float)):
@@ -154,6 +155,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 observations/actions (needed for zero-shot and fine-tuning from the
                 pre-#777 LeRobot calibration checkpoint).
             torch_compile: Whether to enable compile-oriented config flags.
+            load_weights: Whether to eagerly load pretrained weights when a
+                checkpoint is available.
 
         Raises:
             ValueError: If only one of input_features/output_features is provided.
@@ -216,8 +219,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # the same pretrained source during inference adapter reload.
         self.save_hyperparameters(ignore=["config", "load_weights"])
 
-        self.model: MolmoAct2Model | None = None
-        self._preprocessor: MolmoAct2Preprocessor | None = None
+        self.model: MolmoAct2Model | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
+        self._preprocessor: MolmoAct2Preprocessor | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
         self._postprocessor: MolmoAct2Postprocessor | None = None
         self._load_weights = load_weights
 
@@ -419,7 +422,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         }
         return [{"params": params, "lr": learning_rates[name]} for name, params in grouped.items() if params]
 
-    def configure_optimizers(self) -> dict[str, Any]:
+    def configure_optimizers(self) -> dict[str, Any]:  # pyrefly: ignore[bad-override]
         """Build the AdamW optimizer with grouped learning rates and an LR schedule.
 
         Returns:
@@ -499,12 +502,18 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
+
+        Raises:
+            ValueError: If any input feature lacks a concrete shape.
         """
         if self.model is None or self.input_features is None:
             return None
 
         schema: list[InferenceFeature] = []
         for feature in self.input_features:
+            if feature.shape is None:  # pragma: no cover - export requires concrete shapes
+                msg = "input feature missing concrete shape for export"
+                raise ValueError(msg)
             if feature.ftype == FeatureType.VISUAL:
                 schema.append(
                     InferenceFeature(
@@ -542,19 +551,27 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         Returns:
             A list of :class:`InferenceFeature` descriptors, or ``None``.
+
+        Raises:
+            ValueError: If any output feature lacks a concrete shape.
         """
         if self.model is None or self.output_features is None:
             return None
 
-        return [
-            InferenceFeature(
-                ftype=InferenceFeatureType.ACTION,
-                shape=(self.config.n_action_steps, *tuple(feature.shape)),
-                name=ACTION,
-                dtype=InferenceFeatureDtype.FLOAT32,
+        outputs: list[InferenceFeature] = []
+        for feature in self.output_features:
+            if feature.shape is None:  # pragma: no cover - export requires concrete shapes
+                msg = "output feature missing concrete shape for export"
+                raise ValueError(msg)
+            outputs.append(
+                InferenceFeature(
+                    ftype=InferenceFeatureType.ACTION,
+                    shape=(self.config.n_action_steps, *tuple(feature.shape)),
+                    name=ACTION,
+                    dtype=InferenceFeatureDtype.FLOAT32,
+                ),
             )
-            for feature in self.output_features
-        ]
+        return outputs
 
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:

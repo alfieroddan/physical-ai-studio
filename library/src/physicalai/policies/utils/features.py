@@ -7,7 +7,10 @@
 
 from __future__ import annotations
 
-from physicalai.data import Feature, FeatureType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from physicalai.data import Feature, FeatureType
 
 
 def feature_by_type(features: list[Feature], feature_type: FeatureType) -> Feature | None:

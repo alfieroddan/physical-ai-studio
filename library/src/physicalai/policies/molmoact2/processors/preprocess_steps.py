@@ -23,6 +23,7 @@ class FeatureBatchNormalizer(torch.nn.Module):
     """Normalize batch features using configured feature statistics."""
 
     def __init__(self, *, input_features: list[Feature], output_features: list[Feature]) -> None:
+        """Build the feature normalizer from the input/output feature schemas."""
         super().__init__()
 
         all_features = {feature.name: feature for feature in input_features + output_features if feature.name}
@@ -49,7 +50,11 @@ class FeatureBatchNormalizer(torch.nn.Module):
         self._normalizer = FeatureNormalizeTransform(all_features, norm_map, inverse=False)
 
     def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Normalize all configured features in-place-style and return a new dict."""
+        """Normalize all configured features in-place-style and return a new dict.
+
+        Returns:
+            A new batch dict with configured features normalized in place.
+        """
         device = next((value.device for value in batch.values() if torch.is_tensor(value)), torch.device("cpu"))
         return self._normalizer.to(device)(batch)
 
@@ -67,6 +72,7 @@ class StateTaskImageExtractor:
     """Extract state, language task, and images from a flattened input batch."""
 
     def __init__(self, *, image_keys: list[str]) -> None:
+        """Store the ordered image keys to extract from each batch."""
         self.image_keys = image_keys
 
     @staticmethod
@@ -106,7 +112,7 @@ class StateTaskImageExtractor:
             tasks = [str(task_source)]
 
         if len(tasks) == 1 and batch_size > 1:
-            tasks = tasks * batch_size
+            tasks *= batch_size
         if len(tasks) != batch_size:
             msg = f"Expected {batch_size} task strings, got {len(tasks)}."
             raise ValueError(msg)
@@ -131,7 +137,7 @@ class StateTaskImageExtractor:
         raise ValueError(msg)
 
     @staticmethod
-    def _get_image_value(batch: dict[str, Any], key: str) -> Any:
+    def _get_image_value(batch: dict[str, Any], key: str) -> Any:  # noqa: ANN401
         if key in batch:
             return batch[key]
 
@@ -145,12 +151,12 @@ class StateTaskImageExtractor:
         raise KeyError(msg)
 
     @staticmethod
-    def _as_bchw_tensor(value: Any, *, key: str) -> torch.Tensor:
+    def _as_bchw_tensor(value: Any, *, key: str) -> torch.Tensor:  # noqa: ANN401
         tensor = value if torch.is_tensor(value) else torch.as_tensor(value)
-        if tensor.ndim != 4:
+        if tensor.ndim != 4:  # noqa: PLR2004
             msg = f"Expected BCHW image tensor at {key}, got shape {tuple(tensor.shape)}"
             raise ValueError(msg)
-        if int(tensor.shape[1]) != 3:
+        if int(tensor.shape[1]) != 3:  # noqa: PLR2004
             msg = f"Expected BCHW image tensor with 3 channels at {key}, got shape {tuple(tensor.shape)}"
             raise ValueError(msg)
         return tensor
@@ -171,7 +177,12 @@ class StateTaskImageExtractor:
         return images_by_example
 
     def extract(self, batch: dict[str, Any]) -> PreprocessBatchBundle:
-        """Extract and normalize raw state/task/image values."""
+        """Extract and normalize raw state/task/image values.
+
+        Returns:
+            A :class:`PreprocessBatchBundle` carrying the extracted state
+            tensor, task strings, and per-example image lists.
+        """
         state = self._extract_state(batch)
         batch_size = int(state.shape[0])
 
@@ -202,6 +213,7 @@ class RobotPromptEncoder:
         add_setup_tokens: bool,
         add_control_tokens: bool,
     ) -> None:
+        """Store the prompt-shaping flags used to encode each batch element."""
         self.num_state_tokens = num_state_tokens
         self.setup_type = setup_type
         self.control_mode = control_mode
@@ -209,7 +221,12 @@ class RobotPromptEncoder:
         self.add_control_tokens = add_control_tokens
 
     def encode(self, bundle: PreprocessBatchBundle) -> PromptPack:
-        """Encode one prompt per batch element."""
+        """Encode one prompt per batch element.
+
+        Returns:
+            A :class:`PromptPack` with one prompt text per batch element and
+            the flattened list of image tensors.
+        """
         prompt_texts: list[str] = []
         flat_images: list[torch.Tensor] = []
         for index in range(int(bundle.state.shape[0])):
@@ -240,19 +257,31 @@ class ImagePacker(torch.nn.Module):
         self.height, self.width = image_size
 
     def _resize(self, image: torch.Tensor) -> torch.Tensor:
-        """Resize a single ``(C, H, W)`` image on the uint8 grid to ``[0, 1]``."""
+        """Resize a single ``(C, H, W)`` image on the uint8 grid to ``[0, 1]``.
+
+        Returns:
+            Float tensor of shape ``(C, height, width)`` in the ``[0, 1]`` range.
+        """
         if image.dtype == torch.uint8:
             pixels = image
         else:
             pixels = image.to(torch.float32)
             if float(pixels.max()) <= 1.0:
-                pixels = pixels * 255.0
+                pixels *= 255.0
             pixels = pixels.clamp(0, 255).to(torch.uint8)
         resized = tv_functional.resize(pixels, [self.height, self.width], antialias=False)
         return resized.to(torch.float32) / 255.0
 
     def forward(self, images_by_example: list[list[torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resize and pack images into [N, B, C, H, W] and masks [N, B]."""
+        """Resize and pack images into [N, B, C, H, W] and masks [N, B].
+
+        Returns:
+            ``(images, masks)`` of shapes ``(N, B, 3, H, W)`` and ``(N, B)``.
+
+        Raises:
+            ValueError: If the per-element image count is inconsistent, or if
+                the batch is empty.
+        """
         batch_size = len(images_by_example)
         if batch_size == 0:
             empty_images = torch.empty((0, 0, 3, self.height, self.width), dtype=torch.float32)
@@ -288,6 +317,7 @@ class ActionExtractor:
 
     @staticmethod
     def extract(batch: dict[str, Any]) -> torch.Tensor | None:
+        """Return the action tensor from ``batch`` as float32, or ``None`` if absent."""
         raw_action = batch.get(ACTION)
         if raw_action is None:
             raw_action = batch.get(f"action.{ACTION}")
@@ -303,14 +333,24 @@ class ActionPadder(torch.nn.Module):
     """Pad action tensors to max_action_dim and emit padding masks."""
 
     def __init__(self, *, max_action_dim: int) -> None:
+        """Store the target ``max_action_dim`` used to pad the last axis."""
         super().__init__()
         self.max_action_dim = int(max_action_dim)
 
     def forward(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return padded action, horizon mask, and dimension mask."""
-        if action.ndim == 2:
+        """Return padded action, horizon mask, and dimension mask.
+
+        Returns:
+            ``(padded, action_horizon_is_pad, action_dim_is_pad)`` where the
+            action is right-padded to ``max_action_dim``.
+
+        Raises:
+            ValueError: If the action is not 3-D ``[B, T, D]``, or if its
+                last axis exceeds ``max_action_dim``.
+        """
+        if action.ndim == 2:  # noqa: PLR2004
             action = action.unsqueeze(1)
-        if action.ndim != 3:
+        if action.ndim != 3:  # noqa: PLR2004
             msg = f"MolmoAct2 expected action shape [B, T, D], got {tuple(action.shape)}."
             raise ValueError(msg)
 

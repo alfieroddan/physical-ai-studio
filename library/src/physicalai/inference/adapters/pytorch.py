@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-import torchmetrics
 from physicalai.inference.adapters.base import RuntimeAdapter
 from physicalai.inference.adapters.registry import adapter_registry
 from physicalai.inference.manifest import Manifest
@@ -55,6 +54,17 @@ class TorchAdapter(RuntimeAdapter):
         self._output_names: list[str] = []
 
     def load(self, model_path: Path | str) -> None:
+        """Load Torch model from file.
+
+        Args:
+            model_path: Path to the .pt file created by torch.save()
+
+        Raises:
+            FileNotFoundError: If model file doesn't exist
+            RuntimeError: If model loading fails
+            KeyError: If manifest is missing required entries
+            TypeError: If imported policy class is missing callable load_from_checkpoint()
+        """
         model_path = Path(model_path)
         if not model_path.exists():
             msg = f"Model file not found: {model_path}"
@@ -84,7 +94,10 @@ class TorchAdapter(RuntimeAdapter):
             # The checkpoint's own state_dict (loaded normally by Lightning
             # right after __init__) supplies every real parameter value anyway.
             self._policy = load_from_checkpoint(
-                model_path, map_location="cpu", weights_only=False, load_weights=False,
+                model_path,
+                map_location="cpu",
+                weights_only=False,
+                load_weights=False,
             )
             if checkpoint_dtype is not None:
                 self._policy = self._policy.to(device=self.device, dtype=checkpoint_dtype).eval()
@@ -106,7 +119,12 @@ class TorchAdapter(RuntimeAdapter):
 
     @staticmethod
     def _infer_checkpoint_dtype(checkpoint: dict[str, Any]) -> torch.dtype | None:
-        """Infer a representative parameter dtype from a saved checkpoint state_dict."""
+        """Infer a representative parameter dtype from a saved checkpoint state_dict.
+
+        Returns:
+            The dtype of the first floating-point parameter in the checkpoint
+            state_dict, or ``None`` if no floating-point parameter is found.
+        """
         state_dict = checkpoint.get("state_dict")
         if not isinstance(state_dict, dict):
             return None
@@ -155,6 +173,7 @@ class TorchAdapter(RuntimeAdapter):
         Raises:
             TypeError: If output type is unexpected
         """
+
         def to_numpy(value: torch.Tensor) -> np.ndarray:
             if value.dtype == torch.bfloat16:
                 value = value.to(dtype=torch.float32)

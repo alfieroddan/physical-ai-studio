@@ -27,7 +27,12 @@ if TYPE_CHECKING:
 
 
 def _env_action_dim(config: MolmoAct2Config) -> int:
-    """Return the environment action dimension from the output features."""
+    """Return the environment action dimension from the output features.
+
+    Returns:
+        The first dimension of the configured action feature, or ``0`` if no
+        action feature is present.
+    """
     for feature in config.output_features or []:
         if feature.ftype == FeatureType.ACTION and feature.shape:
             return int(feature.shape[0])
@@ -35,7 +40,12 @@ def _env_action_dim(config: MolmoAct2Config) -> int:
 
 
 def _default_action_dim_is_pad(config: MolmoAct2Config, *, batch_size: int, device: torch.device) -> torch.Tensor:
-    """Mark action dimensions beyond the environment action dim as padding."""
+    """Mark action dimensions beyond the environment action dim as padding.
+
+    Returns:
+        Boolean tensor of shape ``(batch_size, max_action_dim)`` that is ``False``
+        for the first ``env_action_dim`` columns and ``True`` for the rest.
+    """
     action_dim_is_pad = torch.ones((batch_size, int(config.max_action_dim)), dtype=torch.bool, device=device)
     env_action_dim = _env_action_dim(config)
     if env_action_dim > 0:
@@ -44,7 +54,12 @@ def _default_action_dim_is_pad(config: MolmoAct2Config, *, batch_size: int, devi
 
 
 def _image_token_ids(config: MolmoAct2Config) -> list[int]:
-    """List the token ids that mark image content (for token type ids)."""
+    """List the token ids that mark image content (for token type ids).
+
+    Returns:
+        List of integer token ids defined on ``config`` that mark image
+        content; ``None``-valued entries are skipped.
+    """
     ids = [
         config.image_patch_id,
         config.image_col_id,
@@ -63,7 +78,12 @@ def _build_token_type_ids(
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
 ) -> torch.Tensor | None:
-    """Mark image tokens (1) vs. text tokens (0), respecting the attention mask."""
+    """Mark image tokens (1) vs. text tokens (0), respecting the attention mask.
+
+    Returns:
+        Long tensor matching ``input_ids`` shape marking image tokens, or
+        ``None`` if no image token ids are defined on ``config``.
+    """
     image_token_ids = _image_token_ids(config)
     if not image_token_ids:
         return None
@@ -72,10 +92,24 @@ def _build_token_type_ids(
     return is_image * attention_mask.to(torch.long)
 
 
-def _image_token_ids_for_grid(config: MolmoAct2Config, grid: torch.Tensor) -> list[int]:
-    """Expand a single image grid into its sequence of image token ids."""
+def _image_token_ids_for_grid(config: MolmoAct2Config, grid: torch.Tensor) -> list[int]:  # noqa: PLR0914
+    """Expand a single image grid into its sequence of image token ids.
+
+    Returns:
+        Ordered list of token ids representing one image token grid
+        (low-resolution crops followed by high-resolution crops), bracketed
+        by start/end tokens.
+
+    Raises:
+        ValueError: If required image token ids (``image_patch_id``,
+            ``image_start_token_id``, ``image_end_token_id``) are unset on
+            ``config``.
+    """
     resized_h, resized_w, height, width = (int(x) for x in grid.tolist())
 
+    if config.image_patch_id is None or config.image_start_token_id is None or config.image_end_token_id is None:
+        msg = "image_patch_id, image_start_token_id, and image_end_token_id must be configured"
+        raise ValueError(msg)
     image_patch_id = int(config.image_patch_id)
     image_start_token_id = int(config.image_start_token_id)
     image_end_token_id = int(config.image_end_token_id)
@@ -100,20 +134,28 @@ def _image_token_ids_for_grid(config: MolmoAct2Config, grid: torch.Tensor) -> li
     def make_rows(num_rows: int, num_cols: int, *, use_col: bool) -> list[int]:
         row = [image_patch_id] * num_cols
         if use_col and image_col_id is not None:
-            row = row + [image_col_id]
+            row += [image_col_id]
         return row * num_rows
 
     if height == 0 or width == 0:
-        return (
-            [image_start_token_id]
-            + make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens)
-            + [image_end_token_id]
-        )
+        return [
+            image_start_token_id,
+            *make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens),
+            image_end_token_id,
+        ]
 
-    high_res = [image_start_token_id] + make_rows(height, width, use_col=image_use_col_tokens) + [image_end_token_id]
+    high_res = [
+        image_start_token_id,
+        *make_rows(height, width, use_col=image_use_col_tokens),
+        image_end_token_id,
+    ]
     low_start = low_res_start_id if use_single_crop_start_token else image_start_token_id
-    low_res = [low_start] + make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens) + [image_end_token_id]
-    return low_res + high_res
+    low_res = [
+        low_start,
+        *make_rows(resized_h, resized_w, use_col=use_single_crop_col_tokens),
+        image_end_token_id,
+    ]
+    return [*low_res, *high_res]
 
 
 def _expand_image_placeholders(
@@ -124,7 +166,16 @@ def _expand_image_placeholders(
     image_grids: torch.Tensor,
     image_placeholder_token_id: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    """Replace each ``<|image|>`` placeholder with its expanded image token ids."""
+    """Replace each ``<image>`` placeholder with its expanded image token ids.
+
+    Returns:
+        ``(out_ids, out_mask, token_type_ids)`` tensors with the placeholder
+        tokens replaced and padded rows masked.
+
+    Raises:
+        ValueError: If there are too few ``image_grids`` to expand every
+            ``<image>`` placeholder in ``input_ids``.
+    """
     if int(image_grids.shape[0]) == 0:
         return input_ids, attention_mask, _build_token_type_ids(config, input_ids, attention_mask)
 
@@ -161,7 +212,7 @@ def _expand_image_placeholders(
     return out_ids, out_mask, _build_token_type_ids(config, out_ids, out_mask)
 
 
-def build_batched_images(
+def build_batched_images(  # noqa: PLR0914
     config: MolmoAct2Config,
     input_ids: torch.Tensor,
     pixel_values: torch.Tensor,
@@ -180,8 +231,12 @@ def build_batched_images(
     Returns:
         ``(images, token_pooling)`` of shapes ``(N, max_crops, n_patches, pixels)``
         and ``(N, max_pooled, pool_area)``.
+
+    Raises:
+        ValueError: If the number of ``image_end`` tokens does not match the
+            number of image grids supplied in ``image_grids``.
     """
-    counts = (input_ids == config.image_end_token_id).sum(1)  # images per example
+    counts = (input_ids == config.image_end_token_id).sum(1)  # images per example  # pyrefly: ignore[missing-attribute]
     num_images = int(image_grids.shape[0])
     if int(counts.sum()) != num_images:
         msg = f"image_end tokens ({int(counts.sum())}) do not match image grids ({num_images})."
@@ -189,7 +244,7 @@ def build_batched_images(
 
     num_examples = counts.shape[0]
     device = input_ids.device
-    n_crops, n_patches, pixels_per_patch = pixel_values.shape
+    _n_crops, n_patches, pixels_per_patch = pixel_values.shape
 
     pooled_per_image = (image_grids[:, :2].prod(1) + image_grids[:, 2:].prod(1)).to(image_num_crops.dtype)
     example_for_image = torch.arange(num_examples, device=device).repeat_interleave(counts)
@@ -242,7 +297,7 @@ def build_batched_images(
     return images, token_pooling
 
 
-def build_model_inputs(
+def build_model_inputs(  # noqa: PLR0914
     batch: dict[str, Any],
     *,
     config: MolmoAct2Config,
@@ -251,7 +306,7 @@ def build_model_inputs(
     """Assemble backbone-ready model inputs from a preprocessed batch.
 
     Args:
-        batch: Preprocessed batch with ``TOKENIZED_PROMPT`` (with ``<|image|>``
+        batch: Preprocessed batch with ``TOKENIZED_PROMPT`` (with ``<image>``
             placeholders) and packed, already-resized ``IMAGES`` of shape
             ``(N, B, C, H, W)``.
         config: The MolmoAct2 configuration.
@@ -261,6 +316,10 @@ def build_model_inputs(
         A dict with ``input_ids``, ``attention_mask``, ``token_type_ids``,
         ``images`` (per-example batched crops), ``token_pooling`` and
         ``action_dim_is_pad``.
+
+    Raises:
+        ValueError: If ``images`` is not a 5-D ``(N, B, C, H, W)`` tensor, or
+            if ``config.image_placeholder_token_id`` is unset.
     """
     input_ids = batch[TOKENIZED_PROMPT]
     attention_mask = batch.get(TOKENIZED_PROMPT_MASK)
@@ -268,7 +327,7 @@ def build_model_inputs(
         attention_mask = torch.ones_like(input_ids)
 
     images = batch[IMAGES]
-    if images.ndim != 5:
+    if images.ndim != 5:  # noqa: PLR2004
         msg = f"Expected packed images of shape (N, B, C, H, W), got {tuple(images.shape)}."
         raise ValueError(msg)
     num_images, batch_size, channels, height, width = images.shape

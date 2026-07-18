@@ -99,7 +99,7 @@ class FeatureNormalizeTransform(nn.Module):
         return batch
 
     @staticmethod
-    def _apply_normalization(
+    def _apply_normalization(  # noqa: PLR0912
         batch: dict,
         key: str,
         norm_mode: NormalizationType,
@@ -160,10 +160,7 @@ class FeatureNormalizeTransform(nn.Module):
                 denom,
             )
             feature_mask = buffer.get("mask") if hasattr(buffer, "get") else None
-            if inverse:
-                transformed = (batch[key] + 1.0) * denom / 2.0 + q01
-            else:
-                transformed = 2.0 * (batch[key] - q01) / denom - 1.0
+            transformed = (batch[key] + 1.0) * denom / 2.0 + q01 if inverse else 2.0 * (batch[key] - q01) / denom - 1.0
             if feature_mask is not None:
                 # Broadcast mask to match tensor shape (e.g. (D,) → (batch, D))
                 mask_bool = feature_mask.bool()
@@ -182,7 +179,7 @@ class FeatureNormalizeTransform(nn.Module):
             raise ValueError(norm_mode)
 
     @staticmethod
-    def _create_stats_buffers(  # noqa: C901
+    def _create_stats_buffers(  # noqa: C901, PLR0914, PLR0915
         features: dict[str, Feature],
         norm_map: dict[FeatureType, NormalizationType],
     ) -> dict[str, dict[str, nn.ParameterDict]]:

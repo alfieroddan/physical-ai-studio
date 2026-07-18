@@ -26,6 +26,7 @@ policy itself. The steps are:
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,9 @@ IMAGE_SIZE_DIMS = 2
 IMAGE_PROMPT = "<|image|>"
 
 
-def _resolve_image_placeholder_token_id(checkpoint_path: str | Path) -> int | None:
+def _resolve_image_placeholder_token_id(checkpoint_path: str | Path | None) -> int | None:
+    if checkpoint_path is None:
+        return None
     tokenizer = Qwen2Tokenizer.from_pretrained(str(checkpoint_path), local_files_only=True)
     token_id = tokenizer.convert_tokens_to_ids(IMAGE_PROMPT)
     return int(token_id) if isinstance(token_id, int) else None
@@ -76,7 +79,7 @@ def _ensure_processor_assets_downloaded(
 
     for filename in processor_files:
         try:
-            downloaded_path = hf_hub_download(
+            downloaded_path = hf_hub_download(  # pyrefly: ignore[no-matching-overload]
                 repo_id,
                 filename,
                 **selected_hub_kwargs,  # type: ignore[arg-type]
@@ -84,8 +87,6 @@ def _ensure_processor_assets_downloaded(
             # The file is now in cache; ensure it's also in the checkpoint_location snapshot dir
             target_path = Path(checkpoint_location) / filename
             if not target_path.exists():
-                import shutil
-
                 shutil.copy2(downloaded_path, target_path)
         except RemoteEntryNotFoundError:
             # File doesn't exist in repo, skip it
@@ -432,6 +433,10 @@ def build_config_from_hf_config(
 
     Returns:
         Resolved `MolmoAct2Config` instance.
+
+    Raises:
+        ValueError: If ``checkpoint_path`` is ``None`` when resolving the
+            image placeholder token id.
     """
     config_data: dict[str, Any] = {
         "vit_config": _hf_component_config(hf_config, "vit_config"),
@@ -526,7 +531,10 @@ def build_config_from_hf_config(
     config_data["norm_tag"] = norm_tag
     config_data["tokenizer_name_or_path"] = checkpoint_path
     config_data["processor_assets_path"] = checkpoint_path
-    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)  # pyright: ignore[reportArgumentType]
+    if checkpoint_path is None:
+        msg = "checkpoint_path is required to resolve the image placeholder token id"
+        raise ValueError(msg)
+    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)
     if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
         processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
     config_data["processor_config"] = processor_config
