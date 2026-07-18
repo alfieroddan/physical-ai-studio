@@ -26,6 +26,13 @@ from physicalai.config import Config
 if TYPE_CHECKING:
     from physicalai.data import Feature
 
+DEFAULT_MOLMOACT2_REPO_ID = "allenai/MolmoAct2"
+# The ``<|image|>`` image-placeholder token maps to the same id across MolmoAct2
+# variants (verified against ``allenai/MolmoAct2`` and ``allenai/MolmoAct2-LIBERO``).
+# Hardcoding it avoids an extra ``Qwen2Tokenizer.from_pretrained`` call in
+# ``from_hf.py``; the tokenizer itself is loaded once in the preprocessor.
+MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID = 154629
+
 
 @dataclass
 class MolmoAct2VitConfig(Config):
@@ -317,7 +324,7 @@ class MolmoAct2Config(Config):
     low_res_image_start_token_id: int | None = None
     image_end_token_id: int | None = None
     image_low_res_id: int | None = None
-    image_placeholder_token_id: int | None = None
+    image_placeholder_token_id: int = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
     image_patch_id: int | None = None
     image_col_id: int | None = None
     frame_start_token_id: int | None = None
@@ -354,7 +361,12 @@ class MolmoAct2Config(Config):
 
     # Initialization and assets
     norm_stats_filename: str = "norm_stats.json"
-    tokenizer_name_or_path: str | None = None
+    tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
+    # Parsed contents of the pretrained ``tokenizer_config.json`` (options such
+    # as bos/eos/pad and extra special tokens). Loaded once by ``from_hf.py`` so
+    # that exported checkpoints can rebuild a tokenizer by downloading only the
+    # ``tokenizer.json`` vocab file from the configured repo.
+    tokenizer_config: dict[str, Any] | None = None
     processor_assets_path: str | None = None
     processor_config: MolmoAct2ProcessorConfig | None = None
     initializer_range: float = 0.02

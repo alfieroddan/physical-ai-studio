@@ -32,25 +32,25 @@ from typing import Any
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
-from transformers import Qwen2Tokenizer
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
-from .config import MolmoAct2Config, MolmoAct2ProcessorConfig
+from .config import (
+    DEFAULT_MOLMOACT2_REPO_ID,
+    MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
+    MolmoAct2Config,
+    MolmoAct2ProcessorConfig,
+)
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 IMAGE_SIZE_DIMS = 2
+# Text prompt placeholder that gets expanded into image patch tokens. Kept for
+# reference; its token id is hardcoded as
+# ``MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID`` so that ``from_hf.py`` no longer
+# needs to instantiate the tokenizer.
 IMAGE_PROMPT = "<|image|>"
-
-
-def _resolve_image_placeholder_token_id(checkpoint_path: str | Path | None) -> int | None:
-    if checkpoint_path is None:
-        return None
-    tokenizer = Qwen2Tokenizer.from_pretrained(str(checkpoint_path), local_files_only=True)
-    token_id = tokenizer.convert_tokens_to_ids(IMAGE_PROMPT)
-    return int(token_id) if isinstance(token_id, int) else None
 
 
 def _ensure_processor_assets_downloaded(
@@ -58,7 +58,14 @@ def _ensure_processor_assets_downloaded(
     checkpoint_location: str,
     hub_kwargs: dict[str, object] | None = None,
 ) -> None:
-    """Download the tokenizer and processor config assets required by the local processor.
+    """Download the processor config asset into the local checkpoint snapshot.
+
+    The tokenizer assets are intentionally not fetched here: the tokenizer
+    ``tokenizer.json`` vocab is pulled on demand by ``MolmoAct2Tokenizers`` from
+    the configured repo id, and ``tokenizer_config.json`` options are loaded
+    separately during container construction. Only ``processor_config.json``
+    needs to live inside the checkpoint snapshot directory for the image/video
+    processor config to be read back.
 
     Args:
         repo_id: HuggingFace model repository ID.
@@ -67,8 +74,6 @@ def _ensure_processor_assets_downloaded(
     """
     processor_files = [
         "processor_config.json",
-        "tokenizer_config.json",
-        "tokenizer.json",
     ]
 
     selected_hub_kwargs = {
@@ -91,6 +96,41 @@ def _ensure_processor_assets_downloaded(
         except RemoteEntryNotFoundError:
             # File doesn't exist in repo, skip it
             pass
+
+
+def _load_tokenizer_config(checkpoint_location: str, repo_id: str | None) -> dict[str, Any] | None:
+    """Load ``tokenizer_config.json`` options for the MolmoAct2 tokenizer.
+
+    The options are resolved in order from: the local checkpoint snapshot
+    directory, the Hugging Face Hub (when ``repo_id`` is provided), and finally
+    the canonical ``DEFAULT_MOLMOACT2_REPO_ID`` repo. Returns ``None`` only when
+    the file cannot be found on the Hub at all.
+
+    Args:
+        checkpoint_location: Local checkpoint snapshot directory to check first.
+        repo_id: Hugging Face repo id to download from when the local file is
+            missing.
+
+    Returns:
+        Parsed ``tokenizer_config.json`` payload, or ``None`` when unavailable
+        both locally and on the Hub.
+    """
+    local_path = Path(checkpoint_location) / "tokenizer_config.json"
+    if local_path.is_file():
+        with local_path.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    candidate_repos = [repo_id, DEFAULT_MOLMOACT2_REPO_ID]
+    for candidate in candidate_repos:
+        if not candidate:
+            continue
+        try:
+            downloaded = hf_hub_download(candidate, "tokenizer_config.json")
+        except RemoteEntryNotFoundError:
+            continue
+        with Path(downloaded).open(encoding="utf-8") as f:
+            return json.load(f)
+    return None
 
 
 def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
@@ -408,6 +448,8 @@ def build_config_from_hf_config(
     output_features: list[Feature] | None = None,
     norm_tag: str | None = None,
     checkpoint_path: str | None = None,
+    repo_id: str | None = None,
+    tokenizer_config: dict[str, Any] | None = None,
     processor_config: dict[str, Any] | MolmoAct2ProcessorConfig | None = None,
     n_obs_steps: int = 30,
     n_action_steps: int = 30,
@@ -423,7 +465,13 @@ def build_config_from_hf_config(
         input_features: Optional input feature definitions.
         output_features: Optional output feature definitions.
         norm_tag: Selected normalization metadata tag.
-        checkpoint_path: Local checkpoint directory containing extended tokenizer vocab.
+        checkpoint_path: Local checkpoint directory.
+        repo_id: Original Hugging Face repo id when the checkpoint came from the
+            Hub. Used as the tokenizer source; falls back to
+            ``DEFAULT_MOLMOACT2_REPO_ID`` when not provided.
+        tokenizer_config: Optional parsed ``tokenizer_config.json`` options to
+            carry into the config so the tokenizer can be rebuilt by downloading
+            only ``tokenizer.json`` at runtime.
         processor_config: Optional pre-loaded processor config dict.
         n_obs_steps: Observation horizon override.
         n_action_steps: Number of executed action steps override.
@@ -435,8 +483,7 @@ def build_config_from_hf_config(
         Resolved `MolmoAct2Config` instance.
 
     Raises:
-        ValueError: If ``checkpoint_path`` is ``None`` when resolving the
-            image placeholder token id.
+        ValueError: If ``checkpoint_path`` is ``None``.
     """
     config_data: dict[str, Any] = {
         "vit_config": _hf_component_config(hf_config, "vit_config"),
@@ -529,12 +576,20 @@ def build_config_from_hf_config(
             config_data[key] = hf_config[key]
 
     config_data["norm_tag"] = norm_tag
-    config_data["tokenizer_name_or_path"] = checkpoint_path
-    config_data["processor_assets_path"] = checkpoint_path
     if checkpoint_path is None:
-        msg = "checkpoint_path is required to resolve the image placeholder token id"
+        msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
         raise ValueError(msg)
-    config_data["image_placeholder_token_id"] = _resolve_image_placeholder_token_id(checkpoint_path)
+    config_data["processor_assets_path"] = checkpoint_path
+    # Resolve the tokenizer source: prefer the original Hub repo id so the
+    # tokenizer can be re-downloaded at runtime; fall back to the canonical
+    # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
+    # tokenizer source so exported checkpoints still resolve the tokenizer once
+    # the local snapshot directory is gone.
+    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
+    config_data["tokenizer_config"] = tokenizer_config
+    # Hardcoded across MolmoAct2 variants (see ``config.py``); avoids
+    # instantiating the tokenizer here just to look up the placeholder id.
+    config_data["image_placeholder_token_id"] = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
     if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
         processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
     config_data["processor_config"] = processor_config
@@ -556,7 +611,7 @@ def build_config_from_hf_config(
     return MolmoAct2Config.from_dict(config_data)
 
 
-def load_hf_pretrained_container(
+def load_hf_pretrained_container(  # noqa: PLR0914
     pretrained_name_or_path: str | Path,
     *,
     config_filename: str = "config.json",
@@ -579,6 +634,9 @@ def load_hf_pretrained_container(
     path = Path(pretrained_name_or_path)
     is_local = path.is_dir()
     norm_stats: dict[str, Any] | None = None
+    # ``None`` for local checkpoints (no Hub repo id); the original pretrained
+    # identifier otherwise. This is later used as the tokenizer source.
+    repo_id: str | None = None if is_local else str(pretrained_name_or_path)
 
     if is_local:
         config_file = path / config_filename
@@ -619,7 +677,7 @@ def load_hf_pretrained_container(
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
 
-        # Download the tokenizer and processor config assets into the snapshot directory.
+        # Download the processor config asset into the snapshot directory.
         checkpoint_location_temp = str(Path(weights_file).parent)
         _ensure_processor_assets_downloaded(
             str(pretrained_name_or_path),
@@ -639,6 +697,12 @@ def load_hf_pretrained_container(
         with processor_config_path.open(encoding="utf-8") as f:
             processor_config = json.load(f)
 
+    # Load tokenizer options once here (``tokenizer_config.json``) so the config
+    # carried on the policy can rebuild the tokenizer by downloading only the
+    # ``tokenizer.json`` vocab file. Prefer a local file when present, then the
+    # Hub, then the canonical MolmoAct2 repo as a final fallback.
+    tokenizer_config = _load_tokenizer_config(checkpoint_location, repo_id)
+
     return HuggingfacePolicyContainer(
         config_file=Path(config_file),
         weights_file=Path(weights_file),
@@ -648,4 +712,6 @@ def load_hf_pretrained_container(
         hf_config=hf_config,
         norm_stats=norm_stats,
         processor_config=processor_config,
+        repo_id=repo_id,
+        tokenizer_config=tokenizer_config,
     )

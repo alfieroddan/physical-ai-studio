@@ -21,7 +21,7 @@ from physicalai.export.backends import ExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
-from .config import MolmoAct2Config
+from .config import DEFAULT_MOLMOACT2_REPO_ID, MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
 from .model import MolmoAct2Model
 from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor, make_molmoact2_preprocessors
@@ -89,7 +89,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
-        repo_id: str | Path | None = "allenai/MolmoAct2",
+        repo_id: str | Path | None = DEFAULT_MOLMOACT2_REPO_ID,
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
@@ -148,6 +148,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 input_features=input_features,
                 output_features=output_features,
                 checkpoint_path=self.hf_container.checkpoint_location,
+                repo_id=self.hf_container.repo_id,
+                tokenizer_config=self.hf_container.tokenizer_config,
                 processor_config=self.hf_container.processor_config,
                 n_obs_steps=n_obs_steps,
                 norm_tag=norm_tag,
@@ -206,9 +208,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
         self.model = MolmoAct2Model(self.config)
         if self._checkpoint_location is not None and self._load_weights:
-            self.model.load_pretrained_weights(self._checkpoint_location)
-
-        if self._checkpoint_location is not None:
             self.model.load_pretrained_weights(self._checkpoint_location)
 
         # parameter setting based on config

@@ -37,6 +37,10 @@ class HuggingfacePolicyContainer:
         hf_config: Parsed contents of ``config.json``.
         norm_stats: Optional parsed contents of the configured normalization stats JSON.
         processor_config: Optional parsed contents of the processor config JSON.
+        repo_id: Optional Hugging Face repo id for the checkpoint, when loaded
+            from the Hub. ``None`` for local checkpoints.
+        tokenizer_config: Optional parsed contents of ``tokenizer_config.json``
+            for the associated tokenizer.
     """
 
     config_file: Path
@@ -47,6 +51,13 @@ class HuggingfacePolicyContainer:
     hf_config: dict[str, Any]
     norm_stats: dict[str, Any] | None = None
     processor_config: dict[str, Any] | None = None
+    # Original Hugging Face repo id when the checkpoint came from the Hub;
+    # ``None`` for local paths. Used to resolve the tokenizer source.
+    repo_id: str | None = None
+    # Parsed contents of ``tokenizer_config.json`` for the tokenizer associated
+    # with this checkpoint. Used to rebuild the tokenizer at runtime without
+    # re-downloading ``tokenizer_config.json``.
+    tokenizer_config: dict[str, Any] | None = None
 
 
 def _download_optional_preprocessor(

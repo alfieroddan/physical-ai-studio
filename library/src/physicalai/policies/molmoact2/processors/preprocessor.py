@@ -102,6 +102,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         )
         self._tokenizers = MolmoAct2Tokenizers(
             tokenizer_name_or_path=config.tokenizer_name_or_path,
+            tokenizer_config=config.tokenizer_config,
         )
         self._action_extractor = ActionExtractor()
         self._action_padder = ActionPadder(max_action_dim=int(config.max_action_dim))
