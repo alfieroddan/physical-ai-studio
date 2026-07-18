@@ -16,12 +16,13 @@ import {
 import { MoreMenu } from '@geti-ui/ui/icons';
 
 import { $api } from '../../api/client';
+import { ElapsedDuration } from '../../components/elapsed-duration.component';
 import { CollapsableRow } from './collapsable-row.component';
 import { GRID_COLUMNS } from './constants';
 import { JobRowContent } from './job-row-content.component';
 import { SingleBadge, SplitBadge } from './split-badge.component';
 import { SchemaTrainJob } from './train-model-dialog';
-import { durationBetween, elapsedSince } from './utils';
+import { durationBetween } from './utils';
 
 import classes from './model-table.module.css';
 
@@ -44,11 +45,12 @@ const TrainJobStatus = ({ job }: { job: SchemaTrainJob }) => {
             <View>
                 <Flex gap={'size-100'}>
                     <Text UNSAFE_style={{ fontWeight: 500 }}>{job.payload.model_name}</Text>
-                    <SplitBadge first={job.status} second={'Fine-tuning the model'} />
+                    <SplitBadge first={job.status} second={job.message} />
                 </Flex>
                 {job.start_time ? (
                     <Text UNSAFE_className={classes.modelInfo}>
-                        Started: {new Date(job.start_time).toLocaleString()} | Elapsed: {elapsedSince(job.start_time)}
+                        Started: {new Date(job.start_time).toLocaleString()} | Elapsed:{' '}
+                        <ElapsedDuration date={job.start_time} />
                     </Text>
                 ) : (
                     <></>
