@@ -248,16 +248,23 @@ class RobotPromptEncoder:
         return PromptPack(prompt_texts=prompt_texts, flat_images=flat_images)
 
 
-class ImagePacker(torch.nn.Module):
-    """Resize images to the model input size and pack them into batch tensors."""
+class ImageResizeNormalizer(torch.nn.Module):
+    """Resize per-example images to the model input size and normalize to [0, 1].
+
+    Runs before :class:`ImagePacker` in the preprocessing pipeline. Each
+    ``(C, H, W)`` image is resized on the uint8 grid (to match the reference
+    numerics) and then converted to float32 in the ``[0, 1]`` range. The
+    nested ``list[list[Tensor]]`` structure is preserved so :class:`ImagePacker`
+    can pack the already-processed images into batch tensors.
+    """
 
     def __init__(self, *, image_size: tuple[int, int]) -> None:
         """Store the target ``(height, width)`` the images are resized to."""
         super().__init__()
         self.height, self.width = image_size
 
-    def _resize(self, image: torch.Tensor) -> torch.Tensor:
-        """Resize a single ``(C, H, W)`` image on the uint8 grid to ``[0, 1]``.
+    def _resize_normalize(self, image: torch.Tensor) -> torch.Tensor:
+        """Resize a single ``(C, H, W)`` image to ``[0, 1]`` float32.
 
         Returns:
             Float tensor of shape ``(C, height, width)`` in the ``[0, 1]`` range.
@@ -272,8 +279,31 @@ class ImagePacker(torch.nn.Module):
         resized = tv_functional.resize(pixels, [self.height, self.width], antialias=False)
         return resized.to(torch.float32) / 255.0
 
+    def forward(self, images_by_example: list[list[torch.Tensor]]) -> list[list[torch.Tensor]]:
+        """Resize and normalize every image, preserving the nested list structure.
+
+        Returns:
+            The same nested ``list[list[Tensor]]`` layout as the input, with
+            each image resized to ``(3, height, width)`` float32 in ``[0, 1]``.
+        """
+        return [[self._resize_normalize(image) for image in example_images] for example_images in images_by_example]
+
+
+class ImagePacker(torch.nn.Module):
+    """Pack already-resized, normalized images into batch tensors and masks."""
+
+    def __init__(self, *, image_size: tuple[int, int]) -> None:
+        """Store the target ``(height, width)`` used to shape empty outputs."""
+        super().__init__()
+        self.height, self.width = image_size
+
     def forward(self, images_by_example: list[list[torch.Tensor]]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Resize and pack images into [N, B, C, H, W] and masks [N, B].
+        """Pack images into [N, B, C, H, W] and masks [N, B].
+
+        Args:
+            images_by_example: Per-example lists of ``(C, H, W)`` image tensors
+                that have already been resized and normalized by
+                :class:`ImageResizeNormalizer`.
 
         Returns:
             ``(images, masks)`` of shapes ``(N, B, 3, H, W)`` and ``(N, B)``.
@@ -303,7 +333,7 @@ class ImagePacker(torch.nn.Module):
         mask_slots: list[torch.Tensor] = []
         for image_index in range(num_images):
             slot_tensor = torch.stack(
-                [self._resize(images_by_example[batch_index][image_index]) for batch_index in range(batch_size)],
+                [images_by_example[batch_index][image_index] for batch_index in range(batch_size)],
                 dim=0,
             )
             image_slots.append(slot_tensor)

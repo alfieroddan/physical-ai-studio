@@ -22,6 +22,7 @@ from .preprocess_steps import (
     ActionPadder,
     FeatureBatchNormalizer,
     ImagePacker,
+    ImageResizeNormalizer,
     PreprocessBatchBundle,
     RobotPromptEncoder,
     StateTaskImageExtractor,
@@ -59,7 +60,8 @@ class MolmoAct2Preprocessor(torch.nn.Module):
            - Discretize state values into state tokens.
            - Add setup/control wrappers.
            - Add image placeholders.
-        5. Pack images into [N_images, B, C, H, W] and image masks.
+        5. Resize + normalize images to [0, 1], then pack into [N_images, B, C, H, W]
+           and image masks.
                 6. Tokenize prompt text with checkpoint tokenizer.
                 7. Insert BOS token if required.
                 8. Assemble model input dictionary.
@@ -94,6 +96,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             add_setup_tokens=bool(config.add_setup_tokens),
             add_control_tokens=bool(config.add_control_tokens),
         )
+        self._image_resize_normalizer = ImageResizeNormalizer(image_size=_image_input_size(config))
         self._image_packer = ImagePacker(image_size=_image_input_size(config))
         self._image_processor = (
             MolmoAct2ImageProcessor(config.processor_config.image_processor)
@@ -174,10 +177,15 @@ class MolmoAct2Preprocessor(torch.nn.Module):
     def _preprocess_images(self, bundle: PreprocessBatchBundle) -> dict[str, torch.Tensor]:
         """Pack visual inputs into model image tensors and masks.
 
+        Images are first resized and normalized to ``[0, 1]`` by
+        :class:`ImageResizeNormalizer`, then packed into batch tensors by
+        :class:`ImagePacker`.
+
         Returns:
             Dictionary containing packed images and image masks.
         """
-        images, image_masks = self._image_packer(bundle.images_by_example)
+        resized_images = self._image_resize_normalizer(bundle.images_by_example)
+        images, image_masks = self._image_packer(resized_images)
         return {
             IMAGES: images,
             IMAGE_MASKS: image_masks,

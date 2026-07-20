@@ -31,6 +31,7 @@ from physicalai.policies.molmoact2.processors.preprocess_steps import (
     ActionPadder,
     FeatureBatchNormalizer,
     ImagePacker,
+    ImageResizeNormalizer,
     RobotPromptEncoder,
     StateTaskImageExtractor,
 )
@@ -202,10 +203,50 @@ class TestActionPadder:
             padder(torch.randn(1, 1, 1, 1))
 
 
+class TestImageResizeNormalizer:
+    def test_resize_normalize_uint8(self) -> None:
+        normalizer = ImageResizeNormalizer(image_size=(14, 14))
+        img = torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)
+        out = normalizer([[img], [img]])
+        assert out[0][0].shape == (3, 14, 14)
+        assert out[0][0].dtype == torch.float32
+        assert float(out[0][0].max()) <= 1.0
+        assert float(out[0][0].min()) >= 0.0
+
+    def test_resize_normalize_float01(self) -> None:
+        normalizer = ImageResizeNormalizer(image_size=(14, 14))
+        img = torch.rand(3, 28, 28)
+        out = normalizer([[img]])
+        assert out[0][0].shape == (3, 14, 14)
+        assert out[0][0].dtype == torch.float32
+        assert float(out[0][0].max()) <= 1.0
+
+    def test_resize_normalize_float255(self) -> None:
+        normalizer = ImageResizeNormalizer(image_size=(14, 14))
+        img = torch.rand(3, 28, 28) * 255.0
+        out = normalizer([[img]])
+        assert out[0][0].shape == (3, 14, 14)
+        assert out[0][0].dtype == torch.float32
+        assert float(out[0][0].max()) <= 1.0 + 1e-5
+
+    def test_empty_input_returns_empty(self) -> None:
+        normalizer = ImageResizeNormalizer(image_size=(14, 14))
+        assert normalizer([]) == []
+
+    def test_preserves_nested_structure(self) -> None:
+        normalizer = ImageResizeNormalizer(image_size=(14, 14))
+        img1 = torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)
+        img2 = torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)
+        out = normalizer([[img1, img2], [img1, img2]])
+        assert len(out) == 2
+        assert len(out[0]) == 2
+        assert len(out[1]) == 2
+
+
 class TestImagePacker:
     def test_pack_shapes(self) -> None:
         packer = ImagePacker(image_size=(14, 14))
-        img = torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)
+        img = torch.zeros(3, 14, 14, dtype=torch.float32)
         images = [[img], [img]]
         out_images, out_masks = packer(images)
         assert out_images.shape == (1, 2, 3, 14, 14)
@@ -220,9 +261,8 @@ class TestImagePacker:
 
     def test_inconsistent_image_count_raises(self) -> None:
         packer = ImagePacker(image_size=(14, 14))
-        images = [[torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)],
-                  [torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8),
-                   torch.randint(0, 256, (3, 28, 28), dtype=torch.uint8)]]
+        img = torch.zeros(3, 14, 14, dtype=torch.float32)
+        images = [[img], [img, img]]
         with pytest.raises(ValueError, match="consistent number of images"):
             packer(images)
 
