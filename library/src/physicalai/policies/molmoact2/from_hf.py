@@ -567,6 +567,10 @@ def build_config_from_hf_config(  # noqa: PLR0913
     if checkpoint_path is None:
         msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
         raise ValueError(msg)
+    # Carry the resolved checkpoint snapshot directory on the config so a
+    # serialized+reconstructed config (and :meth:`MolmoAct2.from_config`) can
+    # still locate the pretrained weights to load.
+    config_data["checkpoint_path"] = checkpoint_path
     # Resolve the tokenizer source: prefer the original Hub repo id so the
     # tokenizer can be re-downloaded at runtime; fall back to the canonical
     # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the

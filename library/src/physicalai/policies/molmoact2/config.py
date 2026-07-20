@@ -270,6 +270,12 @@ class MolmoAct2Config(Config):
 
     # Initialization and assets
     tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
+    # Local path to the pretrained checkpoint snapshot directory carrying
+    # ``model.safetensors`` (and the processor/tokenizer assets). Populated by
+    # ``build_config_from_hf_config`` so a serialized+reconstructed config can
+    # still locate its weights (used by :meth:`MolmoAct2.from_config`). Left
+    # ``None`` for configs built by :func:`make_molmoact2_config`.
+    checkpoint_path: str | None = None
     # Parsed contents of the pretrained ``tokenizer_config.json`` (options such
     # as bos/eos/pad and extra special tokens). Loaded once by ``from_hf.py`` so
     # that exported checkpoints can rebuild a tokenizer by downloading only the

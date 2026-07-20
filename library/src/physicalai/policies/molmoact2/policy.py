@@ -5,8 +5,9 @@
 
 """MolmoAct2 policy implementation."""
 
+import dataclasses
 from pathlib import Path
-from typing import Any, Literal
+from typing import IO, Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -48,7 +49,7 @@ def _coerce_dataset_feature(feature: Feature) -> Feature:
     )
 
 
-def make_molmoact2_config(
+def make_molmoact2_config(  # noqa: PLR0913
     *,
     input_features: list[Feature] | None,
     output_features: list[Feature] | None,
@@ -65,6 +66,7 @@ def make_molmoact2_config(
     lora_dropout: float = 0.05,
     lora_bias: Literal["all", "lora_only", "none"] = "none",
     gradient_checkpointing: bool = False,
+    checkpoint_path: str | None = None,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
 
@@ -88,6 +90,10 @@ def make_molmoact2_config(
         lora_dropout: LoRA dropout rate.
         lora_bias: Which biases to train ('none', 'all', 'lora_only').
         gradient_checkpointing: Whether to enable gradient checkpointing.
+        checkpoint_path: Optional local path to a pretrained checkpoint snapshot
+            directory. Forwarded to :class:`MolmoAct2Config` so a config built
+            outside the HF flow can still locate its pretrained weights (e.g.
+            for :meth:`MolmoAct2.from_config`).
 
     Returns:
         A fully populated :class:`MolmoAct2Config`.
@@ -108,6 +114,7 @@ def make_molmoact2_config(
         lora_dropout=lora_dropout,
         lora_bias=lora_bias,
         gradient_checkpointing=gradient_checkpointing,
+        checkpoint_path=checkpoint_path,
     )
 
 
@@ -125,6 +132,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         chunk_size: int = 30,
         action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
+        config: MolmoAct2Config | None = None,
         use_random_input_noise: bool = False,
         adapt_to_so101: bool = False,
         torch_compile: bool = False,
@@ -142,12 +150,17 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Args:
             input_features: Optional observation feature schema.
             output_features: Optional action feature schema.
-            repo_id: Optional pretrained checkpoint identifier or path.
+            repo_id: Optional pretrained checkpoint identifier or path. Ignored
+                if ``config`` is provided.
             norm_tag: Optional normalization tag for pretrained checkpoints.
             n_obs_steps: Number of observation steps.
             n_action_steps: Number of predicted action steps.
             chunk_size: Action chunk size (must be >= n_action_steps).
             action_mode: Training/inference action mode.
+            config: A fully-built :class:`MolmoAct2Config` to use as-is,
+                bypassing HF-container resolution and ad-hoc config
+                construction entirely. Prefer
+                :meth:`from_config` over passing this directly.
             use_random_input_noise: Start flow matching from sampled Gaussian
                 noise instead of zeros. Kept off by default so the exported
                 graph stays deterministic and RNG-free.
@@ -156,7 +169,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 pre-#777 LeRobot calibration checkpoint).
             torch_compile: Whether to enable compile-oriented config flags.
             load_weights: Whether to eagerly load pretrained weights when a
-                checkpoint is available.
+                checkpoint is available. Set to ``False`` to skip the
+                (potentially expensive) pretrained-weight load, e.g. when a
+                caller is about to overwrite the state dict anyway (this is
+                done automatically by :meth:`load_from_checkpoint`).
             use_lora: Apply LoRA adapters to the VLM (text transformer +
                 vision backbone) linears for parameter-efficient
                 fine-tuning. Incompatible with ``train_action_expert_only``.
@@ -186,64 +202,75 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
 
-        # if pretrained find hf container
         self.hf_container = None
-        if repo_id is not None:
-            self.hf_container = load_hf_pretrained_container(repo_id)
-            if self.hf_container is None:
-                msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
-                raise RuntimeError(msg)
 
-        # if self.hf_container exists - we should resolve the config
-        if self.hf_container:
-            self.config = build_config_from_hf_config(
-                self.hf_container.hf_config,
-                norm_stats=self.hf_container.norm_stats,
-                input_features=input_features,
-                output_features=output_features,
-                checkpoint_path=self.hf_container.checkpoint_location,
-                repo_id=self.hf_container.repo_id,
-                tokenizer_config=self.hf_container.tokenizer_config,
-                processor_config=self.hf_container.processor_config,
-                n_obs_steps=n_obs_steps,
-                norm_tag=norm_tag,
-                n_action_steps=n_action_steps,
-                chunk_size=chunk_size,
-                action_mode=action_mode,
-                use_random_input_noise=use_random_input_noise,
-                torch_compile=torch_compile,
-                use_lora=use_lora,
-                enable_lora_action_expert=enable_lora_action_expert,
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-                lora_bias=lora_bias,
-                gradient_checkpointing=gradient_checkpointing,
-            )
+        if config is not None:
+            # Config was already built (e.g. via from_config, or reconstructed
+            # from a saved/serialized config). Skip HF-container resolution
+            # and ad-hoc config construction entirely.
+            self.config = config
+            # NOTE: assumes MolmoAct2Config exposes a `checkpoint_path`
+            # attribute (mirrors the kwarg accepted by
+            # build_config_from_hf_config below). Adjust the attribute name
+            # here if it differs in your actual config class.
+            self._checkpoint_location: str | None = getattr(config, "checkpoint_path", None)
         else:
-            self.config = make_molmoact2_config(
-                input_features=input_features,
-                output_features=output_features,
-                n_obs_steps=n_obs_steps,
-                n_action_steps=n_action_steps,
-                chunk_size=chunk_size,
-                action_mode=action_mode,
-                use_random_input_noise=use_random_input_noise,
-                torch_compile=torch_compile,
-                use_lora=use_lora,
-                enable_lora_action_expert=enable_lora_action_expert,
-                lora_rank=lora_rank,
-                lora_alpha=lora_alpha,
-                lora_dropout=lora_dropout,
-                lora_bias=lora_bias,
-                gradient_checkpointing=gradient_checkpointing,
-            )
+            # if pretrained find hf container
+            if repo_id is not None:
+                self.hf_container = load_hf_pretrained_container(repo_id)
+                if self.hf_container is None:
+                    msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
+                    raise RuntimeError(msg)
 
-        self._checkpoint_location: str | None = (
-            self.hf_container.checkpoint_location if self.hf_container is not None else None
-        )
+            # if self.hf_container exists - we should resolve the config
+            if self.hf_container:
+                self.config = build_config_from_hf_config(
+                    self.hf_container.hf_config,
+                    norm_stats=self.hf_container.norm_stats,
+                    input_features=input_features,
+                    output_features=output_features,
+                    checkpoint_path=self.hf_container.checkpoint_location,
+                    repo_id=self.hf_container.repo_id,
+                    tokenizer_config=self.hf_container.tokenizer_config,
+                    processor_config=self.hf_container.processor_config,
+                    n_obs_steps=n_obs_steps,
+                    norm_tag=norm_tag,
+                    n_action_steps=n_action_steps,
+                    chunk_size=chunk_size,
+                    action_mode=action_mode,
+                    use_random_input_noise=use_random_input_noise,
+                    torch_compile=torch_compile,
+                    use_lora=use_lora,
+                    enable_lora_action_expert=enable_lora_action_expert,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
+                    lora_bias=lora_bias,
+                    gradient_checkpointing=gradient_checkpointing,
+                )
+            else:
+                self.config = make_molmoact2_config(
+                    input_features=input_features,
+                    output_features=output_features,
+                    n_obs_steps=n_obs_steps,
+                    n_action_steps=n_action_steps,
+                    chunk_size=chunk_size,
+                    action_mode=action_mode,
+                    use_random_input_noise=use_random_input_noise,
+                    torch_compile=torch_compile,
+                    use_lora=use_lora,
+                    enable_lora_action_expert=enable_lora_action_expert,
+                    lora_rank=lora_rank,
+                    lora_alpha=lora_alpha,
+                    lora_dropout=lora_dropout,
+                    lora_bias=lora_bias,
+                    gradient_checkpointing=gradient_checkpointing,
+                )
+
+            self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
 
         # SO-101 joint calibration correction (must be set before processors build).
+        # Applied uniformly regardless of which branch above built the config.
         # https://huggingface.co/docs/lerobot/v0.6.0/en/molmoact2#joint-frame-transform-so-100101-zero-shot
         self.config.adapt_to_so101 = adapt_to_so101
 
@@ -257,8 +284,100 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._load_weights = load_weights
 
         # eagerly load
-        if (input_features and output_features) or (repo_id and norm_tag):
+        if (input_features and output_features) or (repo_id and norm_tag) or config is not None:
             self._initialize_model()
+
+    @classmethod
+    def from_config(
+        cls,
+        config: MolmoAct2Config,
+        *,
+        load_weights: bool = True,
+        adapt_to_so101: bool = False,
+        **overrides: Any,  # noqa: ANN401
+    ) -> "MolmoAct2":
+        """Build a policy directly from an already-constructed config.
+
+        Skips HF-container resolution entirely (no network/metadata lookup),
+        which makes this the cheapest way to reconstruct a policy whose
+        config has already been resolved once (e.g. loaded from disk,
+        produced by a previous ``build_config_from_hf_config`` call, or
+        hand-built via :func:`make_molmoact2_config`).
+
+        Args:
+            config: The base config to use. Not mutated; overrides are
+                applied to a copy.
+            load_weights: Whether to eagerly load pretrained weights from
+                ``config.checkpoint_path`` (if present). Set to ``False`` to
+                skip the weight load, e.g. before manually loading a
+                fine-tuned state dict.
+            adapt_to_so101: Apply the SO-100/101 joint frame transform. See
+                :meth:`__init__` for details.
+            **overrides: Field overrides applied to ``config`` before
+                construction, via ``dataclasses.replace``. Keys must match
+                existing fields on ``config``.
+
+        Returns:
+            A constructed :class:`MolmoAct2` policy.
+
+        Raises:
+            TypeError: If ``config`` is not a dataclass instance (required
+                for ``dataclasses.replace``), or if ``overrides`` contains
+                keys that are not fields on ``config``.
+        """
+        if overrides:
+            if not dataclasses.is_dataclass(config):
+                msg = (
+                    "from_config overrides require MolmoAct2Config to be a dataclass; "
+                    "got a non-dataclass config instead."
+                )
+                raise TypeError(msg)
+            valid_fields = {f.name for f in dataclasses.fields(config)}
+            unknown = set(overrides) - valid_fields
+            if unknown:
+                msg = f"Unknown config override(s): {sorted(unknown)}"
+                raise TypeError(msg)
+            config = dataclasses.replace(config, **overrides)
+
+        return cls(
+            input_features=config.input_features,
+            output_features=config.output_features,
+            repo_id=None,
+            config=config,
+            load_weights=load_weights,
+            adapt_to_so101=adapt_to_so101,
+        )
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str | Path | IO[bytes],
+        *args: Any,  # noqa: ANN401
+        **kwargs: Any,  # noqa: ANN401
+    ) -> "MolmoAct2":
+        """Reload a policy from a Lightning checkpoint.
+
+        A Lightning checkpoint already carries its own trained state dict,
+        which is applied on top of the freshly constructed module right
+        after ``__init__`` returns. Eagerly loading pretrained weights
+        during that ``__init__`` call is therefore pure overhead (network
+        or disk I/O for weights that are about to be discarded), so
+        ``load_weights`` defaults to ``False`` here unless the caller
+        explicitly overrides it.
+
+        Args:
+            checkpoint_path: Path (or file-like) to the Lightning checkpoint.
+            *args: Forwarded to ``Policy.load_from_checkpoint``.
+            **kwargs: Forwarded to ``Policy.load_from_checkpoint``. May
+                include an explicit ``load_weights=True`` to force the
+                pretrained-weight load anyway.
+
+        Returns:
+            The reconstructed :class:`MolmoAct2` policy with the
+            checkpoint's state dict applied.
+        """
+        kwargs.setdefault("load_weights", False)
+        return super().load_from_checkpoint(checkpoint_path, *args, **kwargs)
 
     @staticmethod
     def _dataset_features(train_dataset: Dataset) -> tuple[list[Feature], list[Feature]]:
