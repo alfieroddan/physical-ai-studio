@@ -567,11 +567,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             else:
                 grouped["vlm"].append(param)
 
+        training_config = self.config.training_config
         learning_rates = {
-            "vlm": self.config.optimizer_lr,
-            "vit": self.config.optimizer_vit_lr,
-            "connector": self.config.optimizer_connector_lr,
-            "action_expert": self.config.optimizer_action_expert_lr,
+            "vlm": training_config.optimizer_lr,
+            "vit": training_config.optimizer_vit_lr,
+            "connector": training_config.optimizer_connector_lr,
+            "action_expert": training_config.optimizer_action_expert_lr,
         }
         return [{"params": params, "lr": learning_rates[name]} for name, params in grouped.items() if params]
 
@@ -584,24 +585,25 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is not None and self.config.train_action_expert_only:
             self.model.freeze_to_action_expert()
 
+        training_config = self.config.training_config
         optimizer = torch.optim.AdamW(
             self.get_optim_params(),
-            lr=self.config.optimizer_lr,
-            weight_decay=self.config.optimizer_weight_decay,
-            betas=self.config.optimizer_betas,
-            eps=self.config.optimizer_eps,
+            lr=training_config.optimizer_lr,
+            weight_decay=training_config.optimizer_weight_decay,
+            betas=training_config.optimizer_betas,
+            eps=training_config.optimizer_eps,
         )
 
         num_training_steps = int(self.trainer.estimated_stepping_batches)
-        num_decay_steps = self.config.scheduler_decay_steps
+        num_decay_steps = training_config.scheduler_decay_steps
         if num_decay_steps is None:
             num_decay_steps = num_training_steps
 
         scheduler = cosine_decay_with_warmup_scheduler(
             optimizer,
-            peak_lr=self.config.optimizer_lr,
-            decay_lr=self.config.scheduler_decay_lr,
-            num_warmup_steps=self.config.scheduler_warmup_steps,
+            peak_lr=training_config.optimizer_lr,
+            decay_lr=training_config.scheduler_decay_lr,
+            num_warmup_steps=training_config.scheduler_warmup_steps,
             num_decay_steps=int(num_decay_steps),
             num_training_steps=num_training_steps,
         )
@@ -618,7 +620,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     ) -> None:
         """Clip gradients using the norm configured on the policy."""
         del gradient_clip_algorithm
-        clip_val = gradient_clip_val if gradient_clip_val is not None else self.config.optimizer_grad_clip_norm
+        clip_val = (
+            gradient_clip_val if gradient_clip_val is not None else self.config.training_config.optimizer_grad_clip_norm
+        )
         if clip_val and clip_val > 0:
             self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
 

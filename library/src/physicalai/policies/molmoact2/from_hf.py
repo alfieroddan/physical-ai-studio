@@ -530,8 +530,6 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "action_expert_max_action_dim",
         "action_expert_max_action_horizon",
         "add_action_expert",
-        "add_control_tokens",
-        "add_setup_tokens",
         "chunk_size",
         "compile_model",
         "flow_matching_beta_alpha",
@@ -552,9 +550,17 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "max_action_dim",
         "n_action_steps",
         "n_obs_steps",
-        "num_state_tokens",
         "state_format",
         "use_random_input_noise",
+    )
+
+    # Keys that now live on the nested ``MolmoAct2PreprocessorConfig`` rather
+    # than the top-level config. They are pulled from the HF ``config.json`` and
+    # routed into ``preprocessor_data`` below.
+    preprocessor_keys = (
+        "num_state_tokens",
+        "add_setup_tokens",
+        "add_control_tokens",
     )
 
     for key in top_level_keys:
@@ -562,6 +568,11 @@ def build_config_from_hf_config(  # noqa: PLR0913
             continue
         if key in hf_config:
             config_data[key] = hf_config[key]
+
+    preprocessor_data: dict[str, Any] = {}
+    for key in preprocessor_keys:
+        if key in hf_config:
+            preprocessor_data[key] = hf_config[key]
 
     config_data["norm_tag"] = norm_tag
     if checkpoint_path is None:
@@ -576,31 +587,27 @@ def build_config_from_hf_config(  # noqa: PLR0913
     # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
     # tokenizer source so exported checkpoints still resolve the tokenizer once
     # the local snapshot directory is gone.
-    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
-    # Resolve the tokenizer source: prefer the original Hub repo id so the
-    # tokenizer can be re-downloaded at runtime; fall back to the canonical
-    # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
-    # tokenizer source so exported checkpoints still resolve the tokenizer once
-    # the local snapshot directory is gone.
-    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
-    config_data["tokenizer_config"] = tokenizer_config
+    preprocessor_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
+    preprocessor_data["tokenizer_config"] = tokenizer_config
     # Hardcoded across MolmoAct2 variants (see ``config.py``); avoids
     # instantiating the tokenizer here just to look up the placeholder id.
     config_data["image_placeholder_token_id"] = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
     if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
         processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
-    config_data["processor_config"] = processor_config
+    preprocessor_data["processor_config"] = processor_config
 
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
-        config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
-        config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
+        preprocessor_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
+        preprocessor_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
     config_data["n_obs_steps"] = n_obs_steps
     config_data["n_action_steps"] = n_action_steps
     config_data["chunk_size"] = chunk_size
     config_data["max_action_dim"] = max_action_dim
     config_data["action_mode"] = action_mode
     config_data["use_random_input_noise"] = use_random_input_noise
+
+    config_data["preprocessor_config"] = preprocessor_data
 
     if config_data.get("add_action_expert") is False:
         config_data["action_expert_config"] = None

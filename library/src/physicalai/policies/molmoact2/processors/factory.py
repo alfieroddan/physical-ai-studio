@@ -35,6 +35,7 @@ def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Prep
     preprocessor = MolmoAct2Preprocessor(config=config)
     postprocessor = MolmoAct2Postprocessor(
         output_features=config.output_features,
+        normalization_mode=config.postprocessor_config.normalization_mode,
         adapt_to_so101=config.adapt_to_so101,
         joint_signs=config.joint_signs,
         joint_offsets=config.joint_offsets,

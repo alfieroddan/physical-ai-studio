@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from physicalai.data import Feature
 
 DEFAULT_MOLMOACT2_REPO_ID = "allenai/MolmoAct2"
-# The ``<|image|>`` image-placeholder token maps to the same id across MolmoAct2
+# The ``<|image|>`` image-placeholder token maps to the same id across MolmoAct3
 # variants (verified against ``allenai/MolmoAct2`` and ``allenai/MolmoAct2-LIBERO``).
 # Hardcoding it avoids an extra ``Qwen2Tokenizer.from_pretrained`` call in
 # ``from_hf.py``; the tokenizer itself is loaded once in the preprocessor.
@@ -197,6 +197,85 @@ class MolmoAct2ProcessorConfig(Config):
 
 
 @dataclass
+class MolmoAct2PreprocessorConfig(Config):
+    """Preprocessor-side configuration for MolmoAct2."""
+
+    num_state_tokens: int = 0
+    setup_type: str = ""
+    control_mode: str = ""
+    add_setup_tokens: bool = True
+    add_control_tokens: bool = True
+    tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
+    tokenizer_config: dict[str, Any] | None = None
+    processor_config: MolmoAct2ProcessorConfig | None = None
+
+    def _coerce_nested_configs(self) -> None:
+        if isinstance(self.processor_config, dict):
+            self.processor_config = MolmoAct2ProcessorConfig.from_dict(self.processor_config)
+
+    def __post_init__(self) -> None:
+        """Coerce nested processor config into its typed dataclass form."""
+        self._coerce_nested_configs()
+
+
+@dataclass
+class MolmoAct2PostprocessorConfig(Config):
+    """Postprocessor-side configuration for MolmoAct2."""
+
+    normalization_mode: str = "QUANTILES"
+
+
+@dataclass
+class MolmoAct2TrainingConfig(Config):
+    """Training (optimizer + scheduler) configuration for MolmoAct2."""
+
+    optimizer_lr: float = 1e-5
+    optimizer_vit_lr: float = 5e-6
+    optimizer_connector_lr: float = 5e-6
+    optimizer_action_expert_lr: float = 5e-5
+    optimizer_betas: tuple[float, float] = (0.9, 0.95)
+    optimizer_eps: float = 1e-6
+    optimizer_weight_decay: float = 0.0
+    optimizer_grad_clip_norm: float = 1.0
+    scheduler_warmup_steps: int = 200
+    scheduler_decay_steps: int | None = 100_000
+    scheduler_decay_lr: float = 1e-6
+
+    def __post_init__(self) -> None:
+        """Validate optimizer and scheduler parameters after initialization."""
+        self._validate_scheduler_params()
+        self._validate_optimizer_params()
+
+    def _validate_scheduler_params(self) -> None:
+        if self.scheduler_warmup_steps < 0:
+            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
+            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_lr < 0.0:
+            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
+            raise ValueError(msg)
+
+    def _validate_optimizer_params(self) -> None:
+        if self.optimizer_action_expert_lr <= 0.0:
+            msg = f"optimizer_action_expert_lr must be > 0.0, got {self.optimizer_action_expert_lr}"
+            raise ValueError(msg)
+        if self.optimizer_lr <= 0.0:
+            msg = f"optimizer_lr must be > 0.0, got {self.optimizer_lr}"
+            raise ValueError(msg)
+        if self.optimizer_vit_lr <= 0.0:
+            msg = f"optimizer_vit_lr must be > 0.0, got {self.optimizer_vit_lr}"
+            raise ValueError(msg)
+        if self.optimizer_connector_lr <= 0.0:
+            msg = f"optimizer_connector_lr must be > 0.0, got {self.optimizer_connector_lr}"
+            raise ValueError(msg)
+        if self.optimizer_eps <= 0.0:
+            msg = f"optimizer_eps must be > 0.0, got {self.optimizer_eps}"
+            raise ValueError(msg)
+
+
+@dataclass  # noqa: PLR0904
 class MolmoAct2Config(Config):
     """Top-level configuration for MolmoAct2 with split component sub-configs."""
 
@@ -207,6 +286,9 @@ class MolmoAct2Config(Config):
     adapter_config: MolmoAct2AdapterConfig = field(default_factory=MolmoAct2AdapterConfig)
     text_config: MolmoAct2TextConfig = field(default_factory=MolmoAct2TextConfig)
     action_expert_config: MolmoAct2ActionExpertConfig | None = field(default_factory=MolmoAct2ActionExpertConfig)
+    preprocessor_config: MolmoAct2PreprocessorConfig = field(default_factory=MolmoAct2PreprocessorConfig)
+    postprocessor_config: MolmoAct2PostprocessorConfig = field(default_factory=MolmoAct2PostprocessorConfig)
+    training_config: MolmoAct2TrainingConfig = field(default_factory=MolmoAct2TrainingConfig)
 
     # Input and rollout structure
     n_obs_steps: int = 30
@@ -228,7 +310,8 @@ class MolmoAct2Config(Config):
     # SO-100/101 joint frame transform (pre-#777 LeRobot calibration).
     # When enabled, joint observations/actions are mapped robot->checkpoint on
     # the way in and checkpoint->robot on the way out. Defaults reproduce the
-    # LeRobot backward-compatibility correction for SO-101.
+    # LeRobot backward-compatibility correction for SO-101. These are shared by
+    # the preprocessor and postprocessor, so they stay top-level.
     adapt_to_so101: bool = False
     joint_signs: list[float] = field(default_factory=lambda: [1.0, -1.0, 1.0, 1.0, 1.0, 1.0])
     joint_offsets: list[float] = field(default_factory=lambda: [0.0, 90.0, 90.0, 0.0, 0.0, 0.0])
@@ -256,30 +339,15 @@ class MolmoAct2Config(Config):
     frame_start_token_id: int | None = None
     frame_end_token_id: int | None = None
 
-    # State tokenization
-    num_state_tokens: int = 0
-
     # Prompt and expert controls
-    add_setup_tokens: bool = True
-    add_control_tokens: bool = True
     add_action_expert: bool = True
-    setup_type: str = ""
-    control_mode: str = ""
 
-    # Initialization and assets
-    tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
     # Local path to the pretrained checkpoint snapshot directory carrying
     # ``model.safetensors`` (and the processor/tokenizer assets). Populated by
     # ``build_config_from_hf_config`` so a serialized+reconstructed config can
     # still locate its weights (used by :meth:`MolmoAct2.from_config`). Left
     # ``None`` for configs built by :func:`make_molmoact2_config`.
     checkpoint_path: str | None = None
-    # Parsed contents of the pretrained ``tokenizer_config.json`` (options such
-    # as bos/eos/pad and extra special tokens). Loaded once by ``from_hf.py`` so
-    # that exported checkpoints can rebuild a tokenizer by downloading only the
-    # ``tokenizer.json`` vocab file from the configured repo.
-    tokenizer_config: dict[str, Any] | None = None
-    processor_config: MolmoAct2ProcessorConfig | None = None
 
     # Runtime options
     compile_model: bool = False
@@ -301,18 +369,190 @@ class MolmoAct2Config(Config):
     lora_dropout: float = 0.05
     lora_bias: Literal["all", "lora_only", "none"] = "none"
 
-    optimizer_lr: float = 1e-5
-    optimizer_vit_lr: float = 5e-6
-    optimizer_connector_lr: float = 5e-6
-    optimizer_action_expert_lr: float = 5e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.95)
-    optimizer_eps: float = 1e-6
-    optimizer_weight_decay: float = 0.0
-    optimizer_grad_clip_norm: float = 1.0
+    # Backward-compat property aliases for fields moved into nested sub-configs.
+    # These keep existing callers (preprocessor, postprocessor, model, policy,
+    # ``from_hf.py``) working unchanged while the canonical home is the nested
+    # config. Prefer accessing the nested config directly in new code.
 
-    scheduler_warmup_steps: int = 200
-    scheduler_decay_steps: int | None = 100_000
-    scheduler_decay_lr: float = 1e-6
+    @property
+    def num_state_tokens(self) -> int:
+        """Alias for ``preprocessor_config.num_state_tokens``."""
+        return self.preprocessor_config.num_state_tokens
+
+    @num_state_tokens.setter
+    def num_state_tokens(self, value: int) -> None:
+        self.preprocessor_config.num_state_tokens = int(value)
+
+    @property
+    def setup_type(self) -> str:
+        """Alias for ``preprocessor_config.setup_type``."""
+        return self.preprocessor_config.setup_type
+
+    @setup_type.setter
+    def setup_type(self, value: str) -> None:
+        self.preprocessor_config.setup_type = str(value)
+
+    @property
+    def control_mode(self) -> str:
+        """Alias for ``preprocessor_config.control_mode``."""
+        return self.preprocessor_config.control_mode
+
+    @control_mode.setter
+    def control_mode(self, value: str) -> None:
+        self.preprocessor_config.control_mode = str(value)
+
+    @property
+    def add_setup_tokens(self) -> bool:
+        """Alias for ``preprocessor_config.add_setup_tokens``."""
+        return self.preprocessor_config.add_setup_tokens
+
+    @add_setup_tokens.setter
+    def add_setup_tokens(self, value: bool) -> None:
+        self.preprocessor_config.add_setup_tokens = bool(value)
+
+    @property
+    def add_control_tokens(self) -> bool:
+        """Alias for ``preprocessor_config.add_control_tokens``."""
+        return self.preprocessor_config.add_control_tokens
+
+    @add_control_tokens.setter
+    def add_control_tokens(self, value: bool) -> None:
+        self.preprocessor_config.add_control_tokens = bool(value)
+
+    @property
+    def tokenizer_name_or_path(self) -> str:
+        """Alias for ``preprocessor_config.tokenizer_name_or_path``."""
+        return self.preprocessor_config.tokenizer_name_or_path
+
+    @tokenizer_name_or_path.setter
+    def tokenizer_name_or_path(self, value: str) -> None:
+        self.preprocessor_config.tokenizer_name_or_path = str(value)
+
+    @property
+    def tokenizer_config(self) -> dict[str, Any] | None:
+        """Alias for ``preprocessor_config.tokenizer_config``."""
+        return self.preprocessor_config.tokenizer_config
+
+    @tokenizer_config.setter
+    def tokenizer_config(self, value: dict[str, Any] | None) -> None:
+        self.preprocessor_config.tokenizer_config = value
+
+    @property
+    def processor_config(self) -> MolmoAct2ProcessorConfig | None:
+        """Alias for ``preprocessor_config.processor_config``."""
+        return self.preprocessor_config.processor_config
+
+    @processor_config.setter
+    def processor_config(self, value: MolmoAct2ProcessorConfig | None) -> None:
+        self.preprocessor_config.processor_config = value
+
+    @property
+    def normalization_mode(self) -> str:
+        """Alias for ``postprocessor_config.normalization_mode``."""
+        return self.postprocessor_config.normalization_mode
+
+    @normalization_mode.setter
+    def normalization_mode(self, value: str) -> None:
+        self.postprocessor_config.normalization_mode = str(value)
+
+    @property
+    def optimizer_lr(self) -> float:
+        """Alias for ``training_config.optimizer_lr``."""
+        return self.training_config.optimizer_lr
+
+    @optimizer_lr.setter
+    def optimizer_lr(self, value: float) -> None:
+        self.training_config.optimizer_lr = float(value)
+
+    @property
+    def optimizer_vit_lr(self) -> float:
+        """Alias for ``training_config.optimizer_vit_lr``."""
+        return self.training_config.optimizer_vit_lr
+
+    @optimizer_vit_lr.setter
+    def optimizer_vit_lr(self, value: float) -> None:
+        self.training_config.optimizer_vit_lr = float(value)
+
+    @property
+    def optimizer_connector_lr(self) -> float:
+        """Alias for ``training_config.optimizer_connector_lr``."""
+        return self.training_config.optimizer_connector_lr
+
+    @optimizer_connector_lr.setter
+    def optimizer_connector_lr(self, value: float) -> None:
+        self.training_config.optimizer_connector_lr = float(value)
+
+    @property
+    def optimizer_action_expert_lr(self) -> float:
+        """Alias for ``training_config.optimizer_action_expert_lr``."""
+        return self.training_config.optimizer_action_expert_lr
+
+    @optimizer_action_expert_lr.setter
+    def optimizer_action_expert_lr(self, value: float) -> None:
+        self.training_config.optimizer_action_expert_lr = float(value)
+
+    @property
+    def optimizer_betas(self) -> tuple[float, float]:
+        """Alias for ``training_config.optimizer_betas``."""
+        return self.training_config.optimizer_betas
+
+    @optimizer_betas.setter
+    def optimizer_betas(self, value: tuple[float, float]) -> None:
+        self.training_config.optimizer_betas = (float(value[0]), float(value[1]))
+
+    @property
+    def optimizer_eps(self) -> float:
+        """Alias for ``training_config.optimizer_eps``."""
+        return self.training_config.optimizer_eps
+
+    @optimizer_eps.setter
+    def optimizer_eps(self, value: float) -> None:
+        self.training_config.optimizer_eps = float(value)
+
+    @property
+    def optimizer_weight_decay(self) -> float:
+        """Alias for ``training_config.optimizer_weight_decay``."""
+        return self.training_config.optimizer_weight_decay
+
+    @optimizer_weight_decay.setter
+    def optimizer_weight_decay(self, value: float) -> None:
+        self.training_config.optimizer_weight_decay = float(value)
+
+    @property
+    def optimizer_grad_clip_norm(self) -> float:
+        """Alias for ``training_config.optimizer_grad_clip_norm``."""
+        return self.training_config.optimizer_grad_clip_norm
+
+    @optimizer_grad_clip_norm.setter
+    def optimizer_grad_clip_norm(self, value: float) -> None:
+        self.training_config.optimizer_grad_clip_norm = float(value)
+
+    @property
+    def scheduler_warmup_steps(self) -> int:
+        """Alias for ``training_config.scheduler_warmup_steps``."""
+        return self.training_config.scheduler_warmup_steps
+
+    @scheduler_warmup_steps.setter
+    def scheduler_warmup_steps(self, value: int) -> None:
+        self.training_config.scheduler_warmup_steps = int(value)
+
+    @property
+    def scheduler_decay_steps(self) -> int | None:
+        """Alias for ``training_config.scheduler_decay_steps``."""
+        return self.training_config.scheduler_decay_steps
+
+    @scheduler_decay_steps.setter
+    def scheduler_decay_steps(self, value: int | None) -> None:
+        self.training_config.scheduler_decay_steps = value
+
+    @property
+    def scheduler_decay_lr(self) -> float:
+        """Alias for ``training_config.scheduler_decay_lr``."""
+        return self.training_config.scheduler_decay_lr
+
+    @scheduler_decay_lr.setter
+    def scheduler_decay_lr(self, value: float) -> None:
+        self.training_config.scheduler_decay_lr = float(value)
 
     @property
     def max_action_horizon(self) -> int:
@@ -380,14 +620,18 @@ class MolmoAct2Config(Config):
             self.text_config = MolmoAct2TextConfig.from_dict(self.text_config)
         if isinstance(self.action_expert_config, dict):
             self.action_expert_config = MolmoAct2ActionExpertConfig.from_dict(self.action_expert_config)
-        if isinstance(self.processor_config, dict):
-            self.processor_config = MolmoAct2ProcessorConfig.from_dict(self.processor_config)
+        if isinstance(self.preprocessor_config, dict):
+            self.preprocessor_config = MolmoAct2PreprocessorConfig.from_dict(self.preprocessor_config)
+        if isinstance(self.postprocessor_config, dict):
+            self.postprocessor_config = MolmoAct2PostprocessorConfig.from_dict(self.postprocessor_config)
+        if isinstance(self.training_config, dict):
+            self.training_config = MolmoAct2TrainingConfig.from_dict(self.training_config)
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         self._coerce_nested_configs()
         self._validate_rollout_settings()
-        self._validate_flow_matching_settings()
+        self._validate_flow_matching_params()
         self._validate_depth_and_token_settings()
         self._sync_action_expert_settings()
 
@@ -426,11 +670,6 @@ class MolmoAct2Config(Config):
             msg = f"MolmoAct2 lora_bias must be one of 'none', 'all', 'lora_only', got {self.lora_bias!r}."
             raise ValueError(msg)
 
-    def _validate_flow_matching_settings(self) -> None:
-        self._validate_flow_matching_params()
-        self._validate_scheduler_params()
-        self._validate_optimizer_params()
-
     def _validate_flow_matching_params(self) -> None:
         if self.flow_matching_num_steps < 1:
             msg = f"flow_matching_num_steps must be >= 1, got {self.flow_matching_num_steps}"
@@ -451,37 +690,9 @@ class MolmoAct2Config(Config):
             msg = f"flow_matching_beta_beta must be > 0.0, got {self.flow_matching_beta_beta}"
             raise ValueError(msg)
 
-    def _validate_scheduler_params(self) -> None:
-        if self.scheduler_warmup_steps < 0:
-            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
-            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_lr < 0.0:
-            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
-            raise ValueError(msg)
-
-    def _validate_optimizer_params(self) -> None:
-        if self.optimizer_action_expert_lr <= 0.0:
-            msg = f"optimizer_action_expert_lr must be > 0.0, got {self.optimizer_action_expert_lr}"
-            raise ValueError(msg)
-        if self.optimizer_lr <= 0.0:
-            msg = f"optimizer_lr must be > 0.0, got {self.optimizer_lr}"
-            raise ValueError(msg)
-        if self.optimizer_vit_lr <= 0.0:
-            msg = f"optimizer_vit_lr must be > 0.0, got {self.optimizer_vit_lr}"
-            raise ValueError(msg)
-        if self.optimizer_connector_lr <= 0.0:
-            msg = f"optimizer_connector_lr must be > 0.0, got {self.optimizer_connector_lr}"
-            raise ValueError(msg)
-        if self.optimizer_eps <= 0.0:
-            msg = f"optimizer_eps must be > 0.0, got {self.optimizer_eps}"
-            raise ValueError(msg)
-
     def _validate_depth_and_token_settings(self) -> None:
-        if self.num_state_tokens < 0:
-            msg = f"num_state_tokens must be >= 0, got {self.num_state_tokens}"
+        if self.preprocessor_config.num_state_tokens < 0:
+            msg = f"num_state_tokens must be >= 0, got {self.preprocessor_config.num_state_tokens}"
             raise ValueError(msg)
 
     def _sync_action_expert_settings(self) -> None:
