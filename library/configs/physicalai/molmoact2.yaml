@@ -12,6 +12,7 @@ model:
     # Input / output structure
     n_obs_steps: 30
     n_action_steps: 10
+    chunk_size: 30
     # Action mode (only "continuous" is currently supported)
     action_mode: continuous
     # SO-100/101 joint calibration correction (needed for zero-shot / finetuning
