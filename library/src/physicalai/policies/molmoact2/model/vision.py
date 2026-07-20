@@ -29,9 +29,10 @@ if TYPE_CHECKING:
 class VisionMultiHeadAttention(nn.Module):
     """Multi-head (optionally grouped) attention used by the ViT and the pooler.
 
-    A single SDPA path replaces the upstream eager/sdpa/flash branches. When
-    ``float32_attention`` is set, q/k/v are promoted to float32 for the scaled
-    dot-product to match the reference numerics.
+    A single SDPA path replaces the upstream eager/sdpa/flash branches. The
+    scaled dot-product runs in whatever dtype the surrounding modules are in
+    (set via ``model.to(...)`` or Lightning's precision) so no per-op dtype
+    promotion is applied here.
     """
 
     def __init__(
@@ -43,7 +44,6 @@ class VisionMultiHeadAttention(nn.Module):
         head_dim: int,
         input_dim: int | None = None,
         use_bias: bool = True,
-        float32_attention: bool = True,
         attention_dropout: float = 0.0,
         residual_dropout: float = 0.0,
     ) -> None:
@@ -54,7 +54,6 @@ class VisionMultiHeadAttention(nn.Module):
         self.num_key_value_heads = num_key_value_heads
         self.head_dim = head_dim
         self.num_key_value_groups = num_heads // num_key_value_heads
-        self.float32_attention = float32_attention
         self.attention_dropout = attention_dropout
 
         input_dim = input_dim or hidden_size
@@ -85,10 +84,6 @@ class VisionMultiHeadAttention(nn.Module):
             k = k.repeat_interleave(self.num_key_value_groups, dim=1)
             v = v.repeat_interleave(self.num_key_value_groups, dim=1)
 
-        out_dtype = q.dtype
-        if self.float32_attention:
-            q, k, v = q.float(), k.float(), v.float()
-
         attn = F.scaled_dot_product_attention(
             q,
             k,
@@ -97,7 +92,7 @@ class VisionMultiHeadAttention(nn.Module):
             dropout_p=self.attention_dropout if self.training else 0.0,
             is_causal=False,
         )
-        attn = attn.transpose(1, 2).reshape(batch, q_len, self.num_heads * self.head_dim).to(out_dtype)
+        attn = attn.transpose(1, 2).reshape(batch, q_len, self.num_heads * self.head_dim)
         return self.residual_dropout(self.wo(attn))
 
 
@@ -131,7 +126,6 @@ class VisionBlock(nn.Module):
             num_heads=config.num_attention_heads,
             num_key_value_heads=config.num_key_value_heads,
             head_dim=config.head_dim,
-            float32_attention=config.float32_attention,
             attention_dropout=config.attention_dropout,
             residual_dropout=config.residual_dropout,
         )
@@ -237,7 +231,6 @@ class MolmoAct2VisionBackbone(nn.Module):
             num_key_value_heads=adapter_config.num_key_value_heads,
             head_dim=adapter_config.head_dim,
             input_dim=pool_dim,
-            float32_attention=adapter_config.float32_attention,
             attention_dropout=adapter_config.attention_dropout,
             residual_dropout=adapter_config.residual_dropout,
         )

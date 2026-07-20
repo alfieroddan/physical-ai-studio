@@ -51,7 +51,6 @@ class MolmoAct2VitConfig(Config):
     image_num_pos: int = 577
     attention_dropout: float = 0.0
     residual_dropout: float = 0.0
-    float32_attention: bool = True
     attn_implementation: str = "eager"
 
     @property
@@ -80,7 +79,6 @@ class MolmoAct2AdapterConfig(Config):
     num_attention_heads: int = 16
     num_key_value_heads: int = 16
     head_dim: int = 72
-    float32_attention: bool = True
     attention_dropout: float = 0.0
     residual_dropout: float = 0.0
     hidden_act: str = "silu"
