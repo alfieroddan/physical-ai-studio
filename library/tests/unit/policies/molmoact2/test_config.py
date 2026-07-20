@@ -18,7 +18,6 @@ from physicalai.policies.molmoact2.config import (
     MolmoAct2ProcessorConfig,
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
-    MolmoAct2VideoProcessorConfig,
 )
 
 
@@ -165,18 +164,6 @@ class TestMolmoAct2Config:
         with pytest.raises(ValueError, match="flow_matching_beta_beta"):
             MolmoAct2Config(flow_matching_beta_beta=-1.0)
 
-    def test_depth_mode_validation(self) -> None:
-        with pytest.raises(ValueError, match="depth_mode"):
-            MolmoAct2Config(depth_mode=-1)
-
-    def test_num_depth_codes_validation(self) -> None:
-        with pytest.raises(ValueError, match="num_depth_codes"):
-            MolmoAct2Config(num_depth_codes=0)
-
-    def test_num_action_tokens_validation(self) -> None:
-        with pytest.raises(ValueError, match="num_action_tokens"):
-            MolmoAct2Config(num_action_tokens=-1)
-
     def test_optimizer_lr_validation(self) -> None:
         with pytest.raises(ValueError, match="optimizer_lr"):
             MolmoAct2Config(optimizer_lr=0.0)
@@ -248,19 +235,13 @@ class TestMolmoAct2ActionExpertConfig:
 class TestMolmoAct2ProcessorConfig:
     def test_default_config(self) -> None:
         config = MolmoAct2ProcessorConfig()
-        assert config.processor_class == "MolmoAct2Processor"
         assert config.image_use_col_tokens is True
         assert isinstance(config.image_processor, MolmoAct2ImageProcessorConfig)
-        assert isinstance(config.video_processor, MolmoAct2VideoProcessorConfig)
 
     def test_coerce_from_dict(self) -> None:
         payload = {
-            "processor_class": "MolmoAct2Processor",
             "image_processor": {"size": {"height": 7, "width": 7}},
-            "video_processor": {"num_frames": 3},
         }
         config = MolmoAct2ProcessorConfig.from_dict(payload)
         assert isinstance(config.image_processor, MolmoAct2ImageProcessorConfig)
         assert config.image_processor.size["height"] == 7
-        assert isinstance(config.video_processor, MolmoAct2VideoProcessorConfig)
-        assert config.video_processor.num_frames == 3

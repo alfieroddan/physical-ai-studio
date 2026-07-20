@@ -64,7 +64,7 @@ def _ensure_processor_assets_downloaded(
     ``tokenizer.json`` vocab is pulled on demand by ``MolmoAct2Tokenizers`` from
     the configured repo id, and ``tokenizer_config.json`` options are loaded
     separately during container construction. Only ``processor_config.json``
-    needs to live inside the checkpoint snapshot directory for the image/video
+    needs to live inside the checkpoint snapshot directory for the image
     processor config to be read back.
 
     Args:
@@ -524,23 +524,16 @@ def build_config_from_hf_config(  # noqa: PLR0913
 
     top_level_keys = (
         "action_mode",
-        "action_end_token_id",
-        "action_expert_depth_gate",
-        "action_expert_depth_gate_init_bias",
-        "action_expert_depth_gate_per_layer",
-        "action_output_token_id",
-        "action_start_token_id",
-        "action_token_start_id",
+        "action_expert_num_heads",
+        "action_expert_num_layers",
+        "action_expert_hidden_size",
+        "action_expert_max_action_dim",
+        "action_expert_max_action_horizon",
         "add_action_expert",
         "add_control_tokens",
         "add_setup_tokens",
+        "chunk_size",
         "compile_model",
-        "depth_end_token_id",
-        "depth_mode",
-        "depth_output_token_id",
-        "depth_start_token_id",
-        "depth_token_start_id",
-        "enable_depth_reasoning",
         "flow_matching_beta_alpha",
         "flow_matching_beta_beta",
         "flow_matching_cutoff",
@@ -553,39 +546,14 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "image_end_token_id",
         "image_low_res_id",
         "image_patch_id",
-        "initializer_range",
+        "image_start_token_id",
         "low_res_image_start_token_id",
         "mask_action_dim_padding",
-        "n_obs_steps",
-        "num_action_tokens",
-        "num_depth_codes",
-        "num_depth_tokens",
-        "num_state_tokens",
-        "state_end_token_id",
-        "state_format",
-        "state_start_token_id",
-        "state_token_start_id",
-        "use_frame_special_tokens",
-        "image_start_token_id",
-        "image_low_res_id",
-        "image_patch_id",
-        "image_col_id",
-        "num_action_tokens",
-        "depth_output_token_id",
-        "depth_start_token_id",
-        "depth_end_token_id",
-        "depth_token_start_id",
         "max_action_dim",
-        "chunk_size",
         "n_action_steps",
-        "norm_stats_filename",
-        "action_start_token_id",
-        "add_setup_tokens",
-        "action_expert_num_heads",
-        "action_expert_num_layers",
-        "action_expert_hidden_size",
-        "action_expert_max_action_dim",
-        "action_expert_max_action_horizon",
+        "n_obs_steps",
+        "num_state_tokens",
+        "state_format",
         "use_random_input_noise",
     )
 
@@ -599,7 +567,12 @@ def build_config_from_hf_config(  # noqa: PLR0913
     if checkpoint_path is None:
         msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
         raise ValueError(msg)
-    config_data["processor_assets_path"] = checkpoint_path
+    # Resolve the tokenizer source: prefer the original Hub repo id so the
+    # tokenizer can be re-downloaded at runtime; fall back to the canonical
+    # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
+    # tokenizer source so exported checkpoints still resolve the tokenizer once
+    # the local snapshot directory is gone.
+    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
     # Resolve the tokenizer source: prefer the original Hub repo id so the
     # tokenizer can be re-downloaded at runtime; fall back to the canonical
     # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the

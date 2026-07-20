@@ -51,7 +51,6 @@ class MolmoAct2VitConfig(Config):
     image_num_pos: int = 577
     attention_dropout: float = 0.0
     residual_dropout: float = 0.0
-    initializer_range: float = 0.02
     float32_attention: bool = True
     attn_implementation: str = "eager"
 
@@ -88,7 +87,6 @@ class MolmoAct2AdapterConfig(Config):
     intermediate_size: int = 18_944
     text_hidden_size: int = 3584
     image_feature_dropout: float = 0.0
-    initializer_range: float = 0.02
     attn_implementation: str = "eager"
 
     @property
@@ -117,20 +115,13 @@ class MolmoAct2TextConfig(Config):
     num_hidden_layers: int = 48
     intermediate_size: int = 18_944
     hidden_act: str = "silu"
-    embedding_dropout: float = 0.0
-    attention_dropout: float = 0.0
-    residual_dropout: float = 0.0
     max_position_embeddings: int = 4096
     rope_theta: float = 1_000_000.0
-    rope_scaling: dict[str, Any] | None = None
-    rope_scaling_layers: list[int] | None = None
     use_qk_norm: bool = False
     qk_norm_type: str = "olmo"
     layer_norm_eps: float = 1e-6
     norm_after: bool = False
-    initializer_range: float = 0.02
     use_cache: bool = True
-    tie_word_embeddings: bool = False
     attn_implementation: str = "eager"
 
     def __post_init__(self) -> None:
@@ -170,8 +161,6 @@ class MolmoAct2ActionExpertConfig(Config):
     mlp_ratio: float = 8.0 / 3.0
     ffn_multiple_of: int = 256
     timestep_embed_dim: int = 256
-    dropout: float = 0.0
-    attn_dropout: float = 0.0
     context_layer_norm: bool = True
     qk_norm: bool = True
     qk_norm_eps: float = 1e-6
@@ -183,79 +172,26 @@ class MolmoAct2ActionExpertConfig(Config):
 class MolmoAct2ImageProcessorConfig(Config):
     """Image processor configuration for MolmoAct2."""
 
-    auto_map: dict[str, str] = field(
-        default_factory=lambda: {
-            "AutoImageProcessor": "image_processing_molmoact2.MolmoAct2ImageProcessor",
-            "AutoProcessor": "processing_molmoact2.MolmoAct2Processor",
-        },
-    )
     crop_mode: str = "resize"
-    do_convert_rgb: bool = True
     image_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    image_processor_type: str = "MolmoAct2ImageProcessor"
     image_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    max_crops: int = 8
-    overlap_margins: list[int] = field(default_factory=lambda: [4, 4])
     patch_size: int = 14
     pooling_size: list[int] = field(default_factory=lambda: [2, 2])
-    resample: int = 2
     size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
-
-
-@dataclass
-class MolmoAct2VideoProcessorConfig(Config):
-    """Video processor configuration for MolmoAct2."""
-
-    auto_map: dict[str, str] = field(
-        default_factory=lambda: {
-            "AutoProcessor": "processing_molmoact2.MolmoAct2Processor",
-            "AutoVideoProcessor": "video_processing_molmoact2.MolmoAct2VideoProcessor",
-        },
-    )
-    data_format: str = "channels_first"
-    default_to_square: bool = True
-    do_convert_rgb: bool = True
-    do_normalize: bool = True
-    do_rescale: bool = True
-    do_resize: bool = True
-    do_sample_frames: bool = True
-    frame_sample_mode: str = "uniform_last_frame"
-    image_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    image_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    max_fps: float = 2.0
-    num_frames: int = 8
-    patch_size: int = 14
-    pooling_size: list[int] = field(default_factory=lambda: [3, 3])
-    resample: int = 2
-    rescale_factor: float = 1.0 / 255.0
-    return_metadata: bool = False
-    sampling_fps: int = 2
-    size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
-    video_processor_type: str = "MolmoAct2VideoProcessor"
 
 
 @dataclass
 class MolmoAct2ProcessorConfig(Config):
     """Processor configuration for MolmoAct2."""
 
-    auto_map: dict[str, str] = field(
-        default_factory=lambda: {"AutoProcessor": "processing_molmoact2.MolmoAct2Processor"},
-    )
     image_processor: MolmoAct2ImageProcessorConfig = field(default_factory=MolmoAct2ImageProcessorConfig)
     image_use_col_tokens: bool = True
-    processor_class: str = "MolmoAct2Processor"
-    use_frame_special_tokens: bool = True
     use_single_crop_col_tokens: bool | None = False
     use_single_crop_start_token: bool = True
-    video_processor: MolmoAct2VideoProcessorConfig = field(default_factory=MolmoAct2VideoProcessorConfig)
-    video_use_col_tokens: bool = False
-    chat_template: str | None = None
 
     def _coerce_nested_configs(self) -> None:
         if isinstance(self.image_processor, dict):
             self.image_processor = MolmoAct2ImageProcessorConfig.from_dict(self.image_processor)
-        if isinstance(self.video_processor, dict):
-            self.video_processor = MolmoAct2VideoProcessorConfig.from_dict(self.video_processor)
 
     def __post_init__(self) -> None:
         """Coerce nested processor configs into their typed dataclass forms."""
@@ -311,14 +247,6 @@ class MolmoAct2Config(Config):
     # by default so the exported graph stays deterministic and RNG-free.
     use_random_input_noise: bool = False
 
-    # Depth reasoning
-    enable_depth_reasoning: bool = False
-    depth_mode: int = 2
-    num_depth_codes: int = 100
-    action_expert_depth_gate: bool = False
-    action_expert_depth_gate_per_layer: bool = False
-    action_expert_depth_gate_init_bias: float = -4.0
-
     # Vision/image special tokens
     image_start_token_id: int | None = None
     low_res_image_start_token_id: int | None = None
@@ -329,27 +257,8 @@ class MolmoAct2Config(Config):
     image_col_id: int | None = None
     frame_start_token_id: int | None = None
     frame_end_token_id: int | None = None
-    use_frame_special_tokens: bool = True
-
-    # Action tokenization
-    action_output_token_id: int | None = None
-    action_start_token_id: int | None = None
-    action_end_token_id: int | None = None
-    action_token_start_id: int | None = None
-    num_action_tokens: int = 0
-    discrete_action_tokenizer: str = "allenai/MolmoAct2-FAST-Tokenizer"
-
-    # Depth tokenization
-    depth_output_token_id: int | None = None
-    depth_start_token_id: int | None = None
-    depth_end_token_id: int | None = None
-    depth_token_start_id: int | None = None
-    num_depth_tokens: int = 0
 
     # State tokenization
-    state_start_token_id: int | None = None
-    state_end_token_id: int | None = None
-    state_token_start_id: int | None = None
     num_state_tokens: int = 0
 
     # Prompt and expert controls
@@ -360,22 +269,18 @@ class MolmoAct2Config(Config):
     control_mode: str = ""
 
     # Initialization and assets
-    norm_stats_filename: str = "norm_stats.json"
     tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
     # Parsed contents of the pretrained ``tokenizer_config.json`` (options such
     # as bos/eos/pad and extra special tokens). Loaded once by ``from_hf.py`` so
     # that exported checkpoints can rebuild a tokenizer by downloading only the
     # ``tokenizer.json`` vocab file from the configured repo.
     tokenizer_config: dict[str, Any] | None = None
-    processor_assets_path: str | None = None
     processor_config: MolmoAct2ProcessorConfig | None = None
-    initializer_range: float = 0.02
 
     # Runtime options
     compile_model: bool = False
 
     # Fine-tuning controls
-    freeze_embedding: bool = False
     train_action_expert_only: bool = False
     gradient_checkpointing: bool = False
 
@@ -571,18 +476,6 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
 
     def _validate_depth_and_token_settings(self) -> None:
-        if self.depth_mode < 0:
-            msg = f"depth_mode must be >= 0, got {self.depth_mode}"
-            raise ValueError(msg)
-        if self.num_depth_codes < 1:
-            msg = f"num_depth_codes must be >= 1, got {self.num_depth_codes}"
-            raise ValueError(msg)
-        if self.num_action_tokens < 0:
-            msg = f"num_action_tokens must be >= 0, got {self.num_action_tokens}"
-            raise ValueError(msg)
-        if self.num_depth_tokens < 0:
-            msg = f"num_depth_tokens must be >= 0, got {self.num_depth_tokens}"
-            raise ValueError(msg)
         if self.num_state_tokens < 0:
             msg = f"num_state_tokens must be >= 0, got {self.num_state_tokens}"
             raise ValueError(msg)

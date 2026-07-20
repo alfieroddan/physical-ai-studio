@@ -172,20 +172,12 @@ _NORM_STATS_PAYLOAD: dict[str, Any] = {
 }
 
 _PROCESSOR_CONFIG_PAYLOAD: dict[str, Any] = {
-    "processor_class": "MolmoAct2Processor",
     "image_processor": {
         "size": {"height": 28, "width": 28},
         "image_mean": [0.5, 0.5, 0.5],
         "image_std": [0.5, 0.5, 0.5],
         "patch_size": 14,
         "pooling_size": [2, 2],
-    },
-    "video_processor": {
-        "size": {"height": 28, "width": 28},
-        "image_mean": [0.5, 0.5, 0.5],
-        "image_std": [0.5, 0.5, 0.5],
-        "patch_size": 14,
-        "pooling_size": [3, 3],
     },
 }
 
