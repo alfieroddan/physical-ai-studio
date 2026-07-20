@@ -10,9 +10,9 @@ from .postprocessor import MolmoAct2Postprocessor
 from .preprocess_steps import (
     ActionExtractor,
     ActionPadder,
-    FeatureBatchNormalizer,
     ImagePacker,
     ImageResizeNormalizer,
+    MolmoAct2NormalizeTransform,
     PreprocessBatchBundle,
     PromptPack,
     RobotPromptEncoder,
@@ -24,9 +24,9 @@ from .tokenizers import MolmoAct2Tokenizers
 __all__ = [
     "ActionExtractor",
     "ActionPadder",
-    "FeatureBatchNormalizer",
     "ImagePacker",
     "ImageResizeNormalizer",
+    "MolmoAct2NormalizeTransform",
     "MolmoAct2Postprocessor",
     "MolmoAct2Preprocessor",
     "MolmoAct2Tokenizers",

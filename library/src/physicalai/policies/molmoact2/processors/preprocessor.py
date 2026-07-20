@@ -20,9 +20,9 @@ from .joint_transform import JointFrameTransform
 from .preprocess_steps import (
     ActionExtractor,
     ActionPadder,
-    FeatureBatchNormalizer,
     ImagePacker,
     ImageResizeNormalizer,
+    MolmoAct2NormalizeTransform,
     PreprocessBatchBundle,
     RobotPromptEncoder,
     StateTaskImageExtractor,
@@ -84,7 +84,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             feature.name for feature in input_features if feature.ftype == FeatureType.VISUAL and feature.name
         ]
 
-        self._normalizer = FeatureBatchNormalizer(
+        self._normalizer = MolmoAct2NormalizeTransform(
             input_features=input_features,
             output_features=output_features,
         )

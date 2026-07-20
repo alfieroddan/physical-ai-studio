@@ -12,6 +12,7 @@ from typing import Any
 
 import torch
 import torchvision.transforms.functional as tv_functional
+from torch import nn
 
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, Feature, FeatureType
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
@@ -19,13 +20,35 @@ from physicalai.policies.utils.normalization import FeatureNormalizeTransform, N
 from .utils import build_discrete_state_string, build_robot_text, normalize_text
 
 
-class FeatureBatchNormalizer(torch.nn.Module):
-    """Normalize batch features using configured feature statistics."""
+class MolmoAct2NormalizeTransform(FeatureNormalizeTransform):
+    """MolmoAct2 input normalization: state/action quantiles, visual identity.
 
-    def __init__(self, *, input_features: list[Feature], output_features: list[Feature]) -> None:
-        """Build the feature normalizer from the input/output feature schemas."""
-        super().__init__()
+    Inherits the generic quantile/mean-std/min-max/identity logic from
+    :class:`FeatureNormalizeTransform` and hardcodes the modality mapping used
+    by MolmoAct2: state and action use ``QUANTILES`` when normalization stats
+    are available (falling back to ``IDENTITY``), and visual features are
+    always left untouched (``IDENTITY``).
 
+    On top of the base transform, MolmoAct2 supports an optional per-dimension
+    ``mask`` (carried on :class:`NormalizationParameters`) that selects which
+    dimensions of a quantile-normalized feature are actually transformed.
+    Masked-out dimensions pass through unchanged. This is MolmoAct2-specific
+    (e.g. to skip normalization on padding/gripper-style dims of the action),
+    so it is handled here rather than in the shared normalization utility.
+    """
+
+    def __init__(
+        self,
+        *,
+        input_features: list[Feature],
+        output_features: list[Feature],
+    ) -> None:
+        """Build the modality mapping from the input/output feature schemas.
+
+        Args:
+            input_features: Observation feature schema (state + visual).
+            output_features: Action feature schema.
+        """
         all_features = {feature.name: feature for feature in input_features + output_features if feature.name}
 
         state_feature = next((feature for feature in input_features if feature.ftype == FeatureType.STATE), None)
@@ -47,16 +70,98 @@ class FeatureBatchNormalizer(torch.nn.Module):
             FeatureType.ACTION: action_norm,
             FeatureType.VISUAL: NormalizationType.IDENTITY,
         }
-        self._normalizer = FeatureNormalizeTransform(all_features, norm_map, inverse=False)
+        super().__init__(all_features, norm_map, inverse=False)
+        self._register_quantile_masks(all_features, norm_map)
+
+    def _register_quantile_masks(
+        self,
+        all_features: dict[str, Feature],
+        norm_map: dict[FeatureType, NormalizationType],
+    ) -> None:
+        """Attach an optional per-dimension ``mask`` buffer to each quantile feature.
+
+        The shared :class:`FeatureNormalizeTransform` ignores any ``mask``
+        carried on :class:`NormalizationParameters`. MolmoAct2 needs it to skip
+        normalization on selected dimensions, so we register it as an extra
+        ``"mask"`` entry on the feature's existing buffer ``ParameterDict``.
+
+        Args:
+            all_features: all features keyed by name.
+            norm_map: feature-type -> normalization mode mapping used at init.
+        """
+        for name, feature in all_features.items():
+            norm_mode = norm_map.get(feature.ftype, NormalizationType.IDENTITY)  # type: ignore[arg-type]
+            if norm_mode is not NormalizationType.QUANTILES:
+                continue
+            norm_data = feature.normalization_data
+            if norm_data is None or norm_data.mask is None:
+                continue
+            buffer = self.buffers_lookup.get(name)
+            if buffer is None:
+                continue
+            shape = feature.shape if feature.shape is not None else ()
+            mask_tensor = torch.tensor(norm_data.mask, dtype=torch.float32).view(shape)
+            buffer["mask"] = nn.Parameter(mask_tensor, requires_grad=False)
 
     def forward(self, batch: dict[str, Any]) -> dict[str, Any]:
-        """Normalize all configured features in-place-style and return a new dict.
+        """Normalize all configured features in the batch on their device.
 
         Returns:
-            A new batch dict with configured features normalized in place.
+            The batch dict with configured features normalized in place.
         """
         device = next((value.device for value in batch.values() if torch.is_tensor(value)), torch.device("cpu"))
-        return self._normalizer.to(device)(batch)
+        self.to(device)
+        return super().forward(batch)
+
+    @staticmethod
+    def _apply_normalization(
+        batch: dict,
+        key: str,
+        norm_mode: NormalizationType,
+        buffer: nn.ParameterDict,
+        *,
+        inverse: bool,
+    ) -> None:
+        """Apply normalization, honouring an optional per-dim mask for quantiles.
+
+        For ``QUANTILES`` features that carry a ``mask`` buffer, only the masked
+        dimensions are transformed; the rest are left unchanged. Every other
+        mode (and unmasked quantiles) is delegated to the shared base class so
+        MolmoAct2 never diverges from the generic normalization numerics.
+
+        Args:
+            batch: Input batch, modified in place.
+            key: Batch key to normalize.
+            norm_mode: Normalization mode for this feature.
+            buffer: Buffer ``ParameterDict`` (may contain a ``"mask"`` entry).
+            inverse: Whether to apply inverse (denormalize) transformation.
+        """
+        if batch[key] is None:
+            return
+        feature_mask = buffer.get("mask") if hasattr(buffer, "get") else None
+        if norm_mode is NormalizationType.QUANTILES and feature_mask is not None:
+            q01 = buffer["q01"]
+            q99 = buffer["q99"]
+            denom = q99 - q01
+            denom = torch.where(
+                denom == 0,
+                torch.tensor(1e-8, device=denom.device, dtype=denom.dtype),
+                denom,
+            )
+            transformed = (batch[key] + 1.0) * denom / 2.0 + q01 if inverse else 2.0 * (batch[key] - q01) / denom - 1.0
+            mask_bool = feature_mask.bool()
+            for _ in range(batch[key].ndim - mask_bool.ndim):
+                mask_bool = mask_bool.unsqueeze(0)
+            mask_bool = mask_bool.expand_as(batch[key])
+            batch[key] = torch.where(mask_bool, transformed, batch[key])
+            return
+        FeatureNormalizeTransform._apply_normalization(  # noqa: SLF001
+            batch,
+            key,
+            norm_mode,
+            buffer,
+            inverse=inverse,
+        )
 
 
 @dataclass
