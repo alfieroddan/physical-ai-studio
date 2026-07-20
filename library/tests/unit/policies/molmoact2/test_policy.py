@@ -58,9 +58,11 @@ class TestMolmoact2Policy:
             output_features=None,
             n_obs_steps=4,
             n_action_steps=2,
+            chunk_size=8,
         )
         assert policy.hparams["n_obs_steps"] == 4
         assert policy.hparams["n_action_steps"] == 2
+        assert policy.hparams["chunk_size"] == 8
         assert "repo_id" in policy.hparams
 
     def test_save_hyperparameters_ignores_config_and_load_weights(self) -> None:
@@ -69,11 +71,12 @@ class TestMolmoact2Policy:
         assert "load_weights" not in policy.hparams
 
     def test_config_attribute_reflects_args(self) -> None:
-        policy = MolmoAct2(repo_id=None, n_obs_steps=3, n_action_steps=1)
+        policy = MolmoAct2(repo_id=None, n_obs_steps=3, n_action_steps=1, chunk_size=5)
         assert policy.config is not None
         assert isinstance(policy.config, MolmoAct2Config)
         assert policy.config.n_obs_steps == 3
         assert policy.config.n_action_steps == 1
+        assert policy.config.chunk_size == 5
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 

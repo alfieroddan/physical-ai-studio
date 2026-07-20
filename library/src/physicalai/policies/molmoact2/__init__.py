@@ -5,8 +5,6 @@
 
 """MolmoAct2 Policy."""
 
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer
-
 from .config import (
     MolmoAct2ActionExpertConfig,
     MolmoAct2AdapterConfig,
@@ -19,7 +17,6 @@ from .model import MolmoAct2Model
 from .policy import MolmoAct2
 
 __all__ = [
-    "HuggingfacePolicyContainer",
     "MolmoAct2",
     "MolmoAct2ActionExpertConfig",
     "MolmoAct2AdapterConfig",

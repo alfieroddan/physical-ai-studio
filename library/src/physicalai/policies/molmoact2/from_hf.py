@@ -453,6 +453,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
     processor_config: dict[str, Any] | MolmoAct2ProcessorConfig | None = None,
     n_obs_steps: int = 30,
     n_action_steps: int = 30,
+    chunk_size: int = 30,
     max_action_dim: int = 32,
     action_mode: str = "continuous",
     torch_compile: bool = False,
@@ -482,6 +483,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
         processor_config: Optional pre-loaded processor config dict.
         n_obs_steps: Observation horizon override.
         n_action_steps: Number of executed action steps override.
+        chunk_size: Action chunk size override (must be >= n_action_steps).
         max_action_dim: Maximum action dimension override.
         action_mode: continous, discrete or both action generation.
         torch_compile: Whether to enable compiled inference in the resolved config.
@@ -614,6 +616,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
         config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
     config_data["n_obs_steps"] = n_obs_steps
     config_data["n_action_steps"] = n_action_steps
+    config_data["chunk_size"] = chunk_size
     config_data["max_action_dim"] = max_action_dim
     config_data["action_mode"] = action_mode
 

@@ -164,6 +164,33 @@ class TestBuildConfigFromHfConfig:
         config = _build_config(tokenizer_config=tok_cfg)
         assert config.tokenizer_config == tok_cfg
 
+    def test_chunk_size_override_wins_over_hf_config(self) -> None:
+        """Caller-provided chunk_size overrides the value in the HF config payload.
+
+        n_action_steps must be set consistently since MolmoAct2Config validates
+        that n_action_steps <= chunk_size.
+        """
+        hf_config = _make_hf_config()
+        assert hf_config["chunk_size"] == 4
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+            chunk_size=12,
+            n_action_steps=4,
+        )
+        assert config.chunk_size == 12
+        assert config.n_action_steps == 4
+
+    def test_chunk_size_defaults_to_thirty_when_not_overridden(self) -> None:
+        """When the HF config omits chunk_size, the override default of 30 applies."""
+        hf_config = _make_hf_config()
+        del hf_config["chunk_size"]
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+        )
+        assert config.chunk_size == 30
+
     def test_requires_checkpoint_path(self) -> None:
         with pytest.raises(ValueError, match="checkpoint_path is required"):
             build_config_from_hf_config(_make_hf_config(), checkpoint_path=None)

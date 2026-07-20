@@ -54,6 +54,7 @@ def make_molmoact2_config(
     output_features: list[Feature] | None,
     n_obs_steps: int,
     n_action_steps: int,
+    chunk_size: int = 30,
     action_mode: Literal["continuous", "discrete", "both"] = "continuous",
     torch_compile: bool = False,
     use_lora: bool = False,
@@ -73,6 +74,7 @@ def make_molmoact2_config(
         output_features: List of output features the model produces.
         n_obs_steps: Number of observation steps.
         n_action_steps: Number of action steps.
+        chunk_size: Action chunk size (must be >= n_action_steps).
         action_mode: Action supervision mode.
         torch_compile: Whether to mark the config for optimized inference.
         use_lora: Whether to apply LoRA adapters to the VLM.
@@ -91,6 +93,7 @@ def make_molmoact2_config(
         output_features=output_features,
         n_obs_steps=n_obs_steps,
         n_action_steps=n_action_steps,
+        chunk_size=chunk_size,
         action_mode=action_mode,
         compile_model=torch_compile,
         use_lora=use_lora,
@@ -114,6 +117,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_tag: str | None = None,
         n_obs_steps: int = 30,
         n_action_steps: int = 30,
+        chunk_size: int = 30,
         action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
         adapt_to_so101: bool = False,
@@ -136,6 +140,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             norm_tag: Optional normalization tag for pretrained checkpoints.
             n_obs_steps: Number of observation steps.
             n_action_steps: Number of predicted action steps.
+            chunk_size: Action chunk size (must be >= n_action_steps).
             action_mode: Training/inference action mode.
             adapt_to_so101: Apply the SO-100/101 joint frame transform to joint
                 observations/actions (needed for zero-shot and fine-tuning from the
@@ -194,6 +199,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_obs_steps=n_obs_steps,
                 norm_tag=norm_tag,
                 n_action_steps=n_action_steps,
+                chunk_size=chunk_size,
                 action_mode=action_mode,
                 torch_compile=torch_compile,
                 use_lora=use_lora,
@@ -210,6 +216,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 output_features=output_features,
                 n_obs_steps=n_obs_steps,
                 n_action_steps=n_action_steps,
+                chunk_size=chunk_size,
                 action_mode=action_mode,
                 torch_compile=torch_compile,
                 use_lora=use_lora,
