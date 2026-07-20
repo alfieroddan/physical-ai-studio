@@ -56,6 +56,7 @@ def make_molmoact2_config(
     n_action_steps: int,
     chunk_size: int = 30,
     action_mode: Literal["continuous", "discrete", "both"] = "continuous",
+    use_random_input_noise: bool = False,
     torch_compile: bool = False,
     use_lora: bool = False,
     enable_lora_action_expert: bool = False,
@@ -76,6 +77,9 @@ def make_molmoact2_config(
         n_action_steps: Number of action steps.
         chunk_size: Action chunk size (must be >= n_action_steps).
         action_mode: Action supervision mode.
+        use_random_input_noise: Start flow matching from sampled Gaussian noise
+            instead of zeros. Kept off by default so the exported graph stays
+            deterministic and RNG-free.
         torch_compile: Whether to mark the config for optimized inference.
         use_lora: Whether to apply LoRA adapters to the VLM.
         enable_lora_action_expert: Whether to also adapt the action expert.
@@ -95,6 +99,7 @@ def make_molmoact2_config(
         n_action_steps=n_action_steps,
         chunk_size=chunk_size,
         action_mode=action_mode,
+        use_random_input_noise=use_random_input_noise,
         compile_model=torch_compile,
         use_lora=use_lora,
         enable_lora_action_expert=enable_lora_action_expert,
@@ -120,6 +125,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         chunk_size: int = 30,
         action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
+        use_random_input_noise: bool = False,
         adapt_to_so101: bool = False,
         torch_compile: bool = False,
         load_weights: bool = True,
@@ -142,6 +148,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             n_action_steps: Number of predicted action steps.
             chunk_size: Action chunk size (must be >= n_action_steps).
             action_mode: Training/inference action mode.
+            use_random_input_noise: Start flow matching from sampled Gaussian
+                noise instead of zeros. Kept off by default so the exported
+                graph stays deterministic and RNG-free.
             adapt_to_so101: Apply the SO-100/101 joint frame transform to joint
                 observations/actions (needed for zero-shot and fine-tuning from the
                 pre-#777 LeRobot calibration checkpoint).
@@ -201,6 +210,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_action_steps=n_action_steps,
                 chunk_size=chunk_size,
                 action_mode=action_mode,
+                use_random_input_noise=use_random_input_noise,
                 torch_compile=torch_compile,
                 use_lora=use_lora,
                 enable_lora_action_expert=enable_lora_action_expert,
@@ -218,6 +228,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 n_action_steps=n_action_steps,
                 chunk_size=chunk_size,
                 action_mode=action_mode,
+                use_random_input_noise=use_random_input_noise,
                 torch_compile=torch_compile,
                 use_lora=use_lora,
                 enable_lora_action_expert=enable_lora_action_expert,

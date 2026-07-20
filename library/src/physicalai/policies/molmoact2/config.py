@@ -309,7 +309,7 @@ class MolmoAct2Config(Config):
     mask_action_dim_padding: bool = True
     # Start flow matching from sampled Gaussian noise instead of zeros. Kept off
     # by default so the exported graph stays deterministic and RNG-free.
-    sample_noise: bool = False
+    use_random_input_noise: bool = False
 
     # Depth reasoning
     enable_depth_reasoning: bool = False

@@ -456,6 +456,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
     chunk_size: int = 30,
     max_action_dim: int = 32,
     action_mode: str = "continuous",
+    use_random_input_noise: bool = False,
     torch_compile: bool = False,
     use_lora: bool = False,
     enable_lora_action_expert: bool = False,
@@ -486,6 +487,8 @@ def build_config_from_hf_config(  # noqa: PLR0913
         chunk_size: Action chunk size override (must be >= n_action_steps).
         max_action_dim: Maximum action dimension override.
         action_mode: continous, discrete or both action generation.
+        use_random_input_noise: Start flow matching from sampled Gaussian noise
+            instead of zeros (override of the HF config value).
         torch_compile: Whether to enable compiled inference in the resolved config.
         use_lora: Whether to apply LoRA adapters to the VLM.
         enable_lora_action_expert: Whether to also adapt the action expert.
@@ -583,6 +586,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "action_expert_hidden_size",
         "action_expert_max_action_dim",
         "action_expert_max_action_horizon",
+        "use_random_input_noise",
     )
 
     for key in top_level_keys:
@@ -619,6 +623,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
     config_data["chunk_size"] = chunk_size
     config_data["max_action_dim"] = max_action_dim
     config_data["action_mode"] = action_mode
+    config_data["use_random_input_noise"] = use_random_input_noise
 
     if config_data.get("add_action_expert") is False:
         config_data["action_expert_config"] = None

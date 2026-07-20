@@ -290,7 +290,7 @@ class MolmoAct2Model(Model):
         Args:
             batch: Preprocessed inference batch of backbone-ready model inputs.
             sample_noise: Start flow matching from sampled Gaussian noise instead
-                of zeros. Defaults to ``config.sample_noise``.
+                of zeros. Defaults to ``config.use_random_input_noise``.
             generator: Optional RNG used when ``sample_noise`` is enabled.
 
         Returns:
@@ -300,7 +300,7 @@ class MolmoAct2Model(Model):
         actions = self._for_cond_gen.model.generate_actions_from_inputs(
             **model_inputs,
             action_horizon=int(self.config.n_action_steps),
-            sample_noise=bool(self.config.sample_noise) if sample_noise is None else sample_noise,
+            sample_noise=bool(self.config.use_random_input_noise) if sample_noise is None else sample_noise,
             generator=generator,
         )
         env_action_dim = _env_action_dim(self.config) or actions.shape[-1]

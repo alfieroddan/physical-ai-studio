@@ -191,6 +191,26 @@ class TestBuildConfigFromHfConfig:
         )
         assert config.chunk_size == 30
 
+    def test_use_random_input_noise_override_wins_over_hf_config(self) -> None:
+        """Caller-provided use_random_input_noise overrides the HF config value."""
+        hf_config = _make_hf_config()
+        hf_config["use_random_input_noise"] = True
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+            use_random_input_noise=False,
+        )
+        assert config.use_random_input_noise is False
+
+    def test_use_random_input_noise_defaults_to_false_when_not_overridden(self) -> None:
+        """When the HF config omits use_random_input_noise, the default of False applies."""
+        hf_config = _make_hf_config()
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+        )
+        assert config.use_random_input_noise is False
+
     def test_requires_checkpoint_path(self) -> None:
         with pytest.raises(ValueError, match="checkpoint_path is required"):
             build_config_from_hf_config(_make_hf_config(), checkpoint_path=None)

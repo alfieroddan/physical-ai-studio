@@ -85,7 +85,7 @@ if __name__ == "__main__":
         n_action_steps=10,
     )
     # Start flow matching from sampled Gaussian noise (matches the reference model).
-    policy.config.sample_noise = True
+    policy.config.use_random_input_noise = True
     policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
 
     benchmark = LiberoBenchmark(
@@ -125,7 +125,7 @@ from physicalai.train import Trainer
 if __name__ == "__main__":
     # dataset sets input / output features
     policy = MolmoAct2()
-    policy.config.sample_noise = True
+    policy.config.use_random_input_noise = True
     policy.config.train_action_expert_only = True
 
     dm = LeRobotDataModule(
