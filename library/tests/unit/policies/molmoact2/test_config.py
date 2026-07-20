@@ -68,20 +68,27 @@ class TestMolmoAct2Config:
         assert isinstance(config, Config)
 
     def test_serialization_round_trip(self) -> None:
-        config = MolmoAct2Config(chunk_size=12, n_action_steps=6, optimizer_lr=1e-4, max_action_dim=8)
+        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
+
+        training = MolmoAct2TrainingConfig(optimizer_lr=1e-4)
+        config = MolmoAct2Config(chunk_size=12, n_action_steps=6, training_config=training, max_action_dim=8)
         data = config.to_dict()
         assert data["chunk_size"] == 12
-        assert data["optimizer_lr"] == 1e-4
+        assert data["training_config"]["optimizer_lr"] == 1e-4
         restored = MolmoAct2Config.from_dict(data)
         assert restored.chunk_size == 12
         assert restored.n_action_steps == 6
         assert restored.max_action_dim == 8
+        assert restored.training_config.optimizer_lr == 1e-4
 
     def test_serializer_carries_tokenizer_config(self) -> None:
+        from physicalai.policies.molmoact2.config import MolmoAct2PreprocessorConfig
+
         tok_cfg = {"bos_token": "<|im_end|>", "pad_token": ""}
-        config = MolmoAct2Config(tokenizer_config=tok_cfg)
+        pre = MolmoAct2PreprocessorConfig(tokenizer_config=tok_cfg)
+        config = MolmoAct2Config(preprocessor_config=pre)
         data = config.to_dict()
-        assert data["tokenizer_config"] == tok_cfg
+        assert data["preprocessor_config"]["tokenizer_config"] == tok_cfg
         restored = MolmoAct2Config.from_dict(data)
         assert restored.tokenizer_config == tok_cfg
 
@@ -165,12 +172,16 @@ class TestMolmoAct2Config:
             MolmoAct2Config(flow_matching_beta_beta=-1.0)
 
     def test_optimizer_lr_validation(self) -> None:
+        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
+
         with pytest.raises(ValueError, match="optimizer_lr"):
-            MolmoAct2Config(optimizer_lr=0.0)
+            MolmoAct2Config(training_config=MolmoAct2TrainingConfig(optimizer_lr=0.0))
 
     def test_scheduler_warmup_validation(self) -> None:
+        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
+
         with pytest.raises(ValueError, match="scheduler_warmup_steps"):
-            MolmoAct2Config(scheduler_warmup_steps=-1)
+            MolmoAct2Config(training_config=MolmoAct2TrainingConfig(scheduler_warmup_steps=-1))
 
     def test_text_config_property_aliases(self) -> None:
         text = MolmoAct2TextConfig(hidden_size=128, num_attention_heads=4, num_hidden_layers=2)

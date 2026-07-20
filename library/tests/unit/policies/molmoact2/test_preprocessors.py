@@ -29,9 +29,9 @@ from physicalai.policies.molmoact2.processors.joint_transform import JointFrameT
 from physicalai.policies.molmoact2.processors.postprocessor import MolmoAct2Postprocessor
 from physicalai.policies.molmoact2.processors.preprocess_steps import (
     ActionPadder,
-    FeatureBatchNormalizer,
     ImagePacker,
     ImageResizeNormalizer,
+    MolmoAct2NormalizeTransform,
     RobotPromptEncoder,
     StateTaskImageExtractor,
 )
@@ -324,15 +324,111 @@ class TestRobotPromptEncoder:
         assert all("<control_start>joint<control_end>" in t for t in pack.prompt_texts)
 
 
-class TestFeatureBatchNormalizer:
+class TestMolmoAct2NormalizeTransform:
     def test_normalizes_state_bounds(
         self, molmoact2_features: tuple[list, list]
     ) -> None:
         inputs, outputs = molmoact2_features
-        normalizer = FeatureBatchNormalizer(input_features=inputs, output_features=outputs)
+        normalizer = MolmoAct2NormalizeTransform(input_features=inputs, output_features=outputs)
         batch = {STATE: torch.full((1, 6), 2.0)}
         out = normalizer(batch)
         assert out[STATE].shape == (1, 6)
+
+    def test_identity_without_norm_stats(self) -> None:
+        from physicalai.data.observation import Feature, FeatureType
+
+        inputs = [Feature(name="state", ftype=FeatureType.STATE, shape=(4,))]
+        outputs = [Feature(name="action", ftype=FeatureType.ACTION, shape=(4,))]
+        normalizer = MolmoAct2NormalizeTransform(input_features=inputs, output_features=outputs)
+        batch = {STATE: torch.full((1, 4), 2.0)}
+        out = normalizer(batch)
+        torch.testing.assert_close(out[STATE], batch[STATE])
+
+
+class TestMolmoAct2NormalizeMask:
+    """Per-dimension mask support in :class:`MolmoAct2NormalizeTransform`."""
+
+    def _masked_features(self) -> tuple[list, list]:
+        from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+
+        # state dims: [0,1,2] masked (normalized), [3,4] pass-through, [5] masked
+        state_mask = [True, True, True, False, False, True]
+        action_mask = [True, True, False, False, True, True]
+        inputs = [
+            Feature(
+                name="state",
+                ftype=FeatureType.STATE,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    mean=[0.0] * 6,
+                    std=[1.0] * 6,
+                    q01=[0.0] * 6,
+                    q99=[2.0] * 6,
+                    mask=state_mask,
+                ),
+            ),
+        ]
+        outputs = [
+            Feature(
+                name="action",
+                ftype=FeatureType.ACTION,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    mean=[0.0] * 6,
+                    std=[1.0] * 6,
+                    q01=[0.0] * 6,
+                    q99=[2.0] * 6,
+                    mask=action_mask,
+                ),
+            ),
+        ]
+        return inputs, outputs
+
+    def test_masked_dims_normalized_unmasked_unchanged(self) -> None:
+        inputs, outputs = self._masked_features()
+        normalizer = MolmoAct2NormalizeTransform(input_features=inputs, output_features=outputs)
+        state = torch.full((1, 6), 2.0)
+        action = torch.full((1, 6), 0.5)
+        batch = {STATE: state.clone(), ACTION: action.clone()}
+        out = normalizer(batch)
+
+        state_mask = torch.tensor([True, True, True, False, False, True])
+        action_mask = torch.tensor([True, True, False, False, True, True])
+
+        # quantile norm with q01=0, q99=2: x -> 2*(x-0)/2 - 1 = x - 1
+        expected_state = torch.where(state_mask, torch.full((6,), 1.0), state.squeeze(0)).unsqueeze(0)
+        torch.testing.assert_close(out[STATE], expected_state)
+        expected_action = torch.where(action_mask, torch.full((6,), -0.5), action.squeeze(0)).unsqueeze(0)
+        torch.testing.assert_close(out[ACTION], expected_action)
+
+    def test_no_mask_when_field_absent(self) -> None:
+        from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+
+        inputs = [
+            Feature(
+                name="state",
+                ftype=FeatureType.STATE,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    q01=[0.0] * 6,
+                    q99=[2.0] * 6,
+                ),
+            ),
+        ]
+        outputs = [
+            Feature(
+                name="action",
+                ftype=FeatureType.ACTION,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    q01=[0.0] * 6,
+                    q99=[2.0] * 6,
+                ),
+            ),
+        ]
+        normalizer = MolmoAct2NormalizeTransform(input_features=inputs, output_features=outputs)
+        out = normalizer({STATE: torch.full((1, 6), 2.0)})
+        torch.testing.assert_close(out[STATE], torch.full((1, 6), 1.0))
 
 
 class TestMolmoAct2ImageProcessor:
@@ -501,3 +597,55 @@ class TestPostprocessor:
         action = torch.full((1, 2, 6), 5.0)
         result = postprocessor({ACTION: action})
         assert float(result[ACTION].max()) <= 1.0
+
+    def test_masked_dims_denormalized_unmasked_pass_through(self) -> None:
+        from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+
+        # action dims: [0,1,4,5] masked (denormalized), [2,3] pass-through
+        action_mask = [True, True, False, False, True, True]
+        outputs = [
+            Feature(
+                name="action",
+                ftype=FeatureType.ACTION,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    q01=[0.0] * 6,
+                    q99=[2.0] * 6,
+                    mask=action_mask,
+                ),
+            ),
+        ]
+        postprocessor = MolmoAct2Postprocessor(output_features=outputs)
+        # inverse quantile with q01=0, q99=2: y -> (y+1)*2/2 + 0 = y + 1. clamped -1.0 -> 0.0
+        action = torch.full((1, 2, 6), -1.0)
+        result = postprocessor({ACTION: action})
+        mask = torch.tensor(action_mask).view(1, 1, 6)
+        # masked dims denormalized (-1 -> 0); unmasked dims clamped & passed through (-1)
+        expected = torch.where(mask, torch.full((1, 2, 6), 0.0), torch.full((1, 2, 6), -1.0))
+        torch.testing.assert_close(result[ACTION], expected)
+
+    def test_roundtrip_with_masked_normalizer(self) -> None:
+        from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+
+        action_mask = [True, True, False, False, True, True]
+        inputs: list = []
+        outputs = [
+            Feature(
+                name="action",
+                ftype=FeatureType.ACTION,
+                shape=(6,),
+                normalization_data=NormalizationParameters(
+                    q01=[-2.0] * 6,
+                    q99=[2.0] * 6,
+                    mask=action_mask,
+                ),
+            ),
+        ]
+        normalizer = MolmoAct2NormalizeTransform(input_features=inputs, output_features=outputs)
+        postprocessor = MolmoAct2Postprocessor(output_features=outputs)
+        # unmasked dims stay within [-1, 1] so clamp is a no-op and they survive;
+        # masked dims round-trip exactly through the quantile transform.
+        raw = torch.tensor([[0.5, -0.5, 0.3, -0.3, 0.25, -0.25]])
+        normalized = normalizer({ACTION: raw.clone()})[ACTION]
+        denormalized = postprocessor({ACTION: normalized})[ACTION]
+        torch.testing.assert_close(denormalized, raw)

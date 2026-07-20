@@ -24,6 +24,7 @@ from physicalai.policies.molmoact2.config import (
     MolmoAct2ActionExpertConfig,
     MolmoAct2AdapterConfig,
     MolmoAct2Config,
+    MolmoAct2PreprocessorConfig,
     MolmoAct2TextConfig,
     MolmoAct2VitConfig,
 )
@@ -95,7 +96,9 @@ def tiny_molmoact2_config() -> MolmoAct2Config:
         n_action_steps=2,
         max_action_dim=4,
         image_placeholder_token_id=MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-        tokenizer_name_or_path=DEFAULT_MOLMOACT2_REPO_ID,
+        preprocessor_config=MolmoAct2PreprocessorConfig(
+            tokenizer_name_or_path=DEFAULT_MOLMOACT2_REPO_ID,
+        ),
     )
 
 
