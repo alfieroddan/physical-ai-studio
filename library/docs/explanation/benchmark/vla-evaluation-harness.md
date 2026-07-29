@@ -1,187 +1,118 @@
 # VLA Evaluation Harness Integration
 
-## Purpose
-
-Physical AI Studio uses external evaluation harnesses to reproduce published
-policy results without adding simulator dependencies to the core package. The
-first integration targets AllenAI's
+Physical AI Studio integrates with AllenAI's
 [`vla-evaluation-harness`](https://github.com/allenai/vla-evaluation-harness)
-and uses Pi0.5 on LIBERO as the reference implementation.
+through model servers. The model server runs in the Physical AI Studio
+environment while the harness runs benchmark simulators in isolated
+environments. Pi0.5 on LIBERO is the reference integration.
 
-The integration lives in `benchmarks/vla-evaluation-harness/`, outside the
-`physicalai` package. External harnesses can change independently, and their
-simulators often require conflicting Python, system, or GPU dependencies.
-Keeping the adapter separate preserves a small package surface while still
-providing reproducible examples.
+The adapter lives in `benchmarks/vla-evaluation-harness/`, outside the
+`physicalai` package. This keeps external harness and simulator dependencies
+out of the public package API.
 
-## Design Decisions
-
-- Install `vla-eval` from its published package; do not vendor it or maintain a
-  git submodule.
-- Keep the model-server and benchmark run YAMLs needed by our examples under
-  `benchmarks/vla-evaluation-harness/configs/`.
-- Run the model server in the Physical AI Studio environment so it can load the
-  policy and its dependencies.
-- Let `vla-eval` run the benchmark environment, normally in Docker.
-- Communicate between the two processes through the model server protocol.
-- Support a general YAML-driven server and benchmark-specific Python servers.
-- Keep benchmark observation mapping, action chunking, and checkpoint defaults
-  visible in the adapter or its config.
-
-## Architecture
+## Integration Structure
 
 ```mermaid
-flowchart LR
-    subgraph ModelEnvironment[Physical AI Studio environment]
-        C[Inline policy YAML] --> H[PhysicalAIHarness]
-        S[Pi05LiberoServer] --> H
-        H --> P[Pi0.5 policy]
-    end
+classDiagram
+    class PredictModelServer {
+        +predict(obs, ctx) Action
+        +get_action_spec() dict
+        +get_observation_spec() dict
+        +on_episode_start(config, ctx)
+    }
 
-    H <-->|WebSocket observations and actions| V[vla-eval orchestrator]
+    class PhysicalAIHarness {
+        +policy: dict
+        +image_keys: dict
+        +state_key: str
+        +chunk_size: int
+        -_resolve_image_map(images) dict
+        -_build_policy_observation(obs) Observation
+        +predict(obs, ctx) Action
+    }
 
-    subgraph BenchmarkEnvironment[Isolated benchmark environment]
-        V --> L[LIBERO container]
-        L --> R[Episode results]
-    end
+    class Pi05LiberoServer {
+        +pretrained_name_or_path: str
+        +device: str
+    }
+
+    PredictModelServer <|-- PhysicalAIHarness
+    PhysicalAIHarness <|-- Pi05LiberoServer
+    PhysicalAIHarness --> Policy : loads or receives
 ```
 
-The model server owns policy construction and conversion between the harness
-observation format and `physicalai.data.Observation`. The orchestrator owns
-task selection, episodes, simulator lifecycle, recording, and result
-aggregation.
+`PhysicalAIHarness` owns the reusable protocol bridge. A benchmark-specific
+server such as `Pi05LiberoServer` only owns policy construction and stable
+defaults for a model-benchmark pair.
 
-## User Workflow
+## Implementation
 
-1. **Choose a model.** Select the policy implementation to evaluate, such as
-   Pi0.5.
-2. **Find compatible weights.** Identify which benchmark the available weights
-   were trained or fine-tuned for. For example,
-   `lerobot/pi05_libero_finetuned_v044` targets LIBERO.
-3. **Select the benchmark.** Confirm that the external harness supports that
-   benchmark and locate its run config, such as LIBERO-10.
-4. **Choose an adapter.** Use the general config-driven server when the policy
-   fits the standard Physical AI interface. Add a Python subclass when custom
-   preprocessing, protocol behavior, or stable benchmark-specific defaults are
-   required.
+### PhysicalAIHarness
 
-```mermaid
-flowchart TD
-    A[Choose a model] --> B[Find benchmark-compatible weights]
-    B --> C[Select a supported benchmark]
-    C --> D{Standard Physical AI interface?}
-    D -->|Yes| E[Use PhysicalAIHarness with YAML]
-    D -->|No or benchmark-specific behavior| F[Subclass the model server]
-    E --> G[Start server and run vla-eval]
-    F --> G
-```
-
-## Installation
-
-Install the Physical AI Studio policy dependencies and `vla-eval` in the
-environment used to launch the model server:
-
-```bash
-cd library
-uv sync --extra cu128 --extra pi05
-uv pip install vla-eval
-```
-
-Use the backend extra appropriate for the machine, such as `cpu`, `cu128`, or
-`xpu`. Docker is required when the selected `vla-eval` benchmark runs its
-simulator in a container.
-
-## Configuration Ownership
-
-The installed `vla-eval` distribution supplies the CLI, model-server protocol,
-and benchmark implementations. Its package data does not provide a stable path
-to the upstream repository's example YAML files. A normal
-`uv pip install vla-eval` must therefore not be expected to create a local
-`configs/` directory.
-
-Physical AI Studio owns the complete set of YAML files referenced by this
-integration. This keeps each example reproducible against the installed
-`vla-eval` version and avoids depending on files outside the Python package:
-
-```text
-benchmarks/vla-evaluation-harness/
-├── configs/
-│   ├── pi05_libero_policy.yaml
-│   └── benchmarks/
-│       └── libero/
-│           ├── smoke_test.yaml
-│           └── 10.yaml
-└── model_servers/
-    ├── physicalai_harness.py
-    └── pi05_libero.py
-```
-
-There are two distinct config types:
-
-- **Model-server config:** Constructs the Physical AI policy and defines its
-  observation mapping, device, action chunking, and server port. For example,
-  `configs/pi05_libero_policy.yaml`.
-- **Benchmark run config:** Selects the `vla-eval` benchmark implementation,
-  suite, tasks, episode count, recording, and output location. For example,
-  `configs/benchmarks/libero/10.yaml`.
-
-The active `.venv` can identify where `vla_eval` was imported from, but it is
-not a reliable source for these configs. In particular, an editable install
-may resolve imports to a nearby source checkout whose repository-level
-`configs/` directory happens to be present. Those YAML files are outside the
-installed `vla_eval` Python package and will not necessarily exist after a
-regular package installation.
-
-## Option 1: General Config-Driven Server
-
-`PhysicalAIHarness` loads any supported `Policy` or exported `InferenceModel`
-from a `class_path` and `init_args` declaration. The policy is defined directly
-in the server YAML so one file describes the complete model-server setup.
-
-Pi0.5 with LIBERO:
-
-```yaml
-args:
-  policy:
-    class_path: physicalai.policies.pi05.Pi05
-    init_args:
-      pretrained_name_or_path: lerobot/pi05_libero_finetuned_v044
-  image_keys:
-    agentview: image
-    wrist: image2
-  state_key: observation.state
-  chunk_size: 10
-  device: cuda
-  port: 8000
-```
-
-Start the generic server:
-
-```bash
-cd library/benchmarks/vla-evaluation-harness
-python model_servers/physicalai_harness.py \
-  --config configs/pi05_libero_policy.yaml
-```
-
-This path is preferred when configuration alone can express policy loading,
-camera mapping, state mapping, device placement, and action chunking.
-
-## Option 2: Benchmark-Specific Python Server
-
-A dedicated server is useful when a model-benchmark pair needs custom
-preprocessing or is run often enough to justify stable defaults. The subclass
-constructs the policy and delegates the shared prediction and protocol logic to
-`PhysicalAIHarness`.
+`PhysicalAIHarness` adapts a `physicalai.policies.Policy` or exported
+`physicalai.inference.InferenceModel` to the `PredictModelServer` interface.
+The target configuration API accepts the policy declaration inline so one YAML
+describes the complete model server:
 
 ```python
-from typing import Any
+class PhysicalAIHarness(PredictModelServer):
+    def __init__(
+        self,
+        policy: dict[str, Any] | None = None,
+        image_keys: dict[str, str] | None = None,
+        state_key: str | None = "state",
+        device: str | None = None,
+        *,
+        chunk_size: int | None = None,
+        _policy: Policy | InferenceModel | None = None,
+        **kwargs: Any,
+    ) -> None: ...
+```
 
-from physicalai.policies.pi05 import Pi05
-from vla_eval.model_servers.serve import run_server
+There are two construction paths:
 
-from physicalai_harness import PhysicalAIHarness
+- **Configuration path:** `policy` contains a `class_path` and `init_args`
+  declaration that `jsonargparse` validates and instantiates.
+- **Python path:** `_policy` accepts an already constructed policy from a
+  benchmark-specific subclass.
 
+Exactly one path is required. The inline path intentionally avoids inheriting
+or referencing a second policy YAML.
 
+The harness owns five pieces of shared behavior:
+
+1. **Policy lifecycle:** Instantiate the policy, move live `Policy` instances
+   to the requested device, enter evaluation mode, and reset state between
+   episodes.
+2. **Observation mapping:** Map benchmark camera names to policy feature keys
+   and construct `physicalai.data.Observation`.
+3. **Image layout:** Convert `(H, W, C)` uint8 images to `(B, C, H, W)` float32
+   for live policies. Preserve `(B, H, W, C)` uint8 for exported pipelines
+   that own preprocessing.
+4. **Prediction:** Call `predict_action_chunk`, normalize the result to a
+   NumPy action array, and remove a single leading batch dimension.
+5. **Protocol declaration:** Report observation requirements and action specs
+   before evaluation begins.
+
+The data boundary is intentionally narrow:
+
+```python
+def predict(self, obs: Observation, ctx: SessionContext) -> Action:
+    policy_obs = self._build_policy_observation(obs)
+    actions = self._policy.predict_action_chunk(policy_obs)
+    return {"actions": np.asarray(actions, dtype=np.float32)}
+```
+
+The implementation additionally handles policy type, device placement,
+dictionary outputs, and batch dimensions.
+
+### Benchmark-Specific Servers
+
+Add a subclass when a model-benchmark pair needs custom loading,
+preprocessing, protocol behavior, or maintained defaults. The subclass should
+construct the policy and delegate shared behavior to `PhysicalAIHarness`:
+
+```python
 class Pi05LiberoServer(PhysicalAIHarness):
     def __init__(
         self,
@@ -198,38 +129,165 @@ class Pi05LiberoServer(PhysicalAIHarness):
             device=device,
             **kwargs,
         )
-
-
-if __name__ == "__main__":
-  run_server(Pi05LiberoServer)
 ```
 
-Start it without a model-server config:
+Prediction, specs, observation conversion, and episode reset behavior remain
+on the base harness unless the external protocol itself differs.
+
+## Key Features
+
+### 1. Environment Isolation
+
+The model server runs with the policy dependencies. `vla-eval` manages the
+benchmark and normally runs the simulator in Docker. The processes exchange
+observations and actions over WebSocket.
+
+### 2. Configuration-First Integration
+
+The general server is preferred when policy loading, camera mapping, state
+mapping, device placement, and action chunking can be expressed in YAML. This
+avoids creating a Python server for every checkpoint.
+
+### 3. Python Extension Point
+
+Small subclasses provide an escape hatch for custom model construction or
+benchmark behavior without duplicating the model-server protocol.
+
+### 4. Repository-Owned Configs
+
+The installed `vla-eval` distribution supplies the CLI and benchmark
+implementations, but it does not provide a stable package path to the upstream
+repository's example YAML files. Physical AI Studio owns every YAML referenced
+by this integration:
+
+```text
+benchmarks/vla-evaluation-harness/
+├── configs/
+│   ├── pi05_libero_policy.yaml
+│   └── benchmarks/
+│       └── libero/
+│           ├── smoke_test.yaml
+│           └── 10.yaml
+└── model_servers/
+    ├── physicalai_harness.py
+    └── pi05_libero.py
+```
+
+Model-server configs construct and map the policy. Benchmark-run configs
+select tasks, episode counts, recording, and output behavior. An editable
+`.venv` may expose YAMLs from a source checkout, but those files are not part
+of the installed package and are not a supported config source.
+
+## Configuration Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Server as PhysicalAIHarness
+    participant Policy
+    participant Harness as vla-eval
+    participant Simulator as LIBERO container
+
+    User->>Server: Start with inline policy YAML or subclass
+    Server->>Policy: Construct and enter evaluation mode
+    User->>Harness: vla-eval run --config benchmark.yaml
+    Harness->>Simulator: Start task and episode
+    Simulator->>Harness: Observation
+    Harness->>Server: Images, state, task description
+    Server->>Policy: PhysicalAI Observation
+    Policy-->>Server: Action chunk
+    Server-->>Harness: NumPy actions
+    Harness->>Simulator: Execute actions
+    Simulator-->>Harness: Episode result
+```
+
+## User Workflow
+
+1. **Choose a model:** Select a Physical AI policy, such as Pi0.5.
+2. **Find compatible weights:** Identify the benchmark targeted by the
+   checkpoint. For example, `lerobot/pi05_libero_finetuned_v044` targets
+   LIBERO.
+3. **Select the benchmark:** Confirm that `vla-eval` supports it and choose the
+   repository-owned run config.
+4. **Choose the integration path:** Use `PhysicalAIHarness` with YAML for the
+   standard interface, or add a small subclass for custom behavior.
+5. **Smoke test, then evaluate:** Validate connectivity and data mapping before
+   running the full benchmark suite.
+
+## Benefits
+
+1. **Dependency separation:** Simulator requirements do not enter the
+   `physicalai` package environment.
+2. **Reusable bridge:** Observation conversion and action protocol behavior
+   are implemented once.
+3. **Reproducible runs:** Model and benchmark configs are versioned with the
+   integration.
+4. **Extensibility:** New policies usually need YAML; unusual policies need a
+   small subclass.
+5. **Early validation:** Observation and action specs catch integration errors
+   before long evaluation runs.
+
+## Example Usage
+
+### Installation
+
+```bash
+cd library
+uv sync --extra cu128 --extra pi05
+uv pip install vla-eval
+```
+
+Use the backend extra appropriate for the machine. Docker is required for
+benchmarks that run their simulator in a container.
+
+### General Server
+
+```yaml
+args:
+  policy:
+    class_path: physicalai.policies.pi05.Pi05
+    init_args:
+      pretrained_name_or_path: lerobot/pi05_libero_finetuned_v044
+  image_keys:
+    agentview: image
+    wrist: image2
+  state_key: observation.state
+  chunk_size: 10
+  device: cuda
+  port: 8000
+```
+
+```bash
+cd library/benchmarks/vla-evaluation-harness
+python model_servers/physicalai_harness.py \
+  --config configs/pi05_libero_policy.yaml
+```
+
+### Benchmark-Specific Server
 
 ```bash
 cd library/benchmarks/vla-evaluation-harness
 python model_servers/pi05_libero.py --port 8000
 ```
 
-The subclass should only own construction and benchmark-specific behavior.
-Observation conversion, prediction, action specs, and episode reset behavior
-remain in the general harness unless the protocol itself differs.
+### Run LIBERO
 
-## Running the Benchmark
-
-The model server and benchmark orchestrator are separate long-running
-processes. After starting either server option in the first terminal, run the
-benchmark in a second terminal:
+In a second terminal:
 
 ```bash
 cd library/benchmarks/vla-evaluation-harness
 uv run vla-eval run --config configs/benchmarks/libero/10.yaml
 ```
 
-The referenced benchmark config is maintained with this adapter. Installing
-`vla-eval` supplies the orchestrator and benchmark implementations, not this
-repository's chosen model and run configuration.
+## Integration Points
 
-Start with a smoke test before a full evaluation. A successful smoke test
-checks the server connection, camera and state mapping, action dimensions, and
-chunking without spending the compute required for the full suite.
+The adapter integrates with:
+
+- **Physical AI policies** through `Policy.predict_action_chunk`
+- **Exported models** through `InferenceModel.predict_action_chunk`
+- **vla-eval** through `PredictModelServer`
+- **Benchmark simulators** through the vla-eval orchestrator and containers
+- **jsonargparse** through inline `class_path` and `init_args` declarations
+
+This design keeps external benchmark integrations lightweight while retaining
+the Physical AI policy interface and configuration conventions.
