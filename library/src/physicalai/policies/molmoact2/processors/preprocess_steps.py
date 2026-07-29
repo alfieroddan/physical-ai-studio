@@ -235,8 +235,14 @@ class StateTaskImageExtractor:
         if flat_image_keys:
             return sorted(flat_image_keys)
 
-        if isinstance(batch.get(IMAGES), dict):
-            return [f"{IMAGES}.{name}" for name in batch[IMAGES] if "is_pad" not in str(name)]
+        images_value = batch.get(IMAGES)
+        if isinstance(images_value, dict):
+            return [f"{IMAGES}.{name}" for name in images_value if "is_pad" not in str(name)]
+
+        # Single-camera datasets (e.g. "observation.image") carry a plain BCHW
+        # tensor directly under the bare "images" key instead of a per-camera dict.
+        if images_value is not None:
+            return [IMAGES]
 
         msg = "MolmoAct2 requires image tensors in BCHW format."
         raise ValueError(msg)

@@ -105,15 +105,23 @@ def _masked_flow_loss(
 ) -> Tensor:
     """Mean squared error over valid action steps and dimensions only.
 
+    ``predicted``/``target`` carry a ``num_flow_timesteps`` dimension right
+    after the batch dim (``(batch, num_flow_timesteps, horizon,
+    max_action_dim)``, see :meth:`MolmoAct2Backbone.predict_flow_velocity`);
+    the horizon/action-dim padding masks are per-example only, so they are
+    broadcast across it.
+
     Returns:
         loss of continous action compared to target actions.
     """
     loss = F.mse_loss(predicted, target, reduction="none")
     mask = torch.ones_like(loss, dtype=torch.bool)
     if action_horizon_is_pad is not None:
-        mask = mask & (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, :, None]  # noqa: PLR6104
+        valid_horizon = (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :, None]
+        mask = mask & valid_horizon  # noqa: PLR6104
     if action_dim_is_pad is not None:
-        mask = mask & (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :]  # noqa: PLR6104
+        valid_dim = (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, None, :]
+        mask = mask & valid_dim  # noqa: PLR6104
     valid = mask.to(loss.dtype)
     return (loss * valid).sum() / valid.sum().clamp_min(1.0)
 
@@ -167,6 +175,30 @@ class MolmoAct2Model(Model):
             compile_mode = "default"
             self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
             self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
+
+    def train(self, mode: bool = True) -> "MolmoAct2Model":
+        """Set training mode, keeping a frozen VLM in eval when action-expert-only.
+
+        Mirrors the reference MolmoAct2 training recipe: when
+        ``config.train_action_expert_only`` is set, the VLM (text transformer +
+        vision backbone) is frozen (``requires_grad=False``) but, without this
+        override, ``nn.Module.train()`` would still recursively flip it into
+        train mode (e.g. enabling any dropout it contains), producing
+        stochastic conditioning context during training that never matches the
+        deterministic ``eval()`` context seen at inference. Only the action
+        expert should toggle with ``mode``; the rest of the backbone always
+        stays in ``eval()``.
+
+        Returns:
+            ``self``, matching :meth:`nn.Module.train`.
+        """
+        super().train(mode)
+        if getattr(self.config, "train_action_expert_only", False):
+            self._for_cond_gen.eval()
+            action_expert = getattr(self._for_cond_gen.model, "action_expert", None)
+            if action_expert is not None:
+                action_expert.train(mode)
+        return self
 
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load safetensors weights into the backbone (strict key match)."""
@@ -328,7 +360,7 @@ class MolmoAct2Model(Model):
         model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
         actions = self._for_cond_gen.model.generate_actions_from_inputs(
             **model_inputs,
-            action_horizon=int(self.config.n_action_steps),
+            action_horizon=int(self.config.chunk_size),
             sample_noise=bool(self.config.use_random_input_noise) if sample_noise is None else sample_noise,
             generator=generator,
         )
@@ -402,19 +434,17 @@ class MolmoAct2Model(Model):
             msg = "train_action_expert_only=True, but no action_expert parameters were found."
             raise RuntimeError(msg)
 
-    # Unused delta-index properties.
-
     @property
-    def reward_delta_indices(self) -> list[int] | None:
-        """Reward delta indices (unused)."""
+    def reward_delta_indices(self) -> None:
+        """Reward deltas, unused because rewards are not model inputs."""
         return None
 
     @property
     def action_delta_indices(self) -> list[int] | None:
-        """Action delta indices (unused)."""
-        return None
+        """Future action indices required to train the configured action chunk."""
+        return list(range(int(self.config.chunk_size)))
 
     @property
-    def observation_delta_indices(self) -> list[int] | None:
-        """Observation delta indices (unused)."""
+    def observation_delta_indices(self) -> None:
+        """Observation deltas, unused because preprocessing expects one current frame."""
         return None

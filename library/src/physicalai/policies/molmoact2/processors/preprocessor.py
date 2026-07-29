@@ -140,7 +140,10 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         has_images_nested = isinstance(batch.get(IMAGES), dict)
         has_images_flat = any(str(key).startswith(f"{IMAGES}.") for key in batch)
-        if not (has_images_nested or has_images_flat):
+        # Single-camera datasets (e.g. "observation.image") resolve to a plain
+        # tensor under the bare "images" key rather than a per-camera dict.
+        has_images_single = not has_images_nested and batch.get(IMAGES) is not None
+        if not (has_images_nested or has_images_flat or has_images_single):
             msg = f"{IMAGES} are expected in batch. Given keys: {list(batch.keys())}"
             raise ValueError(msg)
 

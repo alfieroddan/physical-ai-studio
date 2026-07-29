@@ -66,6 +66,8 @@ def make_molmoact2_config(  # noqa: PLR0913
     lora_dropout: float = 0.05,
     lora_bias: Literal["all", "lora_only", "none"] = "none",
     gradient_checkpointing: bool = False,
+    train_action_expert_only: bool = False,
+    num_flow_timesteps: int | None = None,
     checkpoint_path: str | None = None,
 ) -> MolmoAct2Config:
     """Create the explicit model config for MolmoAct2.
@@ -90,6 +92,13 @@ def make_molmoact2_config(  # noqa: PLR0913
         lora_dropout: LoRA dropout rate.
         lora_bias: Which biases to train ('none', 'all', 'lora_only').
         gradient_checkpointing: Whether to enable gradient checkpointing.
+        train_action_expert_only: Freeze the VLM entirely and only train the
+            action expert. Incompatible with ``use_lora``.
+        num_flow_timesteps: Number of independent (timestep, noise) samples
+            drawn per training example and averaged in the flow-matching
+            loss (variance reduction). ``None`` (default) uses
+            :class:`MolmoAct2Config`'s own default (``8``, matching the
+            reference MolmoAct2 training recipe).
         checkpoint_path: Optional local path to a pretrained checkpoint snapshot
             directory. Forwarded to :class:`MolmoAct2Config` so a config built
             outside the HF flow can still locate its pretrained weights (e.g.
@@ -98,6 +107,9 @@ def make_molmoact2_config(  # noqa: PLR0913
     Returns:
         A fully populated :class:`MolmoAct2Config`.
     """
+    config_kwargs: dict[str, Any] = {}
+    if num_flow_timesteps is not None:
+        config_kwargs["num_flow_timesteps"] = num_flow_timesteps
     return MolmoAct2Config(
         input_features=input_features,
         output_features=output_features,
@@ -114,7 +126,9 @@ def make_molmoact2_config(  # noqa: PLR0913
         lora_dropout=lora_dropout,
         lora_bias=lora_bias,
         gradient_checkpointing=gradient_checkpointing,
+        train_action_expert_only=train_action_expert_only,
         checkpoint_path=checkpoint_path,
+        **config_kwargs,
     )
 
 
@@ -144,6 +158,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         lora_dropout: float = 0.05,
         lora_bias: Literal["all", "lora_only", "none"] = "none",
         gradient_checkpointing: bool = False,
+        train_action_expert_only: bool = False,
+        num_flow_timesteps: int | None = None,
+        setup_type: str | None = None,
+        control_mode: str | None = None,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 
@@ -185,6 +203,27 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             gradient_checkpointing: Enable gradient checkpointing on the text
                 transformer, vision backbone and action expert to trade
                 compute for memory during training.
+            train_action_expert_only: Freeze the VLM entirely and only train
+                the action expert. Incompatible with ``use_lora``.
+            num_flow_timesteps: Number of independent (timestep, noise)
+                samples drawn per training example and averaged in the
+                flow-matching loss (variance reduction). ``None`` (default)
+                uses the pretrained checkpoint's HF config value when
+                resolvable, otherwise :class:`MolmoAct2Config`'s own default
+                (``8``, matching the reference MolmoAct2 training recipe).
+            setup_type: Text describing the robot/scene, inserted into the
+                model prompt (e.g. ``"single franka robotic arm in libero"``).
+                MolmoAct2 was pretrained to condition on this text. It is
+                normally only populated from a pretrained checkpoint's
+                ``norm_stats.json`` when ``norm_tag`` matches one of its
+                ``metadata_by_tag`` entries; pass this explicitly to supply
+                the same conditioning for *any* dataset, including ones with
+                no matching (or no) ``norm_tag``. Always wins over any
+                norm_tag-derived value when provided.
+            control_mode: Text describing the action space, inserted into the
+                model prompt (e.g. ``"delta end-effector pose"`` for relative
+                end-effector deltas, or ``"absolute joint pose"`` for target
+                joint angles). Same override semantics as ``setup_type``.
 
         Raises:
             ValueError: If only one of input_features/output_features is provided.
@@ -247,6 +286,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                     lora_dropout=lora_dropout,
                     lora_bias=lora_bias,
                     gradient_checkpointing=gradient_checkpointing,
+                    train_action_expert_only=train_action_expert_only,
+                    num_flow_timesteps=num_flow_timesteps,
                 )
             else:
                 self.config = make_molmoact2_config(
@@ -265,6 +306,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                     lora_dropout=lora_dropout,
                     lora_bias=lora_bias,
                     gradient_checkpointing=gradient_checkpointing,
+                    train_action_expert_only=train_action_expert_only,
+                    num_flow_timesteps=num_flow_timesteps,
                 )
 
             self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
@@ -273,6 +316,16 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # Applied uniformly regardless of which branch above built the config.
         # https://huggingface.co/docs/lerobot/v0.6.0/en/molmoact2#joint-frame-transform-so-100101-zero-shot
         self.config.adapt_to_so101 = adapt_to_so101
+
+        # Explicit setup_type/control_mode always win over whatever a
+        # norm_tag lookup produced (or the "" default when there was no
+        # norm_tag), so any dataset can supply this prompt-conditioning text
+        # without needing a matching entry in a pretrained checkpoint's
+        # norm_stats.json. Must be set before processors build.
+        if setup_type is not None:
+            self.config.setup_type = setup_type
+        if control_mode is not None:
+            self.config.control_mode = control_mode
 
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
         # the same pretrained source during inference adapter reload.

@@ -296,14 +296,23 @@ class MolmoAct2Backbone(nn.Module):
         action_dim_is_pad: torch.Tensor | None,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Interpolate ``x_t`` between noise and actions at a sampled timestep.
+        """Interpolate ``x_t`` between noise and actions at ``num_flow_timesteps`` sampled timesteps.
+
+        Draws ``config.num_flow_timesteps`` independent (timestep, noise)
+        samples per example (matching the reference MolmoAct2 training
+        recipe) to reduce the flow-matching loss's per-step variance; the
+        encoder only runs once per example regardless of this count (see
+        :meth:`predict_flow_velocity`).
 
         Returns:
-            ``(x_t, timesteps, target_velocity)`` for the flow-matching objective.
+            ``(x_t, timesteps, target_velocity)``, each with a leading
+            ``batch_size * num_flow_timesteps`` dimension.
         """
-        batch_size = actions.shape[0]
+        batch_size, horizon, action_dim = actions.shape
+        num_flow_timesteps = max(1, int(self.config.num_flow_timesteps))
+        flat_batch = batch_size * num_flow_timesteps
         timesteps = _sample_beta_timesteps(
-            batch_size=batch_size,
+            batch_size=flat_batch,
             device=actions.device,
             cutoff=self.config.flow_matching_cutoff,
             time_offset=self.config.flow_matching_time_offset,
@@ -311,10 +320,17 @@ class MolmoAct2Backbone(nn.Module):
             alpha=self.config.flow_matching_beta_alpha,
             beta=self.config.flow_matching_beta_beta,
         ).to(dtype)
-        noise = self._mask_action_dims(torch.randn_like(actions), action_dim_is_pad)
-        t = timesteps.view(batch_size, 1, 1)
-        x_t = (1.0 - t) * noise + t * actions
-        return x_t, timesteps, actions - noise
+        expanded_action_dim_is_pad = (
+            action_dim_is_pad.repeat_interleave(num_flow_timesteps, dim=0) if action_dim_is_pad is not None else None
+        )
+        noise = self._mask_action_dims(
+            torch.randn(flat_batch, horizon, action_dim, device=actions.device, dtype=dtype),
+            expanded_action_dim_is_pad,
+        )
+        actions_expanded = actions.repeat_interleave(num_flow_timesteps, dim=0)
+        t = timesteps.view(flat_batch, 1, 1)
+        x_t = (1.0 - t) * noise + t * actions_expanded
+        return x_t, timesteps, actions_expanded - noise
 
     def predict_flow_velocity(
         self,
@@ -330,17 +346,25 @@ class MolmoAct2Backbone(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Flow-matching training forward: predict velocity and its target.
 
-        Samples a per-example timestep and noise, interpolates ``x_t`` between
-        noise and the ground-truth ``actions``, then predicts the velocity that
-        the action expert should produce. When ``freeze_encoder`` is set the
-        vision+text encoder runs under ``no_grad`` (action-expert-only training).
+        Samples ``config.num_flow_timesteps`` per-example (timestep, noise)
+        pairs, interpolates ``x_t`` between noise and the ground-truth
+        ``actions`` for each, then predicts the velocity that the action
+        expert should produce. The vision+text encoder runs exactly once per
+        example (its output context is repeated across the
+        ``num_flow_timesteps`` samples), matching the reference MolmoAct2
+        training recipe's variance-reduction trick. When ``freeze_encoder``
+        is set the encoder runs under ``no_grad`` (action-expert-only
+        training).
 
         Returns:
-            ``(predicted_velocity, target_velocity)``, both ``(batch, horizon, max_action_dim)``.
+            ``(predicted_velocity, target_velocity)``, both
+            ``(batch, num_flow_timesteps, horizon, max_action_dim)``.
         """
         action_expert = self._require_action_expert()
         dtype = action_expert.action_embed.weight.dtype
         actions = self._mask_action_dims(actions.to(dtype), action_dim_is_pad)
+        batch_size, horizon, action_dim = actions.shape
+        num_flow_timesteps = max(1, int(self.config.num_flow_timesteps))
         x_t, timesteps, target_velocity = self._flow_interpolation(actions, action_dim_is_pad, dtype)
         context = self._encode_action_context(
             input_ids=input_ids,
@@ -348,13 +372,16 @@ class MolmoAct2Backbone(nn.Module):
             token_type_ids=token_type_ids,
             images=images,
             token_pooling=token_pooling,
-            batch_size=actions.shape[0],
-            seq_len=actions.shape[1],
+            batch_size=batch_size,
+            seq_len=horizon,
             device=actions.device,
             dtype=dtype,
             freeze_encoder=freeze_encoder,
         )
+        context = action_expert.expand_context_for_flow_timesteps(context, num_flow_timesteps)
         predicted_velocity = action_expert.forward_with_context(x_t, timesteps, context=context)
+        predicted_velocity = predicted_velocity.view(batch_size, num_flow_timesteps, horizon, action_dim)
+        target_velocity = target_velocity.view(batch_size, num_flow_timesteps, horizon, action_dim)
         return predicted_velocity, target_velocity
 
 

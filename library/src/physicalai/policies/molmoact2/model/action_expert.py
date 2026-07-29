@@ -460,6 +460,57 @@ class ActionExpert(nn.Module):
         flat = self.context_norm(proj(x))
         return flat.view(flat.shape[0], flat.shape[1], self.num_heads, self.action_head_dim)
 
+    @staticmethod
+    def expand_context_for_flow_timesteps(
+        context: ActionExpertContext,
+        num_flow_timesteps: int,
+    ) -> ActionExpertContext:
+        """Repeat a per-example context along the batch dim for multi-sample flow training.
+
+        When ``config.num_flow_timesteps > 1``, several independent
+        (timestep, noise) samples are drawn per training example to reduce
+        the flow-matching loss's variance (see
+        :meth:`MolmoAct2Backbone.predict_flow_velocity`). The text/vision
+        encoder still runs only once per example; this repeats its per-layer
+        KV context and cross-attention mask ``num_flow_timesteps`` times
+        (interleaved, matching how the denoising inputs are flattened via
+        ``actions.repeat_interleave(num_flow_timesteps, dim=0)``) so the
+        action expert can process the flattened
+        ``(batch * num_flow_timesteps,)`` batch. ``self_mask`` and
+        ``rope_cache`` only depend on the action horizon, not the batch, so
+        they are reused unchanged.
+
+        Returns:
+            A new :class:`ActionExpertContext` with per-example tensors
+            repeated ``num_flow_timesteps`` times along the batch dim.
+        """
+        if num_flow_timesteps == 1:
+            return context
+        kv_contexts = [
+            (
+                k_ctx.repeat_interleave(num_flow_timesteps, dim=0),
+                v_ctx.repeat_interleave(num_flow_timesteps, dim=0),
+            )
+            for k_ctx, v_ctx in context.kv_contexts
+        ]
+        cross_mask = (
+            context.cross_mask.repeat_interleave(num_flow_timesteps, dim=0)
+            if context.cross_mask is not None
+            else None
+        )
+        valid_action = (
+            context.valid_action.repeat_interleave(num_flow_timesteps, dim=0)
+            if context.valid_action is not None
+            else None
+        )
+        return ActionExpertContext(
+            kv_contexts=kv_contexts,
+            cross_mask=cross_mask,
+            self_mask=context.self_mask,
+            valid_action=valid_action,
+            rope_cache=context.rope_cache,
+        )
+
     def prepare_context(
         self,
         *,

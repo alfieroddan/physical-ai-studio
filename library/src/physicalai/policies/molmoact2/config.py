@@ -318,6 +318,12 @@ class MolmoAct2Config(Config):
 
     # Flow matching
     flow_matching_num_steps: int = 10
+    # Number of independent (timestep, noise) samples drawn per training example
+    # and averaged in the flow-matching loss. The action expert is re-run per
+    # sample but the (expensive) VLM encoder runs once per example, so this is a
+    # cheap way to reduce per-step loss variance. Matches the reference MolmoAct2
+    # training recipe's default of 8.
+    num_flow_timesteps: int = 8
     flow_matching_cutoff: float = 1.0
     flow_matching_time_offset: float = 0.001
     flow_matching_time_scale: float = 0.999
@@ -673,6 +679,9 @@ class MolmoAct2Config(Config):
     def _validate_flow_matching_params(self) -> None:
         if self.flow_matching_num_steps < 1:
             msg = f"flow_matching_num_steps must be >= 1, got {self.flow_matching_num_steps}"
+            raise ValueError(msg)
+        if self.num_flow_timesteps < 1:
+            msg = f"num_flow_timesteps must be >= 1, got {self.num_flow_timesteps}"
             raise ValueError(msg)
         if not 0.0 <= self.flow_matching_cutoff <= 1.0:
             msg = f"flow_matching_cutoff must be in [0.0, 1.0], got {self.flow_matching_cutoff}"

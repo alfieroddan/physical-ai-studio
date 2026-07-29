@@ -465,6 +465,8 @@ def build_config_from_hf_config(  # noqa: PLR0913
     lora_dropout: float = 0.05,
     lora_bias: Literal["all", "lora_only", "none"] = "none",
     gradient_checkpointing: bool = False,
+    train_action_expert_only: bool = False,
+    num_flow_timesteps: int | None = None,
 ) -> MolmoAct2Config:
     """Build policy config from Hugging Face config and local overrides.
 
@@ -497,6 +499,15 @@ def build_config_from_hf_config(  # noqa: PLR0913
         lora_dropout: LoRA dropout rate.
         lora_bias: Which biases to train ('none', 'all', 'lora_only').
         gradient_checkpointing: Whether to enable gradient checkpointing.
+        train_action_expert_only: Freeze the VLM entirely and only train the
+            action expert (override of the HF container config). Incompatible
+            with ``use_lora``.
+        num_flow_timesteps: Number of independent (timestep, noise) samples
+            drawn per training example and averaged in the flow-matching loss
+            (variance reduction). ``None`` (default) uses the checkpoint's HF
+            ``config.json`` value when present, otherwise
+            :class:`MolmoAct2Config`'s own default (``8``). An explicit value
+            always overrides the checkpoint.
 
     Returns:
         Resolved `MolmoAct2Config` instance.
@@ -550,6 +561,7 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "max_action_dim",
         "n_action_steps",
         "n_obs_steps",
+        "num_flow_timesteps",
         "state_format",
         "use_random_input_noise",
     )
@@ -621,6 +633,13 @@ def build_config_from_hf_config(  # noqa: PLR0913
     config_data["lora_dropout"] = lora_dropout
     config_data["lora_bias"] = lora_bias
     config_data["gradient_checkpointing"] = gradient_checkpointing
+    config_data["train_action_expert_only"] = train_action_expert_only
+    # Unlike the fields above, an explicit override only wins when the caller
+    # actually supplies one; otherwise the value already pulled from the HF
+    # checkpoint's config.json by the top_level_keys loop (or MolmoAct2Config's
+    # own default) is left in place.
+    if num_flow_timesteps is not None:
+        config_data["num_flow_timesteps"] = num_flow_timesteps
 
     return MolmoAct2Config.from_dict(config_data)
 

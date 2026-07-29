@@ -324,6 +324,18 @@ class TestMolmoAct2Backbone:
 peft = pytest.importorskip("peft", reason="peft is required for LoRA tests")
 
 
+class TestMolmoAct2DeltaIndices:
+    """Dataset delta indices requested by the MolmoAct2 model frontend."""
+
+    def test_requests_action_chunk_only(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+        tiny_molmoact2_config.chunk_size = 10
+        model = MolmoAct2Model(tiny_molmoact2_config)
+
+        assert model.action_delta_indices == list(range(10))
+        assert model.observation_delta_indices is None
+        assert model.reward_delta_indices is None
+
+
 class TestMolmoAct2LoRA:
     """LoRA adapter application on the MolmoAct2 model frontend."""
 
