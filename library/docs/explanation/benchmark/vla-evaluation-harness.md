@@ -21,7 +21,7 @@ classDiagram
         +on_episode_start(config, ctx)
     }
 
-    class PhysicalAIHarness {
+      class PhysicalAIModelServer {
         +policy: dict
         +image_keys: dict
         +state_key: str
@@ -31,31 +31,37 @@ classDiagram
         +predict(obs, ctx) Action
     }
 
-    class Pi05LiberoServer {
+      class LiberoPi05ModelServer {
         +pretrained_name_or_path: str
         +device: str
     }
 
-    PredictModelServer <|-- PhysicalAIHarness
-    PhysicalAIHarness <|-- Pi05LiberoServer
-    PhysicalAIHarness --> Policy : loads or receives
+      PredictModelServer <|-- PhysicalAIModelServer
+      PhysicalAIModelServer <|-- LiberoPi05ModelServer
+      PhysicalAIModelServer --> Policy : loads or receives
 ```
 
-`PhysicalAIHarness` owns the reusable protocol bridge. A benchmark-specific
-server such as `Pi05LiberoServer` only owns policy construction and stable
+`PhysicalAIModelServer` owns the reusable protocol bridge. A benchmark-specific
+server such as `LiberoPi05ModelServer` only owns policy construction and stable
 defaults for a model-benchmark pair.
+
+Class names follow vla-eval conventions: package adapters use
+`{Package}ModelServer`, while benchmark-specific adapters use
+`{Benchmark}{Model}ModelServer`. Since these files already live under
+`model_servers/`, their filenames are simply `physicalai.py` and
+`libero_pi05.py`.
 
 ## Implementation
 
-### PhysicalAIHarness
+### PhysicalAIModelServer
 
-`PhysicalAIHarness` adapts a `physicalai.policies.Policy` or exported
+`PhysicalAIModelServer` adapts a `physicalai.policies.Policy` or exported
 `physicalai.inference.InferenceModel` to the `PredictModelServer` interface.
 The target configuration API accepts the policy declaration inline so one YAML
 describes the complete model server:
 
 ```python
-class PhysicalAIHarness(PredictModelServer):
+class PhysicalAIModelServer(PredictModelServer):
     def __init__(
         self,
         policy: dict[str, Any] | None = None,
@@ -79,7 +85,7 @@ There are two construction paths:
 Exactly one path is required. The inline path intentionally avoids inheriting
 or referencing a second policy YAML.
 
-The harness owns five pieces of shared behavior:
+The model server owns five pieces of shared behavior:
 
 1. **Policy lifecycle:** Instantiate the policy, move live `Policy` instances
    to the requested device, enter evaluation mode, and reset state between
@@ -110,10 +116,10 @@ dictionary outputs, and batch dimensions.
 
 Add a subclass when a model-benchmark pair needs custom loading,
 preprocessing, protocol behavior, or maintained defaults. The subclass should
-construct the policy and delegate shared behavior to `PhysicalAIHarness`:
+construct the policy and delegate shared behavior to `PhysicalAIModelServer`:
 
 ```python
-class Pi05LiberoServer(PhysicalAIHarness):
+class LiberoPi05ModelServer(PhysicalAIModelServer):
     def __init__(
         self,
         pretrained_name_or_path: str = "lerobot/pi05_libero_finetuned_v044",
@@ -132,7 +138,7 @@ class Pi05LiberoServer(PhysicalAIHarness):
 ```
 
 Prediction, specs, observation conversion, and episode reset behavior remain
-on the base harness unless the external protocol itself differs.
+on the base model server unless the external protocol itself differs.
 
 ## Key Features
 
@@ -163,14 +169,14 @@ by this integration:
 ```text
 benchmarks/vla-evaluation-harness/
 ├── configs/
-│   ├── pi05_libero_policy.yaml
+│   ├── physicalai_pi05_libero.yaml
 │   └── benchmarks/
 │       └── libero/
 │           ├── smoke_test.yaml
 │           └── 10.yaml
 └── model_servers/
-    ├── physicalai_harness.py
-    └── pi05_libero.py
+   ├── physicalai.py
+   └── libero_pi05.py
 ```
 
 Model-server configs construct and map the policy. Benchmark-run configs
@@ -183,7 +189,7 @@ of the installed package and are not a supported config source.
 ```mermaid
 sequenceDiagram
     participant User
-    participant Server as PhysicalAIHarness
+      participant Server as PhysicalAIModelServer
     participant Policy
     participant Harness as vla-eval
     participant Simulator as LIBERO container
@@ -209,8 +215,8 @@ sequenceDiagram
    LIBERO.
 3. **Select the benchmark:** Confirm that `vla-eval` supports it and choose the
    repository-owned run config.
-4. **Choose the integration path:** Use `PhysicalAIHarness` with YAML for the
-   standard interface, or add a small subclass for custom behavior.
+4. **Choose the integration path:** Use `PhysicalAIModelServer` with YAML for
+   the standard interface, or add a small subclass for custom behavior.
 5. **Smoke test, then evaluate:** Validate connectivity and data mapping before
    running the full benchmark suite.
 
@@ -243,6 +249,8 @@ benchmarks that run their simulator in a container.
 ### General Server
 
 ```yaml
+script: model_servers/physicalai.py
+port: 8000
 args:
   policy:
     class_path: physicalai.policies.pi05.Pi05
@@ -254,20 +262,19 @@ args:
   state_key: observation.state
   chunk_size: 10
   device: cuda
-  port: 8000
 ```
 
 ```bash
 cd library/benchmarks/vla-evaluation-harness
-python model_servers/physicalai_harness.py \
-  --config configs/pi05_libero_policy.yaml
+python model_servers/physicalai.py \
+   --config configs/physicalai_pi05_libero.yaml
 ```
 
 ### Benchmark-Specific Server
 
 ```bash
 cd library/benchmarks/vla-evaluation-harness
-python model_servers/pi05_libero.py --port 8000
+python model_servers/libero_pi05.py --port 8000
 ```
 
 ### Run LIBERO
