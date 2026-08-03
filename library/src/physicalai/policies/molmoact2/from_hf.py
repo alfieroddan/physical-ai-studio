@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
@@ -40,7 +40,6 @@ from .config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
     MolmoAct2Config,
-    MolmoAct2ProcessorConfig,
 )
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
@@ -440,7 +439,7 @@ def _resolve_feature_overrides(
     return resolved_features
 
 
-def build_config_from_hf_config(  # noqa: PLR0913
+def build_config_from_hf_config(
     hf_config: dict[str, Any],
     *,
     norm_stats: dict[str, Any] | None = None,
@@ -450,25 +449,10 @@ def build_config_from_hf_config(  # noqa: PLR0913
     checkpoint_path: str | None = None,
     repo_id: str | None = None,
     tokenizer_config: dict[str, Any] | None = None,
-    processor_config: dict[str, Any] | MolmoAct2ProcessorConfig | None = None,
-    n_obs_steps: int = 30,
-    n_action_steps: int = 30,
-    chunk_size: int = 30,
-    max_action_dim: int = 32,
-    action_mode: str = "continuous",
-    use_random_input_noise: bool = False,
-    torch_compile: bool = False,
-    use_lora: bool = False,
-    enable_lora_action_expert: bool = False,
-    lora_rank: int = 64,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
-    lora_bias: Literal["all", "lora_only", "none"] = "none",
-    gradient_checkpointing: bool = False,
-    train_action_expert_only: bool = False,
-    num_flow_timesteps: int | None = None,
+    processor_config: dict[str, Any] | None = None,
+    **overrides: Any,
 ) -> MolmoAct2Config:
-    """Build policy config from Hugging Face config and local overrides.
+    """Build a flat policy config from Hugging Face data and explicit overrides.
 
     Args:
         hf_config: Parsed Hugging Face `config.json` payload.
@@ -484,30 +468,8 @@ def build_config_from_hf_config(  # noqa: PLR0913
             carry into the config so the tokenizer can be rebuilt by downloading
             only ``tokenizer.json`` at runtime.
         processor_config: Optional pre-loaded processor config dict.
-        n_obs_steps: Observation horizon override.
-        n_action_steps: Number of executed action steps override.
-        chunk_size: Action chunk size override (must be >= n_action_steps).
-        max_action_dim: Maximum action dimension override.
-        action_mode: continous, discrete or both action generation.
-        use_random_input_noise: Start flow matching from sampled Gaussian noise
-            instead of zeros (override of the HF config value).
-        torch_compile: Whether to enable compiled inference in the resolved config.
-        use_lora: Whether to apply LoRA adapters to the VLM.
-        enable_lora_action_expert: Whether to also adapt the action expert.
-        lora_rank: LoRA rank.
-        lora_alpha: LoRA alpha scaling factor.
-        lora_dropout: LoRA dropout rate.
-        lora_bias: Which biases to train ('none', 'all', 'lora_only').
-        gradient_checkpointing: Whether to enable gradient checkpointing.
-        train_action_expert_only: Freeze the VLM entirely and only train the
-            action expert (override of the HF container config). Incompatible
-            with ``use_lora``.
-        num_flow_timesteps: Number of independent (timestep, noise) samples
-            drawn per training example and averaged in the flow-matching loss
-            (variance reduction). ``None`` (default) uses the checkpoint's HF
-            ``config.json`` value when present, otherwise
-            :class:`MolmoAct2Config`'s own default (``8``). An explicit value
-            always overrides the checkpoint.
+        **overrides: Flat :class:`MolmoAct2Config` values. ``None`` means
+            retain the value supplied by the checkpoint or dataclass default.
 
     Returns:
         Resolved `MolmoAct2Config` instance.
@@ -515,12 +477,84 @@ def build_config_from_hf_config(  # noqa: PLR0913
     Raises:
         ValueError: If ``checkpoint_path`` is ``None``.
     """
-    config_data: dict[str, Any] = {
-        "vit_config": _hf_component_config(hf_config, "vit_config"),
-        "adapter_config": _hf_component_config(hf_config, "adapter_config"),
-        "text_config": _hf_component_config(hf_config, "text_config"),
-        "action_expert_config": _hf_component_config(hf_config, "action_expert_config"),
+    config_data = MolmoAct2Config().to_dict()
+
+    component_field_maps = {
+        "vit_config": {
+            "hidden_size": "vision_hidden_size",
+            "intermediate_size": "vision_intermediate_size",
+            "num_hidden_layers": "vision_num_hidden_layers",
+            "num_attention_heads": "vision_num_attention_heads",
+            "num_key_value_heads": "vision_num_key_value_heads",
+            "head_dim": "vision_head_dim",
+            "hidden_act": "vision_hidden_act",
+            "layer_norm_eps": "vision_layer_norm_eps",
+            "image_default_input_size": "image_default_input_size",
+            "image_patch_size": "image_patch_size",
+            "image_num_pos": "image_num_pos",
+            "attention_dropout": "vision_attention_dropout",
+            "residual_dropout": "vision_residual_dropout",
+            "attn_implementation": "vision_attn_implementation",
+        },
+        "adapter_config": {
+            "vit_layers": "adapter_vit_layers",
+            "pooling_attention_mask": "adapter_pooling_attention_mask",
+            "hidden_size": "adapter_hidden_size",
+            "num_attention_heads": "adapter_num_attention_heads",
+            "num_key_value_heads": "adapter_num_key_value_heads",
+            "head_dim": "adapter_head_dim",
+            "attention_dropout": "adapter_attention_dropout",
+            "residual_dropout": "adapter_residual_dropout",
+            "hidden_act": "adapter_hidden_act",
+            "intermediate_size": "adapter_intermediate_size",
+            "text_hidden_size": "adapter_text_hidden_size",
+            "image_feature_dropout": "image_feature_dropout",
+            "attn_implementation": "adapter_attn_implementation",
+        },
+        "text_config": {
+            key: key
+            for key in (
+                "hidden_size",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "head_dim",
+                "vocab_size",
+                "additional_vocab_size",
+                "qkv_bias",
+                "num_hidden_layers",
+                "intermediate_size",
+                "hidden_act",
+                "max_position_embeddings",
+                "rope_theta",
+                "use_qk_norm",
+                "qk_norm_type",
+                "layer_norm_eps",
+                "norm_after",
+                "use_cache",
+            )
+        }
+        | {"attn_implementation": "text_attn_implementation"},
+        "action_expert_config": {
+            "max_action_horizon": "action_expert_max_action_horizon",
+            "max_action_dim": "action_expert_max_action_dim",
+            "hidden_size": "action_expert_hidden_size",
+            "num_layers": "action_expert_num_layers",
+            "num_heads": "action_expert_num_heads",
+            "mlp_ratio": "action_expert_mlp_ratio",
+            "ffn_multiple_of": "action_expert_ffn_multiple_of",
+            "timestep_embed_dim": "action_expert_timestep_embed_dim",
+            "context_layer_norm": "action_expert_context_layer_norm",
+            "qk_norm": "action_expert_qk_norm",
+            "qk_norm_eps": "action_expert_qk_norm_eps",
+            "rope": "action_expert_rope",
+            "causal_attn": "action_expert_causal_attn",
+        },
     }
+    for component_name, field_map in component_field_maps.items():
+        component_data = _hf_component_config(hf_config, component_name)
+        for source_key, target_key in field_map.items():
+            if source_key in component_data:
+                config_data[target_key] = component_data[source_key]
     if norm_tag is not None:
         pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
             hf_config,
@@ -566,9 +600,6 @@ def build_config_from_hf_config(  # noqa: PLR0913
         "use_random_input_noise",
     )
 
-    # Keys that now live on the nested ``MolmoAct2PreprocessorConfig`` rather
-    # than the top-level config. They are pulled from the HF ``config.json`` and
-    # routed into ``preprocessor_data`` below.
     preprocessor_keys = (
         "num_state_tokens",
         "add_setup_tokens",
@@ -576,22 +607,17 @@ def build_config_from_hf_config(  # noqa: PLR0913
     )
 
     for key in top_level_keys:
-        if key == "norm_tag" and norm_tag is not None:
-            continue
         if key in hf_config:
             config_data[key] = hf_config[key]
-
-    preprocessor_data: dict[str, Any] = {}
     for key in preprocessor_keys:
         if key in hf_config:
-            preprocessor_data[key] = hf_config[key]
+            config_data[key] = hf_config[key]
 
     config_data["norm_tag"] = norm_tag
     if checkpoint_path is None:
         msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
         raise ValueError(msg)
-    # Carry the resolved checkpoint snapshot directory on the config so a
-    # serialized+reconstructed config (and :meth:`MolmoAct2.from_config`) can
+    # Carry the resolved checkpoint snapshot directory on the config so it can
     # still locate the pretrained weights to load.
     config_data["checkpoint_path"] = checkpoint_path
     # Resolve the tokenizer source: prefer the original Hub repo id so the
@@ -599,47 +625,36 @@ def build_config_from_hf_config(  # noqa: PLR0913
     # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
     # tokenizer source so exported checkpoints still resolve the tokenizer once
     # the local snapshot directory is gone.
-    preprocessor_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
-    preprocessor_data["tokenizer_config"] = tokenizer_config
+    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
+    config_data["tokenizer_config"] = tokenizer_config
     # Hardcoded across MolmoAct2 variants (see ``config.py``); avoids
     # instantiating the tokenizer here just to look up the placeholder id.
     config_data["image_placeholder_token_id"] = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
-    if processor_config is not None and not isinstance(processor_config, MolmoAct2ProcessorConfig):
-        processor_config = MolmoAct2ProcessorConfig.from_dict(processor_config)
-    preprocessor_data["processor_config"] = processor_config
+    if processor_config is not None:
+        image_processor = processor_config.get("image_processor", processor_config)
+        processor_field_map = {
+            "crop_mode": "image_processor_crop_mode",
+            "image_mean": "image_processor_mean",
+            "image_std": "image_processor_std",
+            "patch_size": "image_processor_patch_size",
+            "pooling_size": "image_processor_pooling_size",
+            "size": "image_processor_size",
+        }
+        for source_key, target_key in processor_field_map.items():
+            if source_key in image_processor:
+                config_data[target_key] = image_processor[source_key]
 
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
-        preprocessor_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
-        preprocessor_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
-    config_data["n_obs_steps"] = n_obs_steps
-    config_data["n_action_steps"] = n_action_steps
-    config_data["chunk_size"] = chunk_size
-    config_data["max_action_dim"] = max_action_dim
-    config_data["action_mode"] = action_mode
-    config_data["use_random_input_noise"] = use_random_input_noise
+        config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
+        config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
 
-    config_data["preprocessor_config"] = preprocessor_data
-
-    if config_data.get("add_action_expert") is False:
-        config_data["action_expert_config"] = None
-
-    config_data["compile_model"] = bool(config_data.get("compile_model") or torch_compile)
-
-    config_data["use_lora"] = use_lora
-    config_data["enable_lora_action_expert"] = enable_lora_action_expert
-    config_data["lora_rank"] = lora_rank
-    config_data["lora_alpha"] = lora_alpha
-    config_data["lora_dropout"] = lora_dropout
-    config_data["lora_bias"] = lora_bias
-    config_data["gradient_checkpointing"] = gradient_checkpointing
-    config_data["train_action_expert_only"] = train_action_expert_only
-    # Unlike the fields above, an explicit override only wins when the caller
-    # actually supplies one; otherwise the value already pulled from the HF
-    # checkpoint's config.json by the top_level_keys loop (or MolmoAct2Config's
-    # own default) is left in place.
-    if num_flow_timesteps is not None:
-        config_data["num_flow_timesteps"] = num_flow_timesteps
+    valid_fields = set(config_data)
+    unknown = set(overrides) - valid_fields
+    if unknown:
+        msg = f"Unknown MolmoAct2 override(s): {sorted(unknown)}"
+        raise TypeError(msg)
+    config_data.update({key: value for key, value in overrides.items() if value is not None})
 
     return MolmoAct2Config.from_dict(config_data)
 

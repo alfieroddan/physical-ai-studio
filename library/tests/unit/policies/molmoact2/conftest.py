@@ -21,18 +21,14 @@ from physicalai.data.observation import Feature, FeatureType, NormalizationParam
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-    MolmoAct2ActionExpertConfig,
-    MolmoAct2AdapterConfig,
     MolmoAct2Config,
-    MolmoAct2PreprocessorConfig,
-    MolmoAct2TextConfig,
-    MolmoAct2VitConfig,
 )
 
 
-def _tiny_text_config() -> MolmoAct2TextConfig:
-    """A minimal text config that preserves divisibility constraints."""
-    return MolmoAct2TextConfig(
+@pytest.fixture
+def tiny_molmoact2_config() -> MolmoAct2Config:
+    """A minimal config suitable for instantiating model components in tests."""
+    return MolmoAct2Config(
         hidden_size=64,
         num_attention_heads=4,
         num_key_value_heads=4,
@@ -42,63 +38,32 @@ def _tiny_text_config() -> MolmoAct2TextConfig:
         num_hidden_layers=1,
         intermediate_size=128,
         max_position_embeddings=64,
-    )
-
-
-def _tiny_vit_config() -> MolmoAct2VitConfig:
-    return MolmoAct2VitConfig(
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=1,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        head_dim=16,
+        vision_hidden_size=64,
+        vision_intermediate_size=128,
+        vision_num_hidden_layers=1,
+        vision_num_attention_heads=4,
+        vision_num_key_value_heads=4,
+        vision_head_dim=16,
         image_default_input_size=(28, 28),
         image_patch_size=14,
         image_num_pos=4,
-    )
-
-
-def _tiny_adapter_config() -> MolmoAct2AdapterConfig:
-    return MolmoAct2AdapterConfig(
-        hidden_size=64,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        head_dim=16,
-        intermediate_size=128,
-        text_hidden_size=64,
-    )
-
-
-def _tiny_action_expert_config() -> MolmoAct2ActionExpertConfig:
-    return MolmoAct2ActionExpertConfig(
-        max_action_horizon=4,
-        max_action_dim=4,
-        hidden_size=64,
-        num_layers=1,
-        num_heads=4,
-        mlp_ratio=2.0,
-        ffn_multiple_of=16,
-        timestep_embed_dim=16,
-    )
-
-
-@pytest.fixture
-def tiny_molmoact2_config() -> MolmoAct2Config:
-    """A minimal config suitable for instantiating model components in tests."""
-    return MolmoAct2Config(
-        vit_config=_tiny_vit_config(),
-        adapter_config=_tiny_adapter_config(),
-        text_config=_tiny_text_config(),
-        action_expert_config=_tiny_action_expert_config(),
+        adapter_hidden_size=64,
+        adapter_num_attention_heads=4,
+        adapter_num_key_value_heads=4,
+        adapter_head_dim=16,
+        adapter_intermediate_size=128,
+        adapter_text_hidden_size=64,
+        action_expert_hidden_size=64,
+        action_expert_num_heads=4,
+        action_expert_mlp_ratio=2.0,
+        action_expert_ffn_multiple_of=16,
+        action_expert_timestep_embed_dim=16,
         n_obs_steps=2,
         chunk_size=4,
         n_action_steps=2,
         max_action_dim=4,
         image_placeholder_token_id=MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-        preprocessor_config=MolmoAct2PreprocessorConfig(
-            tokenizer_name_or_path=DEFAULT_MOLMOACT2_REPO_ID,
-        ),
+        tokenizer_name_or_path=DEFAULT_MOLMOACT2_REPO_ID,
     )
 
 

@@ -5,24 +5,12 @@
 
 """MolmoAct2 Policy."""
 
-from .config import (
-    MolmoAct2ActionExpertConfig,
-    MolmoAct2AdapterConfig,
-    MolmoAct2Config,
-    MolmoAct2ProcessorConfig,
-    MolmoAct2TextConfig,
-    MolmoAct2VitConfig,
-)
+from .config import MolmoAct2Config
 from .model import MolmoAct2Model
 from .policy import MolmoAct2
 
 __all__ = [
     "MolmoAct2",
-    "MolmoAct2ActionExpertConfig",
-    "MolmoAct2AdapterConfig",
     "MolmoAct2Config",
     "MolmoAct2Model",
-    "MolmoAct2ProcessorConfig",
-    "MolmoAct2TextConfig",
-    "MolmoAct2VitConfig",
 ]

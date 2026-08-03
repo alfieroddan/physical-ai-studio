@@ -58,14 +58,66 @@ class MolmoAct2Backbone(nn.Module):
         """Build the text decoder, vision backbone and (optional) action expert."""
         super().__init__()
         self.config = config
-        self.transformer = MolmoAct2TextModel(config.text_config)
-        self.vision_backbone = MolmoAct2VisionBackbone(config.vit_config, config.adapter_config)
+        self.transformer = MolmoAct2TextModel(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            vocab_size=config.vocab_size,
+            additional_vocab_size=config.additional_vocab_size,
+            qkv_bias=config.qkv_bias,
+            num_hidden_layers=config.num_hidden_layers,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            rope_theta=config.rope_theta,
+            use_qk_norm=config.use_qk_norm,
+            qk_norm_type=config.qk_norm_type,
+            layer_norm_eps=config.layer_norm_eps,
+            norm_after=config.norm_after,
+        )
+        self.vision_backbone = MolmoAct2VisionBackbone(
+            vision_hidden_size=config.vision_hidden_size,
+            vision_intermediate_size=config.vision_intermediate_size,
+            vision_num_hidden_layers=config.vision_num_hidden_layers,
+            vision_num_attention_heads=config.vision_num_attention_heads,
+            vision_num_key_value_heads=config.vision_num_key_value_heads,
+            vision_head_dim=config.vision_head_dim,
+            vision_hidden_act=config.vision_hidden_act,
+            vision_layer_norm_eps=config.vision_layer_norm_eps,
+            image_default_input_size=config.image_default_input_size,
+            image_patch_size=config.image_patch_size,
+            image_num_pos=config.image_num_pos,
+            vision_attention_dropout=config.vision_attention_dropout,
+            vision_residual_dropout=config.vision_residual_dropout,
+            adapter_vit_layers=config.adapter_vit_layers,
+            adapter_pooling_attention_mask=config.adapter_pooling_attention_mask,
+            adapter_hidden_size=config.adapter_hidden_size,
+            adapter_num_attention_heads=config.adapter_num_attention_heads,
+            adapter_num_key_value_heads=config.adapter_num_key_value_heads,
+            adapter_head_dim=config.adapter_head_dim,
+            adapter_attention_dropout=config.adapter_attention_dropout,
+            adapter_residual_dropout=config.adapter_residual_dropout,
+            adapter_hidden_act=config.adapter_hidden_act,
+            adapter_intermediate_size=config.adapter_intermediate_size,
+            adapter_text_hidden_size=config.adapter_text_hidden_size,
+            image_feature_dropout=config.image_feature_dropout,
+        )
         self.action_expert: ActionExpert | None = None
-        if config.add_action_expert and config.action_expert_config is not None:
+        if config.add_action_expert:
             self.action_expert = ActionExpert(
-                config.action_expert_config,
+                max_action_dim=config.action_expert_max_action_dim,
+                hidden_size=config.action_expert_hidden_size,
+                num_layers=config.action_expert_num_layers,
+                num_heads=config.action_expert_num_heads,
+                mlp_ratio=config.action_expert_mlp_ratio,
+                ffn_multiple_of=config.action_expert_ffn_multiple_of,
+                timestep_embed_dim=config.action_expert_timestep_embed_dim,
+                context_layer_norm=config.action_expert_context_layer_norm,
+                qk_norm=config.action_expert_qk_norm,
+                qk_norm_eps=config.action_expert_qk_norm_eps,
+                rope=config.action_expert_rope,
                 llm_kv_dim=config.num_key_value_heads * config.head_dim,
-                llm_num_layers=config.text_config.num_hidden_layers,
+                llm_num_layers=config.num_hidden_layers,
             )
 
     def _require_action_expert(self) -> ActionExpert:
@@ -394,7 +446,7 @@ class MolmoAct2ForConditionalGeneration(nn.Module):
         self.config = config
         self.model = MolmoAct2Backbone(config)
         self.lm_head = nn.Linear(
-            config.text_config.hidden_size,
-            config.text_config.vocab_size,
+            config.hidden_size,
+            config.vocab_size,
             bias=False,
         )

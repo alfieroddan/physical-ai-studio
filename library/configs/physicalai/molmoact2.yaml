@@ -19,7 +19,7 @@ model:
     # from the pre-#777 LeRobot calibration checkpoint)
     adapt_to_so101: false
     # Compile-oriented config flags
-    torch_compile: false
+    compile_model: false
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule

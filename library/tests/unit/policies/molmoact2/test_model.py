@@ -14,7 +14,7 @@ import torch
 
 from physicalai.data.observation import ACTION
 from physicalai.policies.molmoact2.config import MolmoAct2Config
-from physicalai.policies.molmoact2.model.action_expert import (
+from physicalai.policies.molmoact2.action_expert import (
     ActionExpert,
     ActionExpertContext,
     ActionExpertFinalLayer,
@@ -27,12 +27,12 @@ from physicalai.policies.molmoact2.model.action_expert import (
     _modulate,
     _round_up_multiple,
 )
-from physicalai.policies.molmoact2.model.backbone import (
+from physicalai.policies.molmoact2.backbone import (
     MolmoAct2Backbone,
     MolmoAct2ForConditionalGeneration,
     _sample_beta_timesteps,
 )
-from physicalai.policies.molmoact2.model.text import (
+from physicalai.policies.molmoact2.text import (
     MolmoAct2Attention,
     MolmoAct2Embedding,
     MolmoAct2RMSNorm,
@@ -42,8 +42,8 @@ from physicalai.policies.molmoact2.model.text import (
     repeat_kv,
     rotate_half,
 )
-from physicalai.policies.molmoact2.model.vision import MolmoAct2VisionBackbone
-from physicalai.policies.molmoact2.model.wrapper import MolmoAct2Model, _masked_action_mse
+from physicalai.policies.molmoact2.model import MolmoAct2Model, _masked_action_mse
+from physicalai.policies.molmoact2.vision import MolmoAct2VisionBackbone
 
 
 class TestRoundUpMultiple:

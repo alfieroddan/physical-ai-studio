@@ -11,13 +11,7 @@ from physicalai.config import Config
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-    MolmoAct2ActionExpertConfig,
-    MolmoAct2AdapterConfig,
     MolmoAct2Config,
-    MolmoAct2ImageProcessorConfig,
-    MolmoAct2ProcessorConfig,
-    MolmoAct2TextConfig,
-    MolmoAct2VitConfig,
 )
 
 
@@ -68,27 +62,21 @@ class TestMolmoAct2Config:
         assert isinstance(config, Config)
 
     def test_serialization_round_trip(self) -> None:
-        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
-
-        training = MolmoAct2TrainingConfig(optimizer_lr=1e-4)
-        config = MolmoAct2Config(chunk_size=12, n_action_steps=6, training_config=training, max_action_dim=8)
+        config = MolmoAct2Config(chunk_size=12, n_action_steps=6, optimizer_lr=1e-4, max_action_dim=8)
         data = config.to_dict()
         assert data["chunk_size"] == 12
-        assert data["training_config"]["optimizer_lr"] == 1e-4
+        assert data["optimizer_lr"] == 1e-4
         restored = MolmoAct2Config.from_dict(data)
         assert restored.chunk_size == 12
         assert restored.n_action_steps == 6
         assert restored.max_action_dim == 8
-        assert restored.training_config.optimizer_lr == 1e-4
+        assert restored.optimizer_lr == 1e-4
 
     def test_serializer_carries_tokenizer_config(self) -> None:
-        from physicalai.policies.molmoact2.config import MolmoAct2PreprocessorConfig
-
         tok_cfg = {"bos_token": "<|im_end|>", "pad_token": ""}
-        pre = MolmoAct2PreprocessorConfig(tokenizer_config=tok_cfg)
-        config = MolmoAct2Config(preprocessor_config=pre)
+        config = MolmoAct2Config(tokenizer_config=tok_cfg)
         data = config.to_dict()
-        assert data["preprocessor_config"]["tokenizer_config"] == tok_cfg
+        assert data["tokenizer_config"] == tok_cfg
         restored = MolmoAct2Config.from_dict(data)
         assert restored.tokenizer_config == tok_cfg
 
@@ -172,87 +160,30 @@ class TestMolmoAct2Config:
             MolmoAct2Config(flow_matching_beta_beta=-1.0)
 
     def test_optimizer_lr_validation(self) -> None:
-        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
-
         with pytest.raises(ValueError, match="optimizer_lr"):
-            MolmoAct2Config(training_config=MolmoAct2TrainingConfig(optimizer_lr=0.0))
+            MolmoAct2Config(optimizer_lr=0.0)
 
     def test_scheduler_warmup_validation(self) -> None:
-        from physicalai.policies.molmoact2.config import MolmoAct2TrainingConfig
-
         with pytest.raises(ValueError, match="scheduler_warmup_steps"):
-            MolmoAct2Config(training_config=MolmoAct2TrainingConfig(scheduler_warmup_steps=-1))
+            MolmoAct2Config(scheduler_warmup_steps=-1)
 
-    def test_text_config_property_aliases(self) -> None:
-        text = MolmoAct2TextConfig(hidden_size=128, num_attention_heads=4, num_hidden_layers=2)
-        config = MolmoAct2Config(text_config=text)
+    def test_text_fields_are_flat(self) -> None:
+        config = MolmoAct2Config(hidden_size=128, num_attention_heads=4, num_hidden_layers=2)
         assert config.hidden_size == 128
         assert config.num_attention_heads == 4
         assert config.num_hidden_layers == 2
-        assert config.vocab_size == text.vocab_size
-        assert config.max_position_embeddings == text.max_position_embeddings
-        assert config.use_cache is text.use_cache
+        assert config.vocab_size == 152_064
+        assert config.max_position_embeddings == 4096
+        assert config.use_cache is True
 
     def test_image_num_patch_property(self) -> None:
-        vit = MolmoAct2VitConfig(image_default_input_size=(28, 28), image_patch_size=14)
-        config = MolmoAct2Config(vit_config=vit)
+        config = MolmoAct2Config(image_default_input_size=(28, 28), image_patch_size=14)
         assert config.image_num_patch == (2, 2)
 
-    def test_add_action_expert_false_clears_config(self) -> None:
+    def test_add_action_expert_false_keeps_flat_settings(self) -> None:
         config = MolmoAct2Config(add_action_expert=False)
-        assert config.action_expert_config is None
+        assert config.action_expert_num_layers == config.num_hidden_layers
 
     def test_state_format_discrete_only(self) -> None:
         with pytest.raises(ValueError, match="state_format"):
             MolmoAct2Config(state_format="continuous")  # type: ignore[arg-type]
-
-
-class TestMolmoAct2TextConfig:
-    def test_default_config(self) -> None:
-        config = MolmoAct2TextConfig()
-        assert config.hidden_size == 3584
-        assert config.num_hidden_layers == 48
-        assert config.num_attention_heads == 28
-        assert config.head_dim == 128
-        assert config.vocab_size == 152_064
-
-    def test_default_key_value_heads_resolved(self) -> None:
-        config = MolmoAct2TextConfig(num_key_value_heads=None)
-        assert config.num_key_value_heads == config.num_attention_heads
-
-    def test_invalid_num_attention_heads(self) -> None:
-        with pytest.raises(ValueError, match="num_attention_heads"):
-            MolmoAct2TextConfig(num_attention_heads=0)
-
-    def test_invalid_num_key_value_heads(self) -> None:
-        with pytest.raises(ValueError, match="num_key_value_heads"):
-            MolmoAct2TextConfig(num_key_value_heads=0)
-
-
-class TestMolmoAct2VitConfig:
-    def test_image_num_patch(self) -> None:
-        config = MolmoAct2VitConfig(image_default_input_size=(56, 84), image_patch_size=14)
-        assert config.image_num_patch == (4, 6)
-
-
-class TestMolmoAct2ActionExpertConfig:
-    def test_default_config(self) -> None:
-        config = MolmoAct2ActionExpertConfig()
-        assert config.max_action_horizon == 32
-        assert config.max_action_dim == 32
-        assert config.num_layers == 32
-
-
-class TestMolmoAct2ProcessorConfig:
-    def test_default_config(self) -> None:
-        config = MolmoAct2ProcessorConfig()
-        assert config.image_use_col_tokens is True
-        assert isinstance(config.image_processor, MolmoAct2ImageProcessorConfig)
-
-    def test_coerce_from_dict(self) -> None:
-        payload = {
-            "image_processor": {"size": {"height": 7, "width": 7}},
-        }
-        config = MolmoAct2ProcessorConfig.from_dict(payload)
-        assert isinstance(config.image_processor, MolmoAct2ImageProcessorConfig)
-        assert config.image_processor.size["height"] == 7

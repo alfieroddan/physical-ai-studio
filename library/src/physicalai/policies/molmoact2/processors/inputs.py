@@ -120,16 +120,11 @@ def _image_token_ids_for_grid(config: MolmoAct2Config, grid: torch.Tensor) -> li
         else image_start_token_id
     )
 
-    processor_config = config.processor_config
-    image_use_col_tokens = bool(processor_config.image_use_col_tokens) if processor_config is not None else True
+    image_use_col_tokens = bool(config.image_use_col_tokens)
     use_single_crop_col_tokens = (
-        image_use_col_tokens
-        if processor_config is None or processor_config.use_single_crop_col_tokens is None
-        else bool(processor_config.use_single_crop_col_tokens)
+        image_use_col_tokens if config.use_single_crop_col_tokens is None else bool(config.use_single_crop_col_tokens)
     )
-    use_single_crop_start_token = (
-        bool(processor_config.use_single_crop_start_token) if processor_config is not None else True
-    )
+    use_single_crop_start_token = bool(config.use_single_crop_start_token)
 
     def make_rows(num_rows: int, num_cols: int, *, use_col: bool) -> list[int]:
         row = [image_patch_id] * num_cols

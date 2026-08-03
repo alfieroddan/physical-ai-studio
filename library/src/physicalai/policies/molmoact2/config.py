@@ -35,74 +35,41 @@ MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID = 154629
 
 
 @dataclass
-class MolmoAct2VitConfig(Config):
-    """Vision transformer component configuration for MolmoAct2."""
+class MolmoAct2Config(Config):
+    """Flat canonical configuration for the MolmoAct2 policy and model.
 
-    hidden_size: int = 1152
-    intermediate_size: int = 4304
-    num_hidden_layers: int = 27
-    num_attention_heads: int = 16
-    num_key_value_heads: int = 16
-    head_dim: int = 72
-    hidden_act: str = "gelu_pytorch_tanh"
-    layer_norm_eps: float = 1e-6
-    image_default_input_size: tuple[int, int] = (378, 378)
-    image_patch_size: int = 14
-    image_num_pos: int = 577
-    attention_dropout: float = 0.0
-    residual_dropout: float = 0.0
-    attn_implementation: str = "eager"
+    Fields are intentionally owned by this single dataclass. Component
+    constructors receive only the arguments they declare; they do not receive
+    or mutate this policy-level config.
 
-    @property
-    def image_num_patch(self) -> tuple[int, int]:
-        """(height_patches, width_patches) for configured input size."""
-        h, w = self.image_default_input_size
-        return h // self.image_patch_size, w // self.image_patch_size
+    Args:
+        Text fields: ``hidden_size`` through ``text_attn_implementation``
+            define the language transformer.
+        Vision fields: ``vision_hidden_size`` through
+            ``vision_attn_implementation`` define the image encoder.
+        Adapter fields: ``adapter_vit_layers`` through
+            ``adapter_attn_implementation`` define image pooling and
+            projection into text space.
+        Action-expert fields: ``action_expert_max_action_horizon`` through
+            ``action_expert_causal_attn`` define the flow-matching denoiser.
+        Preprocessor fields: ``num_state_tokens`` through
+            ``normalization_mode`` define tokenization, image processing, and
+            observation/action normalization.
+        Training fields: ``optimizer_lr`` through ``scheduler_decay_lr``
+            define optimizer and learning-rate schedule settings.
+        Rollout and flow-matching fields: ``n_obs_steps``, ``chunk_size``,
+            ``n_action_steps``, and ``flow_matching_*`` control action chunk
+            generation and training targets.
+        Runtime fields: ``compile_model``, LoRA fields, and checkpoint fields
+            control compilation, fine-tuning, and pretrained asset loading.
 
-    @property
-    def _attn_implementation(self) -> str:
-        """HF-compat alias used by the backbone internals."""
-        return self.attn_implementation
+    A policy builds this config from defaults or a pretrained checkpoint, then
+    applies only explicit non-``None`` constructor overrides.
+    """
 
-    @_attn_implementation.setter
-    def _attn_implementation(self, value: str | None) -> None:
-        self.attn_implementation = "eager" if value is None else str(value)
+    model_type: str = "molmoact2"
 
-
-@dataclass
-class MolmoAct2AdapterConfig(Config):
-    """Vision adapter/pooling component configuration for MolmoAct2."""
-
-    vit_layers: tuple[int, ...] = (-3, -9)
-    pooling_attention_mask: bool = False
-    hidden_size: int = 1152
-    num_attention_heads: int = 16
-    num_key_value_heads: int = 16
-    head_dim: int = 72
-    attention_dropout: float = 0.0
-    residual_dropout: float = 0.0
-    hidden_act: str = "silu"
-    intermediate_size: int = 18_944
-    text_hidden_size: int = 3584
-    image_feature_dropout: float = 0.0
-    attn_implementation: str = "eager"
-
-    @property
-    def _attn_implementation(self) -> str:
-        """HF-compat alias used by the backbone internals."""
-        return self.attn_implementation
-
-    @_attn_implementation.setter
-    def _attn_implementation(self, value: str | None) -> None:
-        self.attn_implementation = "eager" if value is None else str(value)
-
-
-@dataclass
-class MolmoAct2TextConfig(Config):
-    """Text transformer component configuration for MolmoAct2."""
-
-    model_type: str = "molmoact2_text"
-
+    # Text transformer
     hidden_size: int = 3584
     num_attention_heads: int = 28
     num_key_value_heads: int | None = 4
@@ -120,86 +87,55 @@ class MolmoAct2TextConfig(Config):
     layer_norm_eps: float = 1e-6
     norm_after: bool = False
     use_cache: bool = True
-    attn_implementation: str = "eager"
+    text_attn_implementation: str = "eager"
 
-    def __post_init__(self) -> None:
-        """Validate and normalize text-attention head settings.
+    # Vision transformer
+    vision_hidden_size: int = 1152
+    vision_intermediate_size: int = 4304
+    vision_num_hidden_layers: int = 27
+    vision_num_attention_heads: int = 16
+    vision_num_key_value_heads: int = 16
+    vision_head_dim: int = 72
+    vision_hidden_act: str = "gelu_pytorch_tanh"
+    vision_layer_norm_eps: float = 1e-6
+    image_default_input_size: tuple[int, int] = (378, 378)
+    image_patch_size: int = 14
+    image_num_pos: int = 577
+    vision_attention_dropout: float = 0.0
+    vision_residual_dropout: float = 0.0
+    vision_attn_implementation: str = "eager"
 
-        Raises:
-            ValueError: If any attention-head setting is invalid.
-        """
-        if self.num_key_value_heads is None:
-            self.num_key_value_heads = self.num_attention_heads
-        if self.num_attention_heads < 1:
-            msg = f"num_attention_heads must be >= 1, got {self.num_attention_heads}"
-            raise ValueError(msg)
-        if self.num_key_value_heads < 1:
-            msg = f"num_key_value_heads must be >= 1, got {self.num_key_value_heads}"
-            raise ValueError(msg)
+    # Vision adapter
+    adapter_vit_layers: tuple[int, ...] = (-3, -9)
+    adapter_pooling_attention_mask: bool = False
+    adapter_hidden_size: int = 1152
+    adapter_num_attention_heads: int = 16
+    adapter_num_key_value_heads: int = 16
+    adapter_head_dim: int = 72
+    adapter_attention_dropout: float = 0.0
+    adapter_residual_dropout: float = 0.0
+    adapter_hidden_act: str = "silu"
+    adapter_intermediate_size: int = 18_944
+    adapter_text_hidden_size: int = 3584
+    image_feature_dropout: float = 0.0
+    adapter_attn_implementation: str = "eager"
 
-    @property
-    def _attn_implementation(self) -> str:
-        """HF-compat alias used by the decoder layer internals."""
-        return self.attn_implementation
+    # Action expert
+    action_expert_max_action_horizon: int = 32
+    action_expert_max_action_dim: int = 32
+    action_expert_hidden_size: int = 1024
+    action_expert_num_layers: int = 32
+    action_expert_num_heads: int = 16
+    action_expert_mlp_ratio: float = 8.0 / 3.0
+    action_expert_ffn_multiple_of: int = 256
+    action_expert_timestep_embed_dim: int = 256
+    action_expert_context_layer_norm: bool = True
+    action_expert_qk_norm: bool = True
+    action_expert_qk_norm_eps: float = 1e-6
+    action_expert_rope: bool = True
+    action_expert_causal_attn: bool = False
 
-    @_attn_implementation.setter
-    def _attn_implementation(self, value: str | None) -> None:
-        self.attn_implementation = "eager" if value is None else str(value)
-
-
-@dataclass
-class MolmoAct2ActionExpertConfig(Config):
-    """Action expert component configuration for MolmoAct2."""
-
-    max_action_horizon: int = 32
-    max_action_dim: int = 32
-    hidden_size: int = 1024
-    num_layers: int = 32
-    num_heads: int = 16
-    mlp_ratio: float = 8.0 / 3.0
-    ffn_multiple_of: int = 256
-    timestep_embed_dim: int = 256
-    context_layer_norm: bool = True
-    qk_norm: bool = True
-    qk_norm_eps: float = 1e-6
-    rope: bool = True
-    causal_attn: bool = False
-
-
-@dataclass
-class MolmoAct2ImageProcessorConfig(Config):
-    """Image processor configuration for MolmoAct2."""
-
-    crop_mode: str = "resize"
-    image_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    image_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
-    patch_size: int = 14
-    pooling_size: list[int] = field(default_factory=lambda: [2, 2])
-    size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
-
-
-@dataclass
-class MolmoAct2ProcessorConfig(Config):
-    """Processor configuration for MolmoAct2."""
-
-    image_processor: MolmoAct2ImageProcessorConfig = field(default_factory=MolmoAct2ImageProcessorConfig)
-    image_use_col_tokens: bool = True
-    use_single_crop_col_tokens: bool | None = False
-    use_single_crop_start_token: bool = True
-
-    def _coerce_nested_configs(self) -> None:
-        if isinstance(self.image_processor, dict):
-            self.image_processor = MolmoAct2ImageProcessorConfig.from_dict(self.image_processor)
-
-    def __post_init__(self) -> None:
-        """Coerce nested processor configs into their typed dataclass forms."""
-        self._coerce_nested_configs()
-
-
-@dataclass
-class MolmoAct2PreprocessorConfig(Config):
-    """Preprocessor-side configuration for MolmoAct2."""
-
+    # Preprocessor and image processor
     num_state_tokens: int = 0
     setup_type: str = ""
     control_mode: str = ""
@@ -207,28 +143,18 @@ class MolmoAct2PreprocessorConfig(Config):
     add_control_tokens: bool = True
     tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
     tokenizer_config: dict[str, Any] | None = None
-    processor_config: MolmoAct2ProcessorConfig | None = None
-
-    def _coerce_nested_configs(self) -> None:
-        if isinstance(self.processor_config, dict):
-            self.processor_config = MolmoAct2ProcessorConfig.from_dict(self.processor_config)
-
-    def __post_init__(self) -> None:
-        """Coerce nested processor config into its typed dataclass form."""
-        self._coerce_nested_configs()
-
-
-@dataclass
-class MolmoAct2PostprocessorConfig(Config):
-    """Postprocessor-side configuration for MolmoAct2."""
-
+    image_processor_crop_mode: str = "resize"
+    image_processor_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    image_processor_std: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    image_processor_patch_size: int = 14
+    image_processor_pooling_size: list[int] = field(default_factory=lambda: [2, 2])
+    image_processor_size: dict[str, int] = field(default_factory=lambda: {"height": 378, "width": 378})
+    image_use_col_tokens: bool = True
+    use_single_crop_col_tokens: bool | None = False
+    use_single_crop_start_token: bool = True
     normalization_mode: str = "QUANTILES"
 
-
-@dataclass
-class MolmoAct2TrainingConfig(Config):
-    """Training (optimizer + scheduler) configuration for MolmoAct2."""
-
+    # Training
     optimizer_lr: float = 1e-5
     optimizer_vit_lr: float = 5e-6
     optimizer_connector_lr: float = 5e-6
@@ -240,55 +166,6 @@ class MolmoAct2TrainingConfig(Config):
     scheduler_warmup_steps: int = 200
     scheduler_decay_steps: int | None = 100_000
     scheduler_decay_lr: float = 1e-6
-
-    def __post_init__(self) -> None:
-        """Validate optimizer and scheduler parameters after initialization."""
-        self._validate_scheduler_params()
-        self._validate_optimizer_params()
-
-    def _validate_scheduler_params(self) -> None:
-        if self.scheduler_warmup_steps < 0:
-            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
-            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_lr < 0.0:
-            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
-            raise ValueError(msg)
-
-    def _validate_optimizer_params(self) -> None:
-        if self.optimizer_action_expert_lr <= 0.0:
-            msg = f"optimizer_action_expert_lr must be > 0.0, got {self.optimizer_action_expert_lr}"
-            raise ValueError(msg)
-        if self.optimizer_lr <= 0.0:
-            msg = f"optimizer_lr must be > 0.0, got {self.optimizer_lr}"
-            raise ValueError(msg)
-        if self.optimizer_vit_lr <= 0.0:
-            msg = f"optimizer_vit_lr must be > 0.0, got {self.optimizer_vit_lr}"
-            raise ValueError(msg)
-        if self.optimizer_connector_lr <= 0.0:
-            msg = f"optimizer_connector_lr must be > 0.0, got {self.optimizer_connector_lr}"
-            raise ValueError(msg)
-        if self.optimizer_eps <= 0.0:
-            msg = f"optimizer_eps must be > 0.0, got {self.optimizer_eps}"
-            raise ValueError(msg)
-
-
-@dataclass  # noqa: PLR0904
-class MolmoAct2Config(Config):
-    """Top-level configuration for MolmoAct2 with split component sub-configs."""
-
-    model_type: str = "molmoact2"
-
-    # Component sub-configs
-    vit_config: MolmoAct2VitConfig = field(default_factory=MolmoAct2VitConfig)
-    adapter_config: MolmoAct2AdapterConfig = field(default_factory=MolmoAct2AdapterConfig)
-    text_config: MolmoAct2TextConfig = field(default_factory=MolmoAct2TextConfig)
-    action_expert_config: MolmoAct2ActionExpertConfig | None = field(default_factory=MolmoAct2ActionExpertConfig)
-    preprocessor_config: MolmoAct2PreprocessorConfig = field(default_factory=MolmoAct2PreprocessorConfig)
-    postprocessor_config: MolmoAct2PostprocessorConfig = field(default_factory=MolmoAct2PostprocessorConfig)
-    training_config: MolmoAct2TrainingConfig = field(default_factory=MolmoAct2TrainingConfig)
 
     # Input and rollout structure
     n_obs_steps: int = 30
@@ -350,9 +227,8 @@ class MolmoAct2Config(Config):
 
     # Local path to the pretrained checkpoint snapshot directory carrying
     # ``model.safetensors`` (and the processor/tokenizer assets). Populated by
-    # ``build_config_from_hf_config`` so a serialized+reconstructed config can
-    # still locate its weights (used by :meth:`MolmoAct2.from_config`). Left
-    # ``None`` for configs built by :func:`make_molmoact2_config`.
+    # ``build_config_from_hf_config`` so the policy can locate its weights.
+    # Left ``None`` for configs built by :func:`make_molmoact2_config`.
     checkpoint_path: str | None = None
 
     # Runtime options
@@ -375,271 +251,18 @@ class MolmoAct2Config(Config):
     lora_dropout: float = 0.05
     lora_bias: Literal["all", "lora_only", "none"] = "none"
 
-    # Backward-compat property aliases for fields moved into nested sub-configs.
-    # These keep existing callers (preprocessor, postprocessor, model, policy,
-    # ``from_hf.py``) working unchanged while the canonical home is the nested
-    # config. Prefer accessing the nested config directly in new code.
-
-    @property
-    def num_state_tokens(self) -> int:
-        """Alias for ``preprocessor_config.num_state_tokens``."""
-        return self.preprocessor_config.num_state_tokens
-
-    @num_state_tokens.setter
-    def num_state_tokens(self, value: int) -> None:
-        self.preprocessor_config.num_state_tokens = int(value)
-
-    @property
-    def setup_type(self) -> str:
-        """Alias for ``preprocessor_config.setup_type``."""
-        return self.preprocessor_config.setup_type
-
-    @setup_type.setter
-    def setup_type(self, value: str) -> None:
-        self.preprocessor_config.setup_type = str(value)
-
-    @property
-    def control_mode(self) -> str:
-        """Alias for ``preprocessor_config.control_mode``."""
-        return self.preprocessor_config.control_mode
-
-    @control_mode.setter
-    def control_mode(self, value: str) -> None:
-        self.preprocessor_config.control_mode = str(value)
-
-    @property
-    def add_setup_tokens(self) -> bool:
-        """Alias for ``preprocessor_config.add_setup_tokens``."""
-        return self.preprocessor_config.add_setup_tokens
-
-    @add_setup_tokens.setter
-    def add_setup_tokens(self, value: bool) -> None:
-        self.preprocessor_config.add_setup_tokens = bool(value)
-
-    @property
-    def add_control_tokens(self) -> bool:
-        """Alias for ``preprocessor_config.add_control_tokens``."""
-        return self.preprocessor_config.add_control_tokens
-
-    @add_control_tokens.setter
-    def add_control_tokens(self, value: bool) -> None:
-        self.preprocessor_config.add_control_tokens = bool(value)
-
-    @property
-    def tokenizer_name_or_path(self) -> str:
-        """Alias for ``preprocessor_config.tokenizer_name_or_path``."""
-        return self.preprocessor_config.tokenizer_name_or_path
-
-    @tokenizer_name_or_path.setter
-    def tokenizer_name_or_path(self, value: str) -> None:
-        self.preprocessor_config.tokenizer_name_or_path = str(value)
-
-    @property
-    def tokenizer_config(self) -> dict[str, Any] | None:
-        """Alias for ``preprocessor_config.tokenizer_config``."""
-        return self.preprocessor_config.tokenizer_config
-
-    @tokenizer_config.setter
-    def tokenizer_config(self, value: dict[str, Any] | None) -> None:
-        self.preprocessor_config.tokenizer_config = value
-
-    @property
-    def processor_config(self) -> MolmoAct2ProcessorConfig | None:
-        """Alias for ``preprocessor_config.processor_config``."""
-        return self.preprocessor_config.processor_config
-
-    @processor_config.setter
-    def processor_config(self, value: MolmoAct2ProcessorConfig | None) -> None:
-        self.preprocessor_config.processor_config = value
-
-    @property
-    def normalization_mode(self) -> str:
-        """Alias for ``postprocessor_config.normalization_mode``."""
-        return self.postprocessor_config.normalization_mode
-
-    @normalization_mode.setter
-    def normalization_mode(self, value: str) -> None:
-        self.postprocessor_config.normalization_mode = str(value)
-
-    @property
-    def optimizer_lr(self) -> float:
-        """Alias for ``training_config.optimizer_lr``."""
-        return self.training_config.optimizer_lr
-
-    @optimizer_lr.setter
-    def optimizer_lr(self, value: float) -> None:
-        self.training_config.optimizer_lr = float(value)
-
-    @property
-    def optimizer_vit_lr(self) -> float:
-        """Alias for ``training_config.optimizer_vit_lr``."""
-        return self.training_config.optimizer_vit_lr
-
-    @optimizer_vit_lr.setter
-    def optimizer_vit_lr(self, value: float) -> None:
-        self.training_config.optimizer_vit_lr = float(value)
-
-    @property
-    def optimizer_connector_lr(self) -> float:
-        """Alias for ``training_config.optimizer_connector_lr``."""
-        return self.training_config.optimizer_connector_lr
-
-    @optimizer_connector_lr.setter
-    def optimizer_connector_lr(self, value: float) -> None:
-        self.training_config.optimizer_connector_lr = float(value)
-
-    @property
-    def optimizer_action_expert_lr(self) -> float:
-        """Alias for ``training_config.optimizer_action_expert_lr``."""
-        return self.training_config.optimizer_action_expert_lr
-
-    @optimizer_action_expert_lr.setter
-    def optimizer_action_expert_lr(self, value: float) -> None:
-        self.training_config.optimizer_action_expert_lr = float(value)
-
-    @property
-    def optimizer_betas(self) -> tuple[float, float]:
-        """Alias for ``training_config.optimizer_betas``."""
-        return self.training_config.optimizer_betas
-
-    @optimizer_betas.setter
-    def optimizer_betas(self, value: tuple[float, float]) -> None:
-        self.training_config.optimizer_betas = (float(value[0]), float(value[1]))
-
-    @property
-    def optimizer_eps(self) -> float:
-        """Alias for ``training_config.optimizer_eps``."""
-        return self.training_config.optimizer_eps
-
-    @optimizer_eps.setter
-    def optimizer_eps(self, value: float) -> None:
-        self.training_config.optimizer_eps = float(value)
-
-    @property
-    def optimizer_weight_decay(self) -> float:
-        """Alias for ``training_config.optimizer_weight_decay``."""
-        return self.training_config.optimizer_weight_decay
-
-    @optimizer_weight_decay.setter
-    def optimizer_weight_decay(self, value: float) -> None:
-        self.training_config.optimizer_weight_decay = float(value)
-
-    @property
-    def optimizer_grad_clip_norm(self) -> float:
-        """Alias for ``training_config.optimizer_grad_clip_norm``."""
-        return self.training_config.optimizer_grad_clip_norm
-
-    @optimizer_grad_clip_norm.setter
-    def optimizer_grad_clip_norm(self, value: float) -> None:
-        self.training_config.optimizer_grad_clip_norm = float(value)
-
-    @property
-    def scheduler_warmup_steps(self) -> int:
-        """Alias for ``training_config.scheduler_warmup_steps``."""
-        return self.training_config.scheduler_warmup_steps
-
-    @scheduler_warmup_steps.setter
-    def scheduler_warmup_steps(self, value: int) -> None:
-        self.training_config.scheduler_warmup_steps = int(value)
-
-    @property
-    def scheduler_decay_steps(self) -> int | None:
-        """Alias for ``training_config.scheduler_decay_steps``."""
-        return self.training_config.scheduler_decay_steps
-
-    @scheduler_decay_steps.setter
-    def scheduler_decay_steps(self, value: int | None) -> None:
-        self.training_config.scheduler_decay_steps = value
-
-    @property
-    def scheduler_decay_lr(self) -> float:
-        """Alias for ``training_config.scheduler_decay_lr``."""
-        return self.training_config.scheduler_decay_lr
-
-    @scheduler_decay_lr.setter
-    def scheduler_decay_lr(self, value: float) -> None:
-        self.training_config.scheduler_decay_lr = float(value)
-
-    @property
-    def max_action_horizon(self) -> int:
-        """Alias used by the upstream HF config schema."""
-        return self.chunk_size
-
-    @property
-    def num_attention_heads(self) -> int:
-        """Expose text attention heads for compatibility with HF-style access."""
-        return self.text_config.num_attention_heads
-
-    @property
-    def num_key_value_heads(self) -> int:
-        """Expose text key-value heads for compatibility with HF-style access.
-
-        Raises:
-            ValueError: If ``text_config.num_key_value_heads`` is unset.
-        """
-        if self.text_config.num_key_value_heads is None:
-            msg = "text_config.num_key_value_heads must be set before access."
-            raise ValueError(msg)
-        return self.text_config.num_key_value_heads
-
-    @property
-    def head_dim(self) -> int:
-        """Expose text attention head dimension for compatibility."""
-        return self.text_config.head_dim
-
-    @property
-    def num_hidden_layers(self) -> int:
-        """Expose text depth for compatibility with HF-style access."""
-        return self.text_config.num_hidden_layers
-
-    @property
-    def hidden_size(self) -> int:
-        """Expose text hidden size for compatibility with HF-style access."""
-        return self.text_config.hidden_size
-
-    @property
-    def vocab_size(self) -> int:
-        """Expose text vocabulary size for compatibility with HF-style access."""
-        return self.text_config.vocab_size
-
-    @property
-    def max_position_embeddings(self) -> int:
-        """Expose text max positions for compatibility with HF-style access."""
-        return self.text_config.max_position_embeddings
-
-    @property
-    def use_cache(self) -> bool:
-        """Expose text use_cache for compatibility with HF-style access."""
-        return self.text_config.use_cache
+    def __post_init__(self) -> None:
+        """Validate configuration parameters after initialization."""
+        self._validate_rollout_settings()
+        self._validate_flow_matching_params()
+        self._validate_text_and_training_settings()
+        self._sync_action_expert_settings()
 
     @property
     def image_num_patch(self) -> tuple[int, int]:
-        """Expose image patch grid via nested ViT config."""
-        return self.vit_config.image_num_patch
-
-    def _coerce_nested_configs(self) -> None:
-        if isinstance(self.vit_config, dict):
-            self.vit_config = MolmoAct2VitConfig.from_dict(self.vit_config)
-        if isinstance(self.adapter_config, dict):
-            self.adapter_config = MolmoAct2AdapterConfig.from_dict(self.adapter_config)
-        if isinstance(self.text_config, dict):
-            self.text_config = MolmoAct2TextConfig.from_dict(self.text_config)
-        if isinstance(self.action_expert_config, dict):
-            self.action_expert_config = MolmoAct2ActionExpertConfig.from_dict(self.action_expert_config)
-        if isinstance(self.preprocessor_config, dict):
-            self.preprocessor_config = MolmoAct2PreprocessorConfig.from_dict(self.preprocessor_config)
-        if isinstance(self.postprocessor_config, dict):
-            self.postprocessor_config = MolmoAct2PostprocessorConfig.from_dict(self.postprocessor_config)
-        if isinstance(self.training_config, dict):
-            self.training_config = MolmoAct2TrainingConfig.from_dict(self.training_config)
-
-    def __post_init__(self) -> None:
-        """Validate configuration parameters after initialization."""
-        self._coerce_nested_configs()
-        self._validate_rollout_settings()
-        self._validate_flow_matching_params()
-        self._validate_depth_and_token_settings()
-        self._sync_action_expert_settings()
+        """Configured ``(height_patches, width_patches)`` image grid."""
+        height, width = self.image_default_input_size
+        return height // self.image_patch_size, width // self.image_patch_size
 
     def _validate_rollout_settings(self) -> None:
         if self.chunk_size < 1:
@@ -699,20 +322,43 @@ class MolmoAct2Config(Config):
             msg = f"flow_matching_beta_beta must be > 0.0, got {self.flow_matching_beta_beta}"
             raise ValueError(msg)
 
-    def _validate_depth_and_token_settings(self) -> None:
-        if self.preprocessor_config.num_state_tokens < 0:
-            msg = f"num_state_tokens must be >= 0, got {self.preprocessor_config.num_state_tokens}"
+    def _validate_text_and_training_settings(self) -> None:
+        if self.num_key_value_heads is None:
+            self.num_key_value_heads = self.num_attention_heads
+        if self.num_attention_heads < 1:
+            msg = f"num_attention_heads must be >= 1, got {self.num_attention_heads}"
             raise ValueError(msg)
+        if self.num_key_value_heads < 1:
+            msg = f"num_key_value_heads must be >= 1, got {self.num_key_value_heads}"
+            raise ValueError(msg)
+        if self.num_state_tokens < 0:
+            msg = f"num_state_tokens must be >= 0, got {self.num_state_tokens}"
+            raise ValueError(msg)
+        if self.scheduler_warmup_steps < 0:
+            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
+            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
+            raise ValueError(msg)
+        if self.scheduler_decay_lr < 0.0:
+            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
+            raise ValueError(msg)
+        for field_name in (
+            "optimizer_lr",
+            "optimizer_vit_lr",
+            "optimizer_connector_lr",
+            "optimizer_action_expert_lr",
+            "optimizer_eps",
+        ):
+            value = getattr(self, field_name)
+            if value <= 0.0:
+                msg = f"{field_name} must be > 0.0, got {value}"
+                raise ValueError(msg)
 
     def _sync_action_expert_settings(self) -> None:
-        if not self.add_action_expert:
-            self.action_expert_config = None
-            return
-        if self.action_expert_config is None:
-            self.action_expert_config = MolmoAct2ActionExpertConfig()
-        self.action_expert_config.num_layers = int(self.text_config.num_hidden_layers)
-        self.action_expert_config.max_action_horizon = int(self.chunk_size)
-        self.action_expert_config.max_action_dim = int(self.max_action_dim)
+        self.action_expert_num_layers = int(self.num_hidden_layers)
+        self.action_expert_max_action_horizon = int(self.chunk_size)
+        self.action_expert_max_action_dim = int(self.max_action_dim)
         if self.state_format != "discrete":
             msg = "MolmoAct2 export supports only state_format='discrete'."
             raise ValueError(msg)

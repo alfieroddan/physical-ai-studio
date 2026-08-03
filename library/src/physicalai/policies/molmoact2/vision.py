@@ -14,16 +14,11 @@ hidden size.
 from __future__ import annotations
 
 import math
-from copy import deepcopy
-from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 from transformers.activations import ACT2FN
-
-if TYPE_CHECKING:
-    from physicalai.policies.molmoact2.config import MolmoAct2AdapterConfig, MolmoAct2VitConfig
 
 
 class VisionMultiHeadAttention(nn.Module):
@@ -118,20 +113,32 @@ class VisionMLP(nn.Module):
 class VisionBlock(nn.Module):
     """Pre-norm ViT transformer block."""
 
-    def __init__(self, config: MolmoAct2VitConfig) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        hidden_act: str,
+        layer_norm_eps: float,
+        attention_dropout: float,
+        residual_dropout: float,
+    ) -> None:
         """Build attention, feed-forward and their norms."""
         super().__init__()
         self.attention = VisionMultiHeadAttention(
-            hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            attention_dropout=config.attention_dropout,
-            residual_dropout=config.residual_dropout,
+            hidden_size=hidden_size,
+            num_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=head_dim,
+            attention_dropout=attention_dropout,
+            residual_dropout=residual_dropout,
         )
-        self.feed_forward = VisionMLP(config.hidden_size, config.intermediate_size, config.hidden_act)
-        self.attention_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.ffn_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.feed_forward = VisionMLP(hidden_size, intermediate_size, hidden_act)
+        self.attention_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
+        self.ffn_norm = nn.LayerNorm(hidden_size, eps=layer_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Run attention and feed-forward with residual connections.
@@ -146,22 +153,35 @@ class VisionBlock(nn.Module):
 class VisionBlockCollection(nn.Module):
     """Ordered stack of ViT blocks (checkpoint key: ``transformer.resblocks``)."""
 
-    def __init__(self, config: MolmoAct2VitConfig) -> None:
+    def __init__(self, *, num_hidden_layers: int, **block_kwargs: object) -> None:
         """Build ``num_hidden_layers`` residual blocks."""
         super().__init__()
-        self.resblocks = nn.ModuleList([VisionBlock(config) for _ in range(config.num_hidden_layers)])
+        self.resblocks = nn.ModuleList([VisionBlock(**block_kwargs) for _ in range(num_hidden_layers)])
 
 
 class VisionTransformer(nn.Module):
     """Patch embedding + positional embedding + block stack."""
 
-    def __init__(self, config: MolmoAct2VitConfig) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        image_num_pos: int,
+        image_patch_size: int,
+        image_num_patch: tuple[int, int],
+        num_hidden_layers: int,
+        **block_kwargs: object,
+    ) -> None:
         """Build patch/positional embeddings and the block stack."""
         super().__init__()
-        self.config = config
-        self.positional_embedding = nn.Parameter(torch.zeros(config.image_num_pos, config.hidden_size))
-        self.patch_embedding = nn.Linear(config.image_patch_size**2 * 3, config.hidden_size, bias=True)
-        self.transformer = VisionBlockCollection(config)
+        self.image_num_patch = image_num_patch
+        self.positional_embedding = nn.Parameter(torch.zeros(image_num_pos, hidden_size))
+        self.patch_embedding = nn.Linear(image_patch_size**2 * 3, hidden_size, bias=True)
+        self.transformer = VisionBlockCollection(
+            num_hidden_layers=num_hidden_layers,
+            hidden_size=hidden_size,
+            **block_kwargs,
+        )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:
         """Add (bicubic-resized if needed) positional embeddings to patches.
@@ -208,39 +228,78 @@ class ImageProjectorMLP(nn.Module):
 class MolmoAct2VisionBackbone(nn.Module):
     """Encode crops into pooled image features aligned to the text hidden size."""
 
-    def __init__(self, vit_config: MolmoAct2VitConfig, adapter_config: MolmoAct2AdapterConfig) -> None:
+    def __init__(
+        self,
+        *,
+        vision_hidden_size: int,
+        vision_intermediate_size: int,
+        vision_num_hidden_layers: int,
+        vision_num_attention_heads: int,
+        vision_num_key_value_heads: int,
+        vision_head_dim: int,
+        vision_hidden_act: str,
+        vision_layer_norm_eps: float,
+        image_default_input_size: tuple[int, int],
+        image_patch_size: int,
+        image_num_pos: int,
+        vision_attention_dropout: float,
+        vision_residual_dropout: float,
+        adapter_vit_layers: tuple[int, ...],
+        adapter_pooling_attention_mask: bool,
+        adapter_hidden_size: int,
+        adapter_num_attention_heads: int,
+        adapter_num_key_value_heads: int,
+        adapter_head_dim: int,
+        adapter_attention_dropout: float,
+        adapter_residual_dropout: float,
+        adapter_hidden_act: str,
+        adapter_intermediate_size: int,
+        adapter_text_hidden_size: int,
+        image_feature_dropout: float,
+    ) -> None:
         """Build the (truncated) ViT, the attention pooler and the projector."""
         super().__init__()
-        self.vit_config = vit_config
-        self.adapter_config = adapter_config
-
-        self.vit_layers = [
-            layer if layer >= 0 else layer + vit_config.num_hidden_layers for layer in adapter_config.vit_layers
-        ]
+        self.vit_layers = [layer if layer >= 0 else layer + vision_num_hidden_layers for layer in adapter_vit_layers]
         # Only build up to the deepest ViT layer we actually read from.
         last_layer_needed = max(self.vit_layers) + 1
-        if last_layer_needed < vit_config.num_hidden_layers:
-            vit_config = deepcopy(vit_config)
-            vit_config.num_hidden_layers = last_layer_needed
-        self.image_vit = VisionTransformer(vit_config)
+        built_layers = min(last_layer_needed, vision_num_hidden_layers)
+        self.image_vit = VisionTransformer(
+            hidden_size=vision_hidden_size,
+            image_num_pos=image_num_pos,
+            image_patch_size=image_patch_size,
+            image_num_patch=(
+                image_default_input_size[0] // image_patch_size,
+                image_default_input_size[1] // image_patch_size,
+            ),
+            num_hidden_layers=built_layers,
+            intermediate_size=vision_intermediate_size,
+            num_attention_heads=vision_num_attention_heads,
+            num_key_value_heads=vision_num_key_value_heads,
+            head_dim=vision_head_dim,
+            hidden_act=vision_hidden_act,
+            layer_norm_eps=vision_layer_norm_eps,
+            attention_dropout=vision_attention_dropout,
+            residual_dropout=vision_residual_dropout,
+        )
 
-        pool_dim = self.vit_config.hidden_size * len(adapter_config.vit_layers)
+        pool_dim = vision_hidden_size * len(adapter_vit_layers)
         self.image_pooling_2d = VisionMultiHeadAttention(
-            hidden_size=adapter_config.hidden_size,
-            num_heads=adapter_config.num_attention_heads,
-            num_key_value_heads=adapter_config.num_key_value_heads,
-            head_dim=adapter_config.head_dim,
+            hidden_size=adapter_hidden_size,
+            num_heads=adapter_num_attention_heads,
+            num_key_value_heads=adapter_num_key_value_heads,
+            head_dim=adapter_head_dim,
             input_dim=pool_dim,
-            attention_dropout=adapter_config.attention_dropout,
-            residual_dropout=adapter_config.residual_dropout,
+            attention_dropout=adapter_attention_dropout,
+            residual_dropout=adapter_residual_dropout,
         )
         self.image_projector = ImageProjectorMLP(
-            adapter_config.hidden_size,
-            adapter_config.intermediate_size,
-            adapter_config.text_hidden_size,
-            adapter_config.hidden_act,
+            adapter_hidden_size,
+            adapter_intermediate_size,
+            adapter_text_hidden_size,
+            adapter_hidden_act,
         )
-        self.image_feature_dropout = nn.Dropout(adapter_config.image_feature_dropout)
+        self.image_feature_dropout = nn.Dropout(image_feature_dropout)
+        self.pooling_attention_mask = adapter_pooling_attention_mask
         # Toggled by :meth:`gradient_checkpointing_enable` so each ViT block is
         # recomputed during the backward pass to trade compute for memory. Has
         # no effect outside of training (``self.training`` and
@@ -269,7 +328,7 @@ class MolmoAct2VisionBackbone(nn.Module):
         batch_size, num_crops, num_patches, _ = images.shape
         x = images.view(batch_size * num_crops, num_patches, -1)
         x = self.image_vit.patch_embedding(x)
-        x = self.image_vit.add_pos_emb(x, self.image_vit.config.image_num_patch)
+        x = self.image_vit.add_pos_emb(x, self.image_vit.image_num_patch)
 
         needed = set(self.vit_layers)
         selected: dict[int, torch.Tensor] = {}
@@ -310,7 +369,7 @@ class MolmoAct2VisionBackbone(nn.Module):
         to_pool = to_pool * valid.to(self.dtype)[..., None]  # noqa: PLR6104
         to_pool = to_pool.reshape(-1, pooled_patches_idx.shape[-1], dim)
 
-        if self.adapter_config.pooling_attention_mask:
+        if self.pooling_attention_mask:
             attn_mask = valid.reshape(-1, 1, 1, valid.shape[-1])
             denom = valid.view(-1, to_pool.shape[-2]).sum(-1).clamp_min(1).to(to_pool.dtype)
             query = to_pool.sum(-2, keepdim=True) / denom[:, None, None]

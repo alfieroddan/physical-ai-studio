@@ -237,31 +237,40 @@ class MolmoAct2Model(Model):
     def override_training_config(self, **overrides: float | None) -> None:
         """Override optimizer/scheduler settings on the attached training config.
 
-        Applies the supplied keyword overrides to ``self.config.training_config``
-        in place. Only known ``MolmoAct2TrainingConfig`` field names are accepted;
+        Applies the supplied keyword overrides to the flat config in place. Only
+        known training field names are accepted;
         unknown keys raise ``TypeError``. This lets a caller (e.g. a Lightning
         policy or a fine-tuning script) adjust learning rates and scheduler
         parameters after the model has been constructed without rebuilding the
         config.
 
         Args:
-            **overrides: Keyword names matching ``MolmoAct2TrainingConfig``
+            **overrides: Flat optimizer/scheduler field names
                 fields (e.g. ``optimizer_lr=2e-5``, ``scheduler_warmup_steps=500``).
                 Values must match the field type.
 
         Raises:
-            TypeError: If a supplied key is not a field on ``MolmoAct2TrainingConfig``.
+            TypeError: If a supplied key is not a flat training config field.
         """
-        import dataclasses  # noqa: PLC0415
-
-        training_config = self.config.training_config
-        valid_fields = {f.name for f in dataclasses.fields(training_config)}
+        valid_fields = {
+            "optimizer_lr",
+            "optimizer_vit_lr",
+            "optimizer_connector_lr",
+            "optimizer_action_expert_lr",
+            "optimizer_betas",
+            "optimizer_eps",
+            "optimizer_weight_decay",
+            "optimizer_grad_clip_norm",
+            "scheduler_warmup_steps",
+            "scheduler_decay_steps",
+            "scheduler_decay_lr",
+        }
         unknown = set(overrides) - valid_fields
         if unknown:
-            msg = f"Unknown training_config override(s): {sorted(unknown)}"
+            msg = f"Unknown training override(s): {sorted(unknown)}"
             raise TypeError(msg)
         for key, value in overrides.items():
-            setattr(training_config, key, value)
+            setattr(self.config, key, value)
 
     def gradient_checkpointing_enable(self) -> None:
         """Enable gradient checkpointing on the text, vision and action submodules.
@@ -356,7 +365,7 @@ class MolmoAct2Model(Model):
         Raises:
             RuntimeError: If no action-expert parameters were found.
         """
-        if self.config.add_action_expert is False or self.config.action_expert_config is None:
+        if self.config.add_action_expert is False:
             msg = "enable_lora_action_expert=False, but no action_expert parameters were found."
             raise RuntimeError(msg)
         trainable = 0

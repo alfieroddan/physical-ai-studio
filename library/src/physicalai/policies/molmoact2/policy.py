@@ -7,14 +7,13 @@
 
 import dataclasses
 from pathlib import Path
-from typing import IO, Any, Literal
+from typing import IO, Any
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
 from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
-from physicalai.data.constants import IMAGE_MASKS, STATE, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
@@ -49,284 +48,142 @@ def _coerce_dataset_feature(feature: Feature) -> Feature:
     )
 
 
-def make_molmoact2_config(  # noqa: PLR0913
+def make_molmoact2_config(
     *,
     input_features: list[Feature] | None,
     output_features: list[Feature] | None,
-    n_obs_steps: int,
-    n_action_steps: int,
-    chunk_size: int = 30,
-    action_mode: Literal["continuous", "discrete", "both"] = "continuous",
-    use_random_input_noise: bool = False,
-    torch_compile: bool = False,
-    use_lora: bool = False,
-    enable_lora_action_expert: bool = False,
-    lora_rank: int = 64,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
-    lora_bias: Literal["all", "lora_only", "none"] = "none",
-    gradient_checkpointing: bool = False,
-    train_action_expert_only: bool = False,
-    num_flow_timesteps: int | None = None,
-    checkpoint_path: str | None = None,
+    **overrides: Any,
 ) -> MolmoAct2Config:
-    """Create the explicit model config for MolmoAct2.
-
-    This function is the non-policy home for model-definition defaults.
+    """Create a flat config from defaults and explicit overrides.
 
     Args:
-        input_features: List of input features the model consumes.
-        output_features: List of output features the model produces.
-        n_obs_steps: Number of observation steps.
-        n_action_steps: Number of action steps.
-        chunk_size: Action chunk size (must be >= n_action_steps).
-        action_mode: Action supervision mode.
-        use_random_input_noise: Start flow matching from sampled Gaussian noise
-            instead of zeros. Kept off by default so the exported graph stays
-            deterministic and RNG-free.
-        torch_compile: Whether to mark the config for optimized inference.
-        use_lora: Whether to apply LoRA adapters to the VLM.
-        enable_lora_action_expert: Whether to also adapt the action expert.
-        lora_rank: LoRA rank.
-        lora_alpha: LoRA alpha scaling factor.
-        lora_dropout: LoRA dropout rate.
-        lora_bias: Which biases to train ('none', 'all', 'lora_only').
-        gradient_checkpointing: Whether to enable gradient checkpointing.
-        train_action_expert_only: Freeze the VLM entirely and only train the
-            action expert. Incompatible with ``use_lora``.
-        num_flow_timesteps: Number of independent (timestep, noise) samples
-            drawn per training example and averaged in the flow-matching
-            loss (variance reduction). ``None`` (default) uses
-            :class:`MolmoAct2Config`'s own default (``8``, matching the
-            reference MolmoAct2 training recipe).
-        checkpoint_path: Optional local path to a pretrained checkpoint snapshot
-            directory. Forwarded to :class:`MolmoAct2Config` so a config built
-            outside the HF flow can still locate its pretrained weights (e.g.
-            for :meth:`MolmoAct2.from_config`).
+        input_features: Optional observation schema. Populated lazily from the
+            training dataset when omitted.
+        output_features: Optional action schema. Populated lazily from the
+            training dataset when omitted.
+        **overrides: Named :class:`MolmoAct2Config` values. ``None`` values do
+            not override the dataclass defaults.
 
     Returns:
-        A fully populated :class:`MolmoAct2Config`.
+        The resolved flat :class:`MolmoAct2Config`.
+
+    Raises:
+        TypeError: If an override is not a config field.
     """
-    config_kwargs: dict[str, Any] = {}
-    if num_flow_timesteps is not None:
-        config_kwargs["num_flow_timesteps"] = num_flow_timesteps
-    return MolmoAct2Config(
-        input_features=input_features,
-        output_features=output_features,
-        n_obs_steps=n_obs_steps,
-        n_action_steps=n_action_steps,
-        chunk_size=chunk_size,
-        action_mode=action_mode,
-        use_random_input_noise=use_random_input_noise,
-        compile_model=torch_compile,
-        use_lora=use_lora,
-        enable_lora_action_expert=enable_lora_action_expert,
-        lora_rank=lora_rank,
-        lora_alpha=lora_alpha,
-        lora_dropout=lora_dropout,
-        lora_bias=lora_bias,
-        gradient_checkpointing=gradient_checkpointing,
-        train_action_expert_only=train_action_expert_only,
-        checkpoint_path=checkpoint_path,
-        **config_kwargs,
-    )
+    valid_fields = {field.name for field in dataclasses.fields(MolmoAct2Config)}
+    unknown = set(overrides) - valid_fields
+    if unknown:
+        msg = f"Unknown MolmoAct2 override(s): {sorted(unknown)}"
+        raise TypeError(msg)
+    config_data = {
+        "input_features": input_features,
+        "output_features": output_features,
+        **{key: value for key, value in overrides.items() if value is not None},
+    }
+    return MolmoAct2Config(**config_data)
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
-        repo_id: str | Path | None = "allenai/MolmoAct2",
-        norm_tag: str | None = None,
-        n_obs_steps: int = 30,
-        n_action_steps: int = 30,
-        chunk_size: int = 30,
-        action_mode: Literal["continuous", "discrete", "both"] = "continuous",
         *,
-        config: MolmoAct2Config | None = None,
-        use_random_input_noise: bool = False,
-        adapt_to_so101: bool = False,
-        torch_compile: bool = False,
+        repo_id: str | Path | None = None,
+        norm_tag: str | None = None,
         load_weights: bool = True,
-        use_lora: bool = False,
-        enable_lora_action_expert: bool = False,
-        lora_rank: int = 64,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_bias: Literal["all", "lora_only", "none"] = "none",
-        gradient_checkpointing: bool = False,
-        train_action_expert_only: bool = False,
-        num_flow_timesteps: int | None = None,
-        setup_type: str | None = None,
-        control_mode: str | None = None,
+        adapt_to_so101: bool | None = None,
+        compile_model: bool | None = None,
+        **overrides: Any,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 
         Args:
             input_features: Optional observation feature schema.
             output_features: Optional action feature schema.
-            repo_id: Optional pretrained checkpoint identifier or path. Ignored
-                if ``config`` is provided.
-            norm_tag: Optional normalization tag for pretrained checkpoints.
-            n_obs_steps: Number of observation steps.
-            n_action_steps: Number of predicted action steps.
-            chunk_size: Action chunk size (must be >= n_action_steps).
-            action_mode: Training/inference action mode.
-            config: A fully-built :class:`MolmoAct2Config` to use as-is,
-                bypassing HF-container resolution and ad-hoc config
-                construction entirely. Prefer
-                :meth:`from_config` over passing this directly.
-            use_random_input_noise: Start flow matching from sampled Gaussian
-                noise instead of zeros. Kept off by default so the exported
-                graph stays deterministic and RNG-free.
+            input_features: Optional observation schema. Supply both feature
+                lists for eager initialization, or omit both to infer schemas
+                from the training dataset during ``setup``.
+            output_features: Optional action schema. Must be supplied together
+                with ``input_features``.
+            repo_id: Optional local checkpoint directory or Hugging Face repo.
+                Its checkpoint config is the base when supplied; otherwise
+                :class:`MolmoAct2Config` defaults are the base.
+            norm_tag: Optional normalization metadata tag to select schemas and
+                prompt conditioning from a pretrained checkpoint.
+            load_weights: Whether to load base checkpoint weights after model
+                construction when a checkpoint source is available.
             adapt_to_so101: Apply the SO-100/101 joint frame transform to joint
-                observations/actions (needed for zero-shot and fine-tuning from the
-                pre-#777 LeRobot calibration checkpoint).
-            torch_compile: Whether to enable compile-oriented config flags.
-            load_weights: Whether to eagerly load pretrained weights when a
-                checkpoint is available. Set to ``False`` to skip the
-                (potentially expensive) pretrained-weight load, e.g. when a
-                caller is about to overwrite the state dict anyway (this is
-                done automatically by :meth:`load_from_checkpoint`).
-            use_lora: Apply LoRA adapters to the VLM (text transformer +
-                vision backbone) linears for parameter-efficient
-                fine-tuning. Incompatible with ``train_action_expert_only``.
-            enable_lora_action_expert: Extend LoRA targets to the action
-                expert linears. Requires ``use_lora=True``.
-            lora_rank: LoRA rank (dimension of the low-rank update).
-            lora_alpha: LoRA alpha scaling factor.
-            lora_dropout: Dropout rate applied to the LoRA layers.
-            lora_bias: Which biases to train ('none', 'all', 'lora_only').
-            gradient_checkpointing: Enable gradient checkpointing on the text
-                transformer, vision backbone and action expert to trade
-                compute for memory during training.
-            train_action_expert_only: Freeze the VLM entirely and only train
-                the action expert. Incompatible with ``use_lora``.
-            num_flow_timesteps: Number of independent (timestep, noise)
-                samples drawn per training example and averaged in the
-                flow-matching loss (variance reduction). ``None`` (default)
-                uses the pretrained checkpoint's HF config value when
-                resolvable, otherwise :class:`MolmoAct2Config`'s own default
-                (``8``, matching the reference MolmoAct2 training recipe).
-            setup_type: Text describing the robot/scene, inserted into the
-                model prompt (e.g. ``"single franka robotic arm in libero"``).
-                MolmoAct2 was pretrained to condition on this text. It is
-                normally only populated from a pretrained checkpoint's
-                ``norm_stats.json`` when ``norm_tag`` matches one of its
-                ``metadata_by_tag`` entries; pass this explicitly to supply
-                the same conditioning for *any* dataset, including ones with
-                no matching (or no) ``norm_tag``. Always wins over any
-                norm_tag-derived value when provided.
-            control_mode: Text describing the action space, inserted into the
-                model prompt (e.g. ``"delta end-effector pose"`` for relative
-                end-effector deltas, or ``"absolute joint pose"`` for target
-                joint angles). Same override semantics as ``setup_type``.
+                observations and actions for pre-#777 LeRobot calibration.
+            compile_model: Explicit override for
+                :attr:`MolmoAct2Config.compile_model`; enables compiled model
+                forward and inference paths.
+            **overrides: Any other named :class:`MolmoAct2Config` field. A
+                non-``None`` value overrides the selected base config; ``None``
+                preserves the pretrained value or dataclass default.
 
         Raises:
             ValueError: If only one of input_features/output_features is provided.
             RuntimeError: If pretrained checkpoint metadata cannot be resolved.
         """
-        super().__init__(n_action_steps=n_action_steps)
-
-        # Currently continuous mode is only supported
-        if action_mode != "continuous":
-            msg = "Only continous action mode is currently supported."
-            raise ValueError(msg)
-
         # check both either exist or both don't exit, raise error if not
         if bool(input_features) != bool(output_features):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
 
         self.hf_container = None
+        if compile_model is not None:
+            overrides["compile_model"] = compile_model
 
-        if config is not None:
-            # Config was already built (e.g. via from_config, or reconstructed
-            # from a saved/serialized config). Skip HF-container resolution
-            # and ad-hoc config construction entirely.
-            self.config = config
-            # NOTE: assumes MolmoAct2Config exposes a `checkpoint_path`
-            # attribute (mirrors the kwarg accepted by
-            # build_config_from_hf_config below). Adjust the attribute name
-            # here if it differs in your actual config class.
-            self._checkpoint_location: str | None = getattr(config, "checkpoint_path", None)
+        # if pretrained find hf container
+        if repo_id is not None:
+            self.hf_container = load_hf_pretrained_container(repo_id)
+            if self.hf_container is None:
+                msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
+                raise RuntimeError(msg)
+
+        # if self.hf_container exists - we should resolve the config
+        if self.hf_container:
+            self.config = build_config_from_hf_config(
+                self.hf_container.hf_config,
+                norm_stats=self.hf_container.norm_stats,
+                input_features=input_features,
+                output_features=output_features,
+                checkpoint_path=self.hf_container.checkpoint_location,
+                repo_id=self.hf_container.repo_id,
+                tokenizer_config=self.hf_container.tokenizer_config,
+                processor_config=self.hf_container.processor_config,
+                norm_tag=norm_tag,
+                **overrides,
+            )
         else:
-            # if pretrained find hf container
-            if repo_id is not None:
-                self.hf_container = load_hf_pretrained_container(repo_id)
-                if self.hf_container is None:
-                    msg = "Failed to resolve pretrained MolmoAct2 checkpoint metadata."
-                    raise RuntimeError(msg)
+            self.config = make_molmoact2_config(
+                input_features=input_features,
+                output_features=output_features,
+                norm_tag=norm_tag,
+                **overrides,
+            )
 
-            # if self.hf_container exists - we should resolve the config
-            if self.hf_container:
-                self.config = build_config_from_hf_config(
-                    self.hf_container.hf_config,
-                    norm_stats=self.hf_container.norm_stats,
-                    input_features=input_features,
-                    output_features=output_features,
-                    checkpoint_path=self.hf_container.checkpoint_location,
-                    repo_id=self.hf_container.repo_id,
-                    tokenizer_config=self.hf_container.tokenizer_config,
-                    processor_config=self.hf_container.processor_config,
-                    n_obs_steps=n_obs_steps,
-                    norm_tag=norm_tag,
-                    n_action_steps=n_action_steps,
-                    chunk_size=chunk_size,
-                    action_mode=action_mode,
-                    use_random_input_noise=use_random_input_noise,
-                    torch_compile=torch_compile,
-                    use_lora=use_lora,
-                    enable_lora_action_expert=enable_lora_action_expert,
-                    lora_rank=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    lora_bias=lora_bias,
-                    gradient_checkpointing=gradient_checkpointing,
-                    train_action_expert_only=train_action_expert_only,
-                    num_flow_timesteps=num_flow_timesteps,
-                )
-            else:
-                self.config = make_molmoact2_config(
-                    input_features=input_features,
-                    output_features=output_features,
-                    n_obs_steps=n_obs_steps,
-                    n_action_steps=n_action_steps,
-                    chunk_size=chunk_size,
-                    action_mode=action_mode,
-                    use_random_input_noise=use_random_input_noise,
-                    torch_compile=torch_compile,
-                    use_lora=use_lora,
-                    enable_lora_action_expert=enable_lora_action_expert,
-                    lora_rank=lora_rank,
-                    lora_alpha=lora_alpha,
-                    lora_dropout=lora_dropout,
-                    lora_bias=lora_bias,
-                    gradient_checkpointing=gradient_checkpointing,
-                    train_action_expert_only=train_action_expert_only,
-                    num_flow_timesteps=num_flow_timesteps,
-                )
+        if self.config.action_mode != "continuous":
+            msg = "Only continous action mode is currently supported."
+            raise ValueError(msg)
+        super().__init__(n_action_steps=self.config.n_action_steps)
 
-            self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
+        self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
 
         # SO-101 joint calibration correction (must be set before processors build).
         # Applied uniformly regardless of which branch above built the config.
         # https://huggingface.co/docs/lerobot/v0.6.0/en/molmoact2#joint-frame-transform-so-100101-zero-shot
-        self.config.adapt_to_so101 = adapt_to_so101
+        if adapt_to_so101 is not None:
+            self.config.adapt_to_so101 = adapt_to_so101
 
         # Explicit setup_type/control_mode always win over whatever a
         # norm_tag lookup produced (or the "" default when there was no
         # norm_tag), so any dataset can supply this prompt-conditioning text
         # without needing a matching entry in a pretrained checkpoint's
         # norm_stats.json. Must be set before processors build.
-        if setup_type is not None:
-            self.config.setup_type = setup_type
-        if control_mode is not None:
-            self.config.control_mode = control_mode
-
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
         # the same pretrained source during inference adapter reload.
         self.save_hyperparameters(ignore=["config", "load_weights"])
@@ -337,69 +194,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._load_weights = load_weights
 
         # eagerly load
-        if (input_features and output_features) or (repo_id and norm_tag) or config is not None:
+        if (input_features and output_features) or (repo_id and norm_tag):
             self._initialize_model()
-
-    @classmethod
-    def from_config(
-        cls,
-        config: MolmoAct2Config,
-        *,
-        load_weights: bool = True,
-        adapt_to_so101: bool = False,
-        **overrides: Any,  # noqa: ANN401
-    ) -> "MolmoAct2":
-        """Build a policy directly from an already-constructed config.
-
-        Skips HF-container resolution entirely (no network/metadata lookup),
-        which makes this the cheapest way to reconstruct a policy whose
-        config has already been resolved once (e.g. loaded from disk,
-        produced by a previous ``build_config_from_hf_config`` call, or
-        hand-built via :func:`make_molmoact2_config`).
-
-        Args:
-            config: The base config to use. Not mutated; overrides are
-                applied to a copy.
-            load_weights: Whether to eagerly load pretrained weights from
-                ``config.checkpoint_path`` (if present). Set to ``False`` to
-                skip the weight load, e.g. before manually loading a
-                fine-tuned state dict.
-            adapt_to_so101: Apply the SO-100/101 joint frame transform. See
-                :meth:`__init__` for details.
-            **overrides: Field overrides applied to ``config`` before
-                construction, via ``dataclasses.replace``. Keys must match
-                existing fields on ``config``.
-
-        Returns:
-            A constructed :class:`MolmoAct2` policy.
-
-        Raises:
-            TypeError: If ``config`` is not a dataclass instance (required
-                for ``dataclasses.replace``), or if ``overrides`` contains
-                keys that are not fields on ``config``.
-        """
-        if overrides:
-            if not dataclasses.is_dataclass(config):
-                msg = (
-                    "from_config overrides require MolmoAct2Config to be a dataclass; "
-                    "got a non-dataclass config instead."
-                )
-                raise TypeError(msg)
-            valid_fields = {f.name for f in dataclasses.fields(config)}
-            unknown = set(overrides) - valid_fields
-            if unknown:
-                msg = f"Unknown config override(s): {sorted(unknown)}"
-                raise TypeError(msg)
-            config = dataclasses.replace(config, **overrides)
-
-        return cls(
-            input_features=config.input_features,
-            output_features=config.output_features,
-            repo_id=None,
-            config=config,
-            load_weights=load_weights,
-            adapt_to_so101=adapt_to_so101,
-        )
 
     @classmethod
     def load_from_checkpoint(
@@ -620,12 +416,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             else:
                 grouped["vlm"].append(param)
 
-        training_config = self.config.training_config
         learning_rates = {
-            "vlm": training_config.optimizer_lr,
-            "vit": training_config.optimizer_vit_lr,
-            "connector": training_config.optimizer_connector_lr,
-            "action_expert": training_config.optimizer_action_expert_lr,
+            "vlm": self.config.optimizer_lr,
+            "vit": self.config.optimizer_vit_lr,
+            "connector": self.config.optimizer_connector_lr,
+            "action_expert": self.config.optimizer_action_expert_lr,
         }
         return [{"params": params, "lr": learning_rates[name]} for name, params in grouped.items() if params]
 
@@ -638,25 +433,24 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is not None and self.config.train_action_expert_only:
             self.model.freeze_to_action_expert()
 
-        training_config = self.config.training_config
         optimizer = torch.optim.AdamW(
             self.get_optim_params(),
-            lr=training_config.optimizer_lr,
-            weight_decay=training_config.optimizer_weight_decay,
-            betas=training_config.optimizer_betas,
-            eps=training_config.optimizer_eps,
+            lr=self.config.optimizer_lr,
+            weight_decay=self.config.optimizer_weight_decay,
+            betas=self.config.optimizer_betas,
+            eps=self.config.optimizer_eps,
         )
 
         num_training_steps = int(self.trainer.estimated_stepping_batches)
-        num_decay_steps = training_config.scheduler_decay_steps
+        num_decay_steps = self.config.scheduler_decay_steps
         if num_decay_steps is None:
             num_decay_steps = num_training_steps
 
         scheduler = cosine_decay_with_warmup_scheduler(
             optimizer,
-            peak_lr=training_config.optimizer_lr,
-            decay_lr=training_config.scheduler_decay_lr,
-            num_warmup_steps=training_config.scheduler_warmup_steps,
+            peak_lr=self.config.optimizer_lr,
+            decay_lr=self.config.scheduler_decay_lr,
+            num_warmup_steps=self.config.scheduler_warmup_steps,
             num_decay_steps=int(num_decay_steps),
             num_training_steps=num_training_steps,
         )
@@ -673,9 +467,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     ) -> None:
         """Clip gradients using the norm configured on the policy."""
         del gradient_clip_algorithm
-        clip_val = (
-            gradient_clip_val if gradient_clip_val is not None else self.config.training_config.optimizer_grad_clip_norm
-        )
+        clip_val = gradient_clip_val if gradient_clip_val is not None else self.config.optimizer_grad_clip_norm
         if clip_val and clip_val > 0:
             self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
 
@@ -721,7 +513,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         schema: list[InferenceFeature] = []
         for feature in self.input_features:
-            if feature.shape is None:  # pragma: no cover - export requires concrete shapes
+            if feature.shape is None:
                 msg = "input feature missing concrete shape for export"
                 raise ValueError(msg)
             if feature.ftype == FeatureType.VISUAL:
@@ -786,12 +578,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
         """Extra backend export args for inference-time pre/post graph components."""
-        output_names = [feature.name for feature in (self.outputs_schema or [])]
-
         return {
             "torch": TorchExportParameters(
-                input_names=[TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK, IMAGES, IMAGE_MASKS, STATE],
-                output_names=output_names,
                 preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
             ),
         }

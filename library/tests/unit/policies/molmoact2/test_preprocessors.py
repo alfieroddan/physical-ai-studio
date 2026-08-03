@@ -15,8 +15,6 @@ from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 from physicalai.policies.molmoact2.config import (
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
     MolmoAct2Config,
-    MolmoAct2ImageProcessorConfig,
-    MolmoAct2ProcessorConfig,
 )
 from physicalai.policies.molmoact2.processors.factory import make_molmoact2_preprocessors
 from physicalai.policies.molmoact2.processors.image import MolmoAct2ImageProcessor
@@ -474,14 +472,14 @@ class TestMolmoAct2NormalizeMask:
 
 class TestMolmoAct2ImageProcessor:
     def test_output_shapes(self) -> None:
-        config = MolmoAct2ImageProcessorConfig(
+        processor = MolmoAct2ImageProcessor(
+            crop_mode="resize",
             size={"height": 28, "width": 28},
             patch_size=14,
             pooling_size=[2, 2],
             image_mean=[0.5, 0.5, 0.5],
             image_std=[0.5, 0.5, 0.5],
         )
-        processor = MolmoAct2ImageProcessor(config)
         images = torch.zeros(2, 3, 28, 28)
         out = processor(images)
         assert "pixel_values" in out
@@ -495,16 +493,9 @@ class TestMolmoAct2ImageProcessor:
 
 class TestImageTokenIdsForGrid:
     def _config(self) -> MolmoAct2Config:
-        from physicalai.policies.molmoact2.config import (
-            MolmoAct2AdapterConfig,
-            MolmoAct2Config,
-            MolmoAct2TextConfig,
-            MolmoAct2VitConfig,
-        )
         return MolmoAct2Config(
-            vit_config=MolmoAct2VitConfig(image_default_input_size=(28, 28), image_patch_size=14),
-            adapter_config=MolmoAct2AdapterConfig(),
-            text_config=MolmoAct2TextConfig(),
+            image_default_input_size=(28, 28),
+            image_patch_size=14,
             image_start_token_id=10,
             image_end_token_id=12,
             image_patch_id=11,
@@ -604,7 +595,6 @@ class TestMakeMolmoact2Preprocessors:
         config = tiny_molmoact2_config
         config.input_features = inputs
         config.output_features = outputs
-        config.processor_config = MolmoAct2ProcessorConfig()
         preprocessor, postprocessor = make_molmoact2_preprocessors(config)
         assert isinstance(preprocessor, MolmoAct2Preprocessor)
         assert isinstance(postprocessor, MolmoAct2Postprocessor)

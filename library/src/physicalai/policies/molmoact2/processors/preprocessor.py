@@ -30,21 +30,18 @@ from .preprocess_steps import (
 from .tokenizers import MolmoAct2Tokenizers
 
 if TYPE_CHECKING:
-    from physicalai.policies.molmoact2.config import MolmoAct2Config, MolmoAct2PreprocessorConfig
+    from physicalai.policies.molmoact2.config import MolmoAct2Config
 
 _DEFAULT_IMAGE_SIZE = (378, 378)
 
 
-def _image_input_size(preprocessor_config: MolmoAct2PreprocessorConfig) -> tuple[int, int]:
+def _image_input_size(config: MolmoAct2Config) -> tuple[int, int]:
     """Resolve the ``(height, width)`` images are resized to before the model.
 
     Returns:
         The target image ``(height, width)``.
     """
-    processor_config = preprocessor_config.processor_config
-    if processor_config is None:
-        return _DEFAULT_IMAGE_SIZE
-    size = processor_config.image_processor.size
+    size = config.image_processor_size
     return int(size["height"]), int(size["width"])
 
 
@@ -76,7 +73,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         """
         super().__init__()
         self.config = config
-        pre_cfg = config.preprocessor_config
 
         input_features = list(config.input_features or [])
         output_features = list(config.output_features or [])
@@ -91,22 +87,25 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         )
         self._extractor = StateTaskImageExtractor(image_keys=image_keys)
         self._prompt_encoder = RobotPromptEncoder(
-            num_state_tokens=int(pre_cfg.num_state_tokens) if int(pre_cfg.num_state_tokens) > 0 else 256,
-            setup_type=str(pre_cfg.setup_type or ""),
-            control_mode=str(pre_cfg.control_mode or ""),
-            add_setup_tokens=bool(pre_cfg.add_setup_tokens),
-            add_control_tokens=bool(pre_cfg.add_control_tokens),
+            num_state_tokens=int(config.num_state_tokens) if int(config.num_state_tokens) > 0 else 256,
+            setup_type=str(config.setup_type or ""),
+            control_mode=str(config.control_mode or ""),
+            add_setup_tokens=bool(config.add_setup_tokens),
+            add_control_tokens=bool(config.add_control_tokens),
         )
-        self._image_resize_normalizer = ImageResizeNormalizer(image_size=_image_input_size(pre_cfg))
-        self._image_packer = ImagePacker(image_size=_image_input_size(pre_cfg))
-        self._image_processor = (
-            MolmoAct2ImageProcessor(pre_cfg.processor_config.image_processor)
-            if pre_cfg.processor_config is not None
-            else None
+        self._image_resize_normalizer = ImageResizeNormalizer(image_size=_image_input_size(config))
+        self._image_packer = ImagePacker(image_size=_image_input_size(config))
+        self._image_processor = MolmoAct2ImageProcessor(
+            crop_mode=config.image_processor_crop_mode,
+            size=config.image_processor_size,
+            patch_size=config.image_processor_patch_size,
+            pooling_size=config.image_processor_pooling_size,
+            image_mean=config.image_processor_mean,
+            image_std=config.image_processor_std,
         )
         self._tokenizers = MolmoAct2Tokenizers(
-            tokenizer_name_or_path=pre_cfg.tokenizer_name_or_path,
-            tokenizer_config=pre_cfg.tokenizer_config,
+            tokenizer_name_or_path=config.tokenizer_name_or_path,
+            tokenizer_config=config.tokenizer_config,
         )
         self._action_extractor = ActionExtractor()
         self._action_padder = ActionPadder(max_action_dim=int(config.max_action_dim))

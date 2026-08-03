@@ -16,12 +16,7 @@ pooling layout is static, so it is precomputed once at construction.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
-
-if TYPE_CHECKING:
-    from physicalai.policies.molmoact2.config import MolmoAct2ImageProcessorConfig
 
 _IMAGE_NDIM = 4
 _NUM_CHANNELS = 3
@@ -39,15 +34,24 @@ class MolmoAct2ImageProcessor:
     - ``image_num_crops``: ``(M,)`` crop counts (always ``1`` for ``resize``).
     """
 
-    def __init__(self, config: MolmoAct2ImageProcessorConfig) -> None:
-        """Read sizes/normalization from ``config`` and precompute pooling."""
-        self.crop_mode = str(config.crop_mode)
-        self.height = int(config.size["height"])
-        self.width = int(config.size["width"])
-        self.patch_size = int(config.patch_size)
-        self.pool_h, self.pool_w = (int(config.pooling_size[0]), int(config.pooling_size[1]))
-        self.image_mean = list(config.image_mean)
-        self.image_std = list(config.image_std)
+    def __init__(
+        self,
+        *,
+        crop_mode: str,
+        size: dict[str, int],
+        patch_size: int,
+        pooling_size: list[int],
+        image_mean: list[float],
+        image_std: list[float],
+    ) -> None:
+        """Read declared image settings and precompute pooling."""
+        self.crop_mode = str(crop_mode)
+        self.height = int(size["height"])
+        self.width = int(size["width"])
+        self.patch_size = int(patch_size)
+        self.pool_h, self.pool_w = (int(pooling_size[0]), int(pooling_size[1]))
+        self.image_mean = list(image_mean)
+        self.image_std = list(image_std)
 
         patch_h = self.height // self.patch_size
         patch_w = self.width // self.patch_size

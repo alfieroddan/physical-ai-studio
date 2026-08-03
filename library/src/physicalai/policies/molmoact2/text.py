@@ -13,15 +13,10 @@ states (post-rotary, before GQA repeat) that the action expert cross-attends to.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 from transformers.activations import ACT2FN
-
-if TYPE_CHECKING:
-    from physicalai.policies.molmoact2.config import MolmoAct2TextConfig
 
 KVState = tuple[torch.Tensor, torch.Tensor]
 
@@ -94,12 +89,10 @@ class MolmoAct2RotaryEmbedding(nn.Module):
 
     inv_freq: torch.Tensor
 
-    def __init__(self, config: MolmoAct2TextConfig) -> None:
+    def __init__(self, *, head_dim: int, rope_theta: float) -> None:
         """Precompute inverse frequencies from ``rope_theta`` and ``head_dim``."""
         super().__init__()
-        inv_freq = 1.0 / (
-            config.rope_theta ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32) / config.head_dim)
-        )
+        inv_freq = 1.0 / (rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=True)
 
     @torch.no_grad()
@@ -115,37 +108,45 @@ class MolmoAct2RotaryEmbedding(nn.Module):
 class MolmoAct2Attention(nn.Module):
     """Grouped-query self-attention with fused QKV and QK-norm."""
 
-    def __init__(self, config: MolmoAct2TextConfig) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        qkv_bias: bool,
+        use_qk_norm: bool,
+        qk_norm_type: str,
+        layer_norm_eps: float,
+    ) -> None:
         """Build the fused QKV projection, output projection and QK norms.
 
         Raises:
             ValueError: if the number of key value heads is None.
         """
         super().__init__()
-        self.num_heads = config.num_attention_heads
-        self.num_key_value_heads = config.num_key_value_heads
-        if self.num_key_value_heads is None:
-            msg = f"Number of key value heads can not be None {self.num_key_value_heads}"
-            raise ValueError(msg)
+        self.num_heads = num_attention_heads
+        self.num_key_value_heads = num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
-        self.head_dim = config.head_dim
+        self.head_dim = head_dim
 
         self.fused_dims = (
             self.num_heads * self.head_dim,
             self.num_key_value_heads * self.head_dim,
             self.num_key_value_heads * self.head_dim,
         )
-        self.att_proj = nn.Linear(config.hidden_size, sum(self.fused_dims), bias=config.qkv_bias)
-        self.attn_out = nn.Linear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
+        self.att_proj = nn.Linear(hidden_size, sum(self.fused_dims), bias=qkv_bias)
+        self.attn_out = nn.Linear(self.num_heads * self.head_dim, hidden_size, bias=False)
 
         self.q_norm: MolmoAct2RMSNorm | None = None
         self.k_norm: MolmoAct2RMSNorm | None = None
-        if config.use_qk_norm:
-            if config.qk_norm_type != "qwen3":
-                msg = f"Only qk_norm_type='qwen3' is supported, got {config.qk_norm_type!r}."
+        if use_qk_norm:
+            if qk_norm_type != "qwen3":
+                msg = f"Only qk_norm_type='qwen3' is supported, got {qk_norm_type!r}."
                 raise NotImplementedError(msg)
-            self.q_norm = MolmoAct2RMSNorm(self.head_dim, eps=config.layer_norm_eps)
-            self.k_norm = MolmoAct2RMSNorm(self.head_dim, eps=config.layer_norm_eps)
+            self.q_norm = MolmoAct2RMSNorm(self.head_dim, eps=layer_norm_eps)
+            self.k_norm = MolmoAct2RMSNorm(self.head_dim, eps=layer_norm_eps)
 
     def forward(
         self,
@@ -208,13 +209,35 @@ class LanguageModelMLP(nn.Module):
 class MolmoAct2DecoderLayer(nn.Module):
     """Pre-norm transformer decoder layer."""
 
-    def __init__(self, config: MolmoAct2TextConfig) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        qkv_bias: bool,
+        use_qk_norm: bool,
+        qk_norm_type: str,
+        layer_norm_eps: float,
+        intermediate_size: int,
+        hidden_act: str,
+    ) -> None:
         """Build attention, feed-forward and their norms."""
         super().__init__()
-        self.self_attn = MolmoAct2Attention(config)
-        self.attn_norm = MolmoAct2RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.mlp = LanguageModelMLP(config.hidden_size, config.intermediate_size, config.hidden_act)
-        self.ff_norm = MolmoAct2RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
+        self.self_attn = MolmoAct2Attention(
+            hidden_size=hidden_size,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=head_dim,
+            qkv_bias=qkv_bias,
+            use_qk_norm=use_qk_norm,
+            qk_norm_type=qk_norm_type,
+            layer_norm_eps=layer_norm_eps,
+        )
+        self.attn_norm = MolmoAct2RMSNorm(hidden_size, eps=layer_norm_eps)
+        self.mlp = LanguageModelMLP(hidden_size, intermediate_size, hidden_act)
+        self.ff_norm = MolmoAct2RMSNorm(hidden_size, eps=layer_norm_eps)
 
     def forward(
         self,
@@ -254,17 +277,48 @@ class MolmoAct2Embedding(nn.Module):
 class MolmoAct2TextModel(nn.Module):
     """Decoder-only transformer producing hidden states and per-layer KV."""
 
-    def __init__(self, config: MolmoAct2TextConfig) -> None:
+    def __init__(
+        self,
+        *,
+        hidden_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        vocab_size: int,
+        additional_vocab_size: int,
+        qkv_bias: bool,
+        num_hidden_layers: int,
+        intermediate_size: int,
+        hidden_act: str,
+        rope_theta: float,
+        use_qk_norm: bool,
+        qk_norm_type: str,
+        layer_norm_eps: float,
+        norm_after: bool,
+    ) -> None:
         """Build the embeddings, decoder blocks, final norm and rotary embedding."""
         super().__init__()
-        if config.norm_after:
+        if norm_after:
             msg = "MolmoAct2 inference only supports norm_after=False."
             raise NotImplementedError(msg)
-        self.config = config
-        self.wte = MolmoAct2Embedding(config.vocab_size, config.additional_vocab_size, config.hidden_size)
-        self.blocks = nn.ModuleList([MolmoAct2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.ln_f = MolmoAct2RMSNorm(config.hidden_size, eps=config.layer_norm_eps)
-        self.rotary_emb = MolmoAct2RotaryEmbedding(config)
+        self.wte = MolmoAct2Embedding(vocab_size, additional_vocab_size, hidden_size)
+        self.blocks = nn.ModuleList([
+            MolmoAct2DecoderLayer(
+                hidden_size=hidden_size,
+                num_attention_heads=num_attention_heads,
+                num_key_value_heads=num_key_value_heads,
+                head_dim=head_dim,
+                qkv_bias=qkv_bias,
+                use_qk_norm=use_qk_norm,
+                qk_norm_type=qk_norm_type,
+                layer_norm_eps=layer_norm_eps,
+                intermediate_size=intermediate_size,
+                hidden_act=hidden_act,
+            )
+            for _ in range(num_hidden_layers)
+        ])
+        self.ln_f = MolmoAct2RMSNorm(hidden_size, eps=layer_norm_eps)
+        self.rotary_emb = MolmoAct2RotaryEmbedding(head_dim=head_dim, rope_theta=rope_theta)
         # Toggled by :meth:`gradient_checkpointing_enable` so each decoder
         # block is recomputed during the backward pass to trade compute for
         # memory. Has no effect outside of training (``self.training`` and

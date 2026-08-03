@@ -24,8 +24,6 @@ from torch import nn
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from physicalai.policies.molmoact2.config import MolmoAct2ActionExpertConfig
-
 KVContext = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -391,8 +389,18 @@ class ActionExpert(nn.Module):
 
     def __init__(
         self,
-        config: MolmoAct2ActionExpertConfig,
         *,
+        max_action_dim: int,
+        hidden_size: int,
+        num_layers: int,
+        num_heads: int,
+        mlp_ratio: float,
+        ffn_multiple_of: int,
+        timestep_embed_dim: int,
+        context_layer_norm: bool,
+        qk_norm: bool,
+        qk_norm_eps: float,
+        rope: bool,
         llm_kv_dim: int,
         llm_num_layers: int,
     ) -> None:
@@ -402,12 +410,11 @@ class ActionExpert(nn.Module):
             ValueError: if action action expers have no block per text layer.
         """
         super().__init__()
-        if config.num_layers != llm_num_layers:
-            msg = f"Action expert needs one block per text layer: {config.num_layers} != {llm_num_layers}."
+        if num_layers != llm_num_layers:
+            msg = f"Action expert needs one block per text layer: {num_layers} != {llm_num_layers}."
             raise ValueError(msg)
-        self.config = config
-        self.num_heads = config.num_heads
-        self.action_head_dim = config.hidden_size // config.num_heads
+        self.num_heads = num_heads
+        self.action_head_dim = hidden_size // num_heads
         # Toggled by :meth:`gradient_checkpointing_enable` so each block is
         # recomputed during the backward pass to trade compute for memory. Has
         # no effect outside of training (``self.training`` and
@@ -415,30 +422,28 @@ class ActionExpert(nn.Module):
         self.gradient_checkpointing: bool = False
 
         self.time_embed = nn.Sequential(
-            SinusoidalTimeEmbedding(config.timestep_embed_dim),
-            nn.Linear(config.timestep_embed_dim, config.hidden_size),
+            SinusoidalTimeEmbedding(timestep_embed_dim),
+            nn.Linear(timestep_embed_dim, hidden_size),
             nn.SiLU(),
-            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.Linear(hidden_size, hidden_size),
         )
-        self.action_embed = nn.Linear(config.max_action_dim, config.hidden_size)
-        self.context_k_proj = nn.Linear(llm_kv_dim, config.hidden_size, bias=False)
-        self.context_v_proj = nn.Linear(llm_kv_dim, config.hidden_size, bias=False)
-        self.context_norm = (
-            ActionExpertRMSNorm(config.hidden_size, eps=1e-6) if config.context_layer_norm else nn.Identity()
-        )
+        self.action_embed = nn.Linear(max_action_dim, hidden_size)
+        self.context_k_proj = nn.Linear(llm_kv_dim, hidden_size, bias=False)
+        self.context_v_proj = nn.Linear(llm_kv_dim, hidden_size, bias=False)
+        self.context_norm = ActionExpertRMSNorm(hidden_size, eps=1e-6) if context_layer_norm else nn.Identity()
         self.blocks = nn.ModuleList([
             ActionExpertBlock(
-                config.hidden_size,
-                config.num_heads,
-                mlp_ratio=config.mlp_ratio,
-                ffn_multiple_of=config.ffn_multiple_of,
-                qk_norm=config.qk_norm,
-                qk_norm_eps=config.qk_norm_eps,
-                rope=config.rope,
+                hidden_size,
+                num_heads,
+                mlp_ratio=mlp_ratio,
+                ffn_multiple_of=ffn_multiple_of,
+                qk_norm=qk_norm,
+                qk_norm_eps=qk_norm_eps,
+                rope=rope,
             )
-            for _ in range(config.num_layers)
+            for _ in range(num_layers)
         ])
-        self.final_layer = ActionExpertFinalLayer(config.hidden_size, config.max_action_dim)
+        self.final_layer = ActionExpertFinalLayer(hidden_size, max_action_dim)
 
     def _time_conditioning(self, timesteps: torch.Tensor) -> torch.Tensor:
         """Embed timesteps into the modulation conditioning vector.
