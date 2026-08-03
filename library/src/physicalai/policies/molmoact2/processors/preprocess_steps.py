@@ -478,12 +478,17 @@ class ActionPadder(torch.nn.Module):
         super().__init__()
         self.max_action_dim = int(max_action_dim)
 
-    def forward(self, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        action: torch.Tensor,
+        action_horizon_is_pad: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return padded action, horizon mask, and dimension mask.
 
         Returns:
             ``(padded, action_horizon_is_pad, action_dim_is_pad)`` where the
-            action is right-padded to ``max_action_dim``.
+            action is right-padded to ``max_action_dim``. A supplied horizon
+            mask must have shape ``[B, T]`` matching ``action``.
 
         Raises:
             ValueError: If the action is not 3-D ``[B, T, D]``, or if its
@@ -507,7 +512,16 @@ class ActionPadder(torch.nn.Module):
         )
         padded[..., : int(normalized.shape[-1])] = normalized
 
-        action_horizon_is_pad = torch.zeros(normalized.shape[:2], dtype=torch.bool, device=normalized.device)
+        if action_horizon_is_pad is None:
+            action_horizon_is_pad = torch.zeros(normalized.shape[:2], dtype=torch.bool, device=normalized.device)
+        else:
+            action_horizon_is_pad = action_horizon_is_pad.to(device=normalized.device, dtype=torch.bool)
+            if tuple(action_horizon_is_pad.shape) != tuple(normalized.shape[:2]):
+                msg = (
+                    "action_horizon_is_pad must match action horizon shape: "
+                    f"got {tuple(action_horizon_is_pad.shape)} for action {tuple(normalized.shape)}."
+                )
+                raise ValueError(msg)
         action_dim_is_pad = torch.ones(
             (normalized.shape[0], self.max_action_dim),
             dtype=torch.bool,

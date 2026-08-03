@@ -494,9 +494,7 @@ class ActionExpert(nn.Module):
             for k_ctx, v_ctx in context.kv_contexts
         ]
         cross_mask = (
-            context.cross_mask.repeat_interleave(num_flow_timesteps, dim=0)
-            if context.cross_mask is not None
-            else None
+            context.cross_mask.repeat_interleave(num_flow_timesteps, dim=0) if context.cross_mask is not None else None
         )
         valid_action = (
             context.valid_action.repeat_interleave(num_flow_timesteps, dim=0)

@@ -96,7 +96,7 @@ _MODEL_INPUT_KEYS = (
 )
 
 
-def _masked_flow_loss(
+def _masked_action_mse(
     predicted: Tensor,
     target: Tensor,
     *,
@@ -105,25 +105,55 @@ def _masked_flow_loss(
 ) -> Tensor:
     """Mean squared error over valid action steps and dimensions only.
 
-    ``predicted``/``target`` carry a ``num_flow_timesteps`` dimension right
-    after the batch dim (``(batch, num_flow_timesteps, horizon,
-    max_action_dim)``, see :meth:`MolmoAct2Backbone.predict_flow_velocity`);
-    the horizon/action-dim padding masks are per-example only, so they are
-    broadcast across it.
-
     Returns:
         loss of continous action compared to target actions.
     """
     loss = F.mse_loss(predicted, target, reduction="none")
     mask = torch.ones_like(loss, dtype=torch.bool)
+    horizon_axis = -2
+    action_dim_axis = -1
     if action_horizon_is_pad is not None:
-        valid_horizon = (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, :, None]
+        valid_horizon = (~action_horizon_is_pad.to(device=loss.device, dtype=torch.bool)).view(
+            loss.shape[0],
+            *([1] * (loss.ndim - 3)),
+            loss.shape[horizon_axis],
+            1,
+        )
         mask = mask & valid_horizon  # noqa: PLR6104
     if action_dim_is_pad is not None:
-        valid_dim = (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool))[:, None, None, :]
+        valid_dim = (~action_dim_is_pad.to(device=loss.device, dtype=torch.bool)).view(
+            loss.shape[0],
+            *([1] * (loss.ndim - 3)),
+            1,
+            loss.shape[action_dim_axis],
+        )
         mask = mask & valid_dim  # noqa: PLR6104
     valid = mask.to(loss.dtype)
     return (loss * valid).sum() / valid.sum().clamp_min(1.0)
+
+
+def _masked_flow_loss(
+    predicted: Tensor,
+    target: Tensor,
+    *,
+    action_horizon_is_pad: Tensor | None,
+    action_dim_is_pad: Tensor | None,
+) -> Tensor:
+    """Flow-matching MSE over valid action steps and dimensions only.
+
+    ``predicted``/``target`` have shape ``(batch, num_flow_timesteps,
+    horizon, max_action_dim)``. The per-example masks broadcast over the
+    flow-timestep axis.
+
+    Returns:
+        Flow matching MSE loss.
+    """
+    return _masked_action_mse(
+        predicted,
+        target,
+        action_horizon_is_pad=action_horizon_is_pad,
+        action_dim_is_pad=action_dim_is_pad,
+    )
 
 
 def _strict_load_safetensors_weights(model: torch.nn.Module, checkpoint_location: str) -> None:
@@ -176,7 +206,7 @@ class MolmoAct2Model(Model):
             self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
             self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
 
-    def train(self, mode: bool = True) -> "MolmoAct2Model":
+    def train(self, mode: bool = True) -> MolmoAct2Model:
         """Set training mode, keeping a frozen VLM in eval when action-expert-only.
 
         Mirrors the reference MolmoAct2 training recipe: when
@@ -416,7 +446,18 @@ class MolmoAct2Model(Model):
         horizon = min(int(gt_actions.shape[1]), int(predicted.shape[1]))
         action_dim = min(int(gt_actions.shape[2]), int(predicted.shape[2]))
         target = gt_actions[:, :horizon, :action_dim].to(device=predicted.device, dtype=predicted.dtype)
-        loss = F.mse_loss(predicted[:, :horizon, :action_dim], target)
+        action_horizon_is_pad = batch.get("action_horizon_is_pad")
+        if action_horizon_is_pad is not None:
+            action_horizon_is_pad = action_horizon_is_pad[:, :horizon]
+        action_dim_is_pad = batch.get("action_dim_is_pad")
+        if action_dim_is_pad is not None:
+            action_dim_is_pad = action_dim_is_pad[:, :action_dim]
+        loss = _masked_action_mse(
+            predicted[:, :horizon, :action_dim],
+            target,
+            action_horizon_is_pad=action_horizon_is_pad,
+            action_dim_is_pad=action_dim_is_pad if self.config.mask_action_dim_padding else None,
+        )
         return loss, {"loss": float(loss.detach().float())}
 
     def freeze_to_action_expert(self) -> None:

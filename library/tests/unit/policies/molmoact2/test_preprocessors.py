@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 import torch
 
+from physicalai.data.constants import EXTRA
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 from physicalai.policies.molmoact2.config import (
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
@@ -28,6 +29,7 @@ from physicalai.policies.molmoact2.processors.inputs import (
 from physicalai.policies.molmoact2.processors.joint_transform import JointFrameTransform
 from physicalai.policies.molmoact2.processors.postprocessor import MolmoAct2Postprocessor
 from physicalai.policies.molmoact2.processors.preprocess_steps import (
+    ActionExtractor,
     ActionPadder,
     ImagePacker,
     ImageResizeNormalizer,
@@ -191,6 +193,45 @@ class TestActionPadder:
         action = torch.randn(2, 2)
         padded, _, _ = padder(action)
         assert padded.shape == (2, 1, 4)
+
+    def test_preserves_horizon_padding_mask(self) -> None:
+        padder = ActionPadder(max_action_dim=4)
+        action = torch.randn(2, 3, 2)
+        expected = torch.tensor([[False, False, True], [False, True, True]])
+        _, horizon_pad, _ = padder(action, expected)
+        assert torch.equal(horizon_pad, expected)
+
+    def test_rejects_mismatched_horizon_padding_mask(self) -> None:
+        padder = ActionPadder(max_action_dim=4)
+        with pytest.raises(ValueError, match="action_horizon_is_pad must match"):
+            padder(torch.randn(2, 3, 2), torch.zeros(2, 2, dtype=torch.bool))
+
+    def test_preprocessor_reads_canonical_lerobot_padding_key(self) -> None:
+        preprocessor = object.__new__(MolmoAct2Preprocessor)
+        torch.nn.Module.__init__(preprocessor)
+        preprocessor._action_extractor = ActionExtractor()
+        preprocessor._action_padder = ActionPadder(max_action_dim=4)
+        expected = torch.tensor([[False, False, True]])
+
+        result = MolmoAct2Preprocessor._preprocess_action(
+            preprocessor,
+            {ACTION: torch.zeros(1, 3, 2), f"{EXTRA}.action_is_pad": expected},
+        )
+
+        assert torch.equal(result["action_horizon_is_pad"], expected)
+
+    def test_preprocessor_does_not_read_typoed_padding_key(self) -> None:
+        preprocessor = object.__new__(MolmoAct2Preprocessor)
+        torch.nn.Module.__init__(preprocessor)
+        preprocessor._action_extractor = ActionExtractor()
+        preprocessor._action_padder = ActionPadder(max_action_dim=4)
+
+        result = MolmoAct2Preprocessor._preprocess_action(
+            preprocessor,
+            {ACTION: torch.zeros(1, 3, 2), f"{EXTRA}.actions_id_pad": torch.ones(1, 3, dtype=torch.bool)},
+        )
+
+        assert not result["action_horizon_is_pad"].any()
 
     def test_raises_when_dim_exceeds_max(self) -> None:
         padder = ActionPadder(max_action_dim=2)

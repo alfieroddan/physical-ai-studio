@@ -42,7 +42,7 @@ from physicalai.policies.molmoact2.model.text import (
     rotate_half,
 )
 from physicalai.policies.molmoact2.model.vision import MolmoAct2VisionBackbone
-from physicalai.policies.molmoact2.model.wrapper import MolmoAct2Model
+from physicalai.policies.molmoact2.model.wrapper import MolmoAct2Model, _masked_action_mse
 
 
 class TestRoundUpMultiple:
@@ -334,6 +334,64 @@ class TestMolmoAct2DeltaIndices:
         assert model.action_delta_indices == list(range(10))
         assert model.observation_delta_indices is None
         assert model.reward_delta_indices is None
+
+
+class TestMaskedActionMse:
+    def test_horizon_padding_is_excluded_from_loss_and_gradients(self) -> None:
+        predicted = torch.tensor([[[[2.0], [10.0]]]], requires_grad=True)
+        target = torch.zeros_like(predicted)
+
+        loss = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=torch.tensor([[False, True]]),
+            action_dim_is_pad=None,
+        )
+
+        torch.testing.assert_close(loss, torch.tensor(4.0))
+        loss.backward()
+        torch.testing.assert_close(predicted.grad, torch.tensor([[[[4.0], [0.0]]]]))
+
+    def test_denominator_counts_valid_steps_and_dimensions_only(self) -> None:
+        predicted = torch.tensor([[[[2.0, 100.0], [50.0, 50.0]]]])
+        target = torch.zeros_like(predicted)
+
+        loss = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=torch.tensor([[False, True]]),
+            action_dim_is_pad=torch.tensor([[False, True]]),
+        )
+
+        torch.testing.assert_close(loss, torch.tensor(4.0))
+
+    def test_fully_padded_actions_are_finite_and_zero(self) -> None:
+        predicted = torch.ones(1, 1, 2, 1, requires_grad=True)
+        target = torch.zeros_like(predicted)
+
+        loss = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=torch.tensor([[True, True]]),
+            action_dim_is_pad=None,
+        )
+
+        torch.testing.assert_close(loss, torch.tensor(0.0))
+        loss.backward()
+        torch.testing.assert_close(predicted.grad, torch.zeros_like(predicted))
+
+    def test_without_masks_matches_plain_mean_mse(self) -> None:
+        predicted = torch.tensor([[[2.0], [4.0]]])
+        target = torch.zeros_like(predicted)
+
+        loss = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=None,
+            action_dim_is_pad=None,
+        )
+
+        torch.testing.assert_close(loss, torch.tensor(10.0))
 
 
 class TestMolmoAct2LoRA:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from physicalai.data.constants import IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
+from physicalai.data.constants import EXTRA, IMAGE_MASKS, TOKENIZED_PROMPT, TOKENIZED_PROMPT_MASK
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
 
 from .image import MolmoAct2ImageProcessor
@@ -229,11 +229,16 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         Returns:
             Dictionary with ``action``, ``action_horizon_is_pad`` and
             ``action_dim_is_pad`` when action targets are present, else empty.
+            The horizon mask is sourced from LeRobot's
+            ``extra.action_is_pad`` dataset metadata when available.
         """
         action = self._action_extractor.extract(normalized_batch)
         if action is None:
             return {}
-        padded, action_horizon_is_pad, action_dim_is_pad = self._action_padder(action)
+        padded, action_horizon_is_pad, action_dim_is_pad = self._action_padder(
+            action,
+            normalized_batch.get(f"{EXTRA}.action_is_pad"),
+        )
         return {
             ACTION: padded,
             "action_horizon_is_pad": action_horizon_is_pad,
@@ -324,4 +329,5 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if ACTION in packed:
             prepared[ACTION] = packed[ACTION]
             prepared["action_horizon_is_pad"] = packed["action_horizon_is_pad"]
+            prepared["action_dim_is_pad"] = packed["action_dim_is_pad"]
         return prepared
