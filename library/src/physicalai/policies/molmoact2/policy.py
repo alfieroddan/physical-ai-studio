@@ -538,7 +538,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         actions = self.model.predict_action_chunk(processed_batch)
         return self._postprocessor({ACTION: actions})[ACTION]
 
-    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, float]]:
+    def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, Tensor | float]]:
         """Run training or inference forward pass.
 
         Args:

@@ -397,7 +397,7 @@ class MolmoAct2Model(Model):
         env_action_dim = _env_action_dim(self.config) or actions.shape[-1]
         return actions[:, : int(self.config.n_action_steps), :env_action_dim].to(torch.float32)
 
-    def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, float]]:
+    def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
         """Run the model.
 
         Returns:
@@ -408,7 +408,7 @@ class MolmoAct2Model(Model):
         return self.predict_action_chunk(batch)
 
     @override
-    def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+    def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Continuous flow-matching training loss.
 
         Returns:
@@ -430,7 +430,7 @@ class MolmoAct2Model(Model):
             action_horizon_is_pad=batch.get("action_horizon_is_pad"),
             action_dim_is_pad=batch.get("action_dim_is_pad") if self.config.mask_action_dim_padding else None,
         )
-        value = float(loss.detach().float())
+        value = loss.detach()
         return loss, {"action_flow_loss": value, "loss": value}
 
     @override

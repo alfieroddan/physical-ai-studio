@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+from physicalai.data.observation import ACTION
 from physicalai.policies.molmoact2.config import MolmoAct2Config
 from physicalai.policies.molmoact2.model.action_expert import (
     ActionExpert,
@@ -392,6 +393,36 @@ class TestMaskedActionMse:
         )
 
         torch.testing.assert_close(loss, torch.tensor(10.0))
+
+
+class TestMolmoAct2TrainingMetrics:
+    def test_compute_loss_returns_detached_tensor_metrics(
+        self,
+        tiny_molmoact2_config: MolmoAct2Config,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        model = MolmoAct2Model(tiny_molmoact2_config)
+        predicted = torch.ones(1, 1, 1, tiny_molmoact2_config.max_action_dim, requires_grad=True)
+        target = torch.zeros_like(predicted)
+        monkeypatch.setattr(
+            model._for_cond_gen.model,
+            "predict_flow_velocity",
+            lambda **_: (predicted, target),
+        )
+
+        loss, metrics = model.compute_loss(
+            {
+                "input_ids": torch.zeros(1, 1, dtype=torch.long),
+                ACTION: target,
+                "action_dim_is_pad": torch.zeros(1, tiny_molmoact2_config.max_action_dim, dtype=torch.bool),
+            },
+        )
+
+        for name in ("action_flow_loss", "loss"):
+            metric = metrics[name]
+            assert isinstance(metric, torch.Tensor)
+            assert not metric.requires_grad
+            torch.testing.assert_close(metric, loss.detach())
 
 
 class TestMolmoAct2LoRA:
