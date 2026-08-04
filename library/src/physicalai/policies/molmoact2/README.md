@@ -165,7 +165,7 @@ if __name__ == "__main__":
     policy.config.train_action_expert_only = True
 
     dm = LeRobotDataModule(
-        repo_id="MarkRedeman/dice-cleanup-combined",
+        repo_id="lerobot/svla_so101_pickplace",
         train_batch_size=1,
         val_batch_size=1,
         val_split=0.1,

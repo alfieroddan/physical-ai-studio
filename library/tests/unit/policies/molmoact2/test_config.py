@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from physicalai.config import Config
+from physicalai.training_config import Config
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_FRAME_END_TOKEN_ID,
@@ -35,13 +35,36 @@ class TestMolmoAct2Config:
     def test_default_config(self) -> None:
         config = MolmoAct2Config()
         assert config.model_type == "molmoact2"
-        assert config.n_obs_steps == 30
+        assert config.n_obs_steps == 1
         assert config.chunk_size == 30
         assert config.n_action_steps == 30
         assert config.max_action_dim == 32
         assert config.action_mode == "continuous"
         assert config.state_format == "discrete"
         assert config.image_num_pos == 729
+
+    def test_default_architecture_matches_molmo_base(self) -> None:
+        config = MolmoAct2Config()
+        assert config.hidden_size == 2560
+        assert config.num_attention_heads == 32
+        assert config.num_key_value_heads == 8
+        assert config.num_hidden_layers == 36
+        assert config.intermediate_size == 9728
+        assert config.qkv_bias is False
+        assert config.max_position_embeddings == 16_384
+        assert config.rope_theta == 5_000_000.0
+        assert config.use_qk_norm is True
+        assert config.qk_norm_type == "qwen3"
+        assert config.adapter_pooling_attention_mask is True
+        assert config.adapter_intermediate_size == 9728
+        assert config.adapter_text_hidden_size == 2560
+        assert config.action_expert_hidden_size == 768
+        assert config.action_expert_num_heads == 8
+        assert config.action_expert_mlp_ratio == 4.0
+        assert config.num_state_tokens == 256
+        assert config.action_expert_num_layers == 36
+        assert config.action_expert_max_action_horizon == 30
+        assert config.action_expert_max_action_dim == 32
 
     def test_default_tokenizer_values(self) -> None:
         config = MolmoAct2Config()
@@ -193,7 +216,7 @@ class TestMolmoAct2Config:
         assert config.num_attention_heads == 4
         assert config.num_hidden_layers == 2
         assert config.vocab_size == 154_624
-        assert config.max_position_embeddings == 4096
+        assert config.max_position_embeddings == 16_384
         assert config.use_cache is True
 
     def test_image_num_patch_property(self) -> None:

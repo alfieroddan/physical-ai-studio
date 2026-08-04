@@ -75,24 +75,24 @@ class MolmoAct2Config(Config):
     model_type: str = "molmoact2"
 
     # Text transformer
-    hidden_size: int = 3584
-    num_attention_heads: int = 28
-    num_key_value_heads: int | None = 4
+    hidden_size: int = 2560
+    num_attention_heads: int = 32
+    num_key_value_heads: int | None = 8
     head_dim: int = 128
     vocab_size: int = 154_624
     additional_vocab_size: int = 128
-    qkv_bias: bool = True
-    num_hidden_layers: int = 48
-    intermediate_size: int = 18_944
+    qkv_bias: bool = False
+    num_hidden_layers: int = 36
+    intermediate_size: int = 9728
     hidden_act: str = "silu"
-    max_position_embeddings: int = 4096
-    rope_theta: float = 1_000_000.0
-    use_qk_norm: bool = False
-    qk_norm_type: str = "olmo"
+    max_position_embeddings: int = 16_384
+    rope_theta: float = 5_000_000.0
+    use_qk_norm: bool = True
+    qk_norm_type: str = "qwen3"
     layer_norm_eps: float = 1e-6
     norm_after: bool = False
     use_cache: bool = True
-    text_attn_implementation: str = "eager"
+    text_attn_implementation: str = "sdpa"
 
     # Vision transformer
     vision_hidden_size: int = 1152
@@ -108,11 +108,11 @@ class MolmoAct2Config(Config):
     image_num_pos: int = 729
     vision_attention_dropout: float = 0.0
     vision_residual_dropout: float = 0.0
-    vision_attn_implementation: str = "eager"
+    vision_attn_implementation: str = "sdpa"
 
     # Vision adapter
     adapter_vit_layers: tuple[int, ...] = (-3, -9)
-    adapter_pooling_attention_mask: bool = False
+    adapter_pooling_attention_mask: bool = True
     adapter_hidden_size: int = 1152
     adapter_num_attention_heads: int = 16
     adapter_num_key_value_heads: int = 16
@@ -120,18 +120,18 @@ class MolmoAct2Config(Config):
     adapter_attention_dropout: float = 0.0
     adapter_residual_dropout: float = 0.0
     adapter_hidden_act: str = "silu"
-    adapter_intermediate_size: int = 18_944
-    adapter_text_hidden_size: int = 3584
+    adapter_intermediate_size: int = 9728
+    adapter_text_hidden_size: int = 2560
     image_feature_dropout: float = 0.0
-    adapter_attn_implementation: str = "eager"
+    adapter_attn_implementation: str = "sdpa"
 
     # Action expert
     action_expert_max_action_horizon: int = 32
     action_expert_max_action_dim: int = 32
-    action_expert_hidden_size: int = 1024
+    action_expert_hidden_size: int = 768
     action_expert_num_layers: int = 32
-    action_expert_num_heads: int = 16
-    action_expert_mlp_ratio: float = 8.0 / 3.0
+    action_expert_num_heads: int = 8
+    action_expert_mlp_ratio: float = 4.0
     action_expert_ffn_multiple_of: int = 256
     action_expert_timestep_embed_dim: int = 256
     action_expert_context_layer_norm: bool = True
@@ -141,7 +141,7 @@ class MolmoAct2Config(Config):
     action_expert_causal_attn: bool = False
 
     # Preprocessor and image processor
-    num_state_tokens: int = 0
+    num_state_tokens: int = 256
     setup_type: str = ""
     control_mode: str = ""
     add_setup_tokens: bool = True
@@ -173,7 +173,7 @@ class MolmoAct2Config(Config):
     scheduler_decay_lr: float = 1e-6
 
     # Input and rollout structure
-    n_obs_steps: int = 30
+    n_obs_steps: int = 1
     chunk_size: int = 30
     n_action_steps: int = 30
 
@@ -268,6 +268,11 @@ class MolmoAct2Config(Config):
         """Configured ``(height_patches, width_patches)`` image grid."""
         height, width = self.image_default_input_size
         return height // self.image_patch_size, width // self.image_patch_size
+
+    @property
+    def max_action_horizon(self) -> int:
+        """Checkpoint-compatible alias for the generated action chunk length."""
+        return self.chunk_size
 
     def _validate_rollout_settings(self) -> None:
         if self.chunk_size < 1:
