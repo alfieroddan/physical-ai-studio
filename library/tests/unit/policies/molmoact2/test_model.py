@@ -155,6 +155,10 @@ class TestTextRMSNorm:
         x = torch.zeros(1, 4, 8)
         torch.testing.assert_close(norm(x), x)
 
+    def test_registers_weight_in_state_dict(self) -> None:
+        norm = MolmoAct2RMSNorm(size=8)
+        assert set(norm.state_dict()) == {"weight"}
+
 
 class TestRotaryEmbedding:
     def test_cos_sin_shapes(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
@@ -247,6 +251,17 @@ class TestActionExpertRMSNorm:
     def test_weight_when_affine(self) -> None:
         norm = ActionExpertRMSNorm(16, elementwise_affine=True)
         assert norm.weight is not None
+
+    def test_state_dict_matches_affine_configuration(self) -> None:
+        assert not ActionExpertRMSNorm(16).state_dict()
+        assert set(ActionExpertRMSNorm(16, elementwise_affine=True).state_dict()) == {"weight"}
+
+    def test_matches_text_norm_when_affine_weights_match(self) -> None:
+        text_norm = MolmoAct2RMSNorm(16)
+        action_norm = ActionExpertRMSNorm(16, elementwise_affine=True)
+        action_norm.load_state_dict(text_norm.state_dict())
+        x = torch.randn(2, 4, 16)
+        torch.testing.assert_close(action_norm(x), text_norm(x))
 
 
 class TestActionExpertRotaryEmbedding:

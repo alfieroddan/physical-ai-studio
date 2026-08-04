@@ -21,6 +21,8 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
 
+from .rms_norm import RMSNorm
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -60,28 +62,12 @@ class ActionExpertContext:
     rope_cache: tuple[torch.Tensor, torch.Tensor] | None
 
 
-class ActionExpertRMSNorm(nn.Module):
+class ActionExpertRMSNorm(RMSNorm):
     """RMS norm, optionally without a learnable weight (matches checkpoint)."""
 
     def __init__(self, size: int, *, eps: float = 1e-6, elementwise_affine: bool = False) -> None:
         """Build the norm, registering a weight only when affine."""
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(size)) if elementwise_affine else None
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize ``x`` over its last dimension.
-
-        Returns:
-            The RMS-normalized tensor, of the same shape and dtype as
-            the input ``x``. Scaled by the learnable weight if
-            ``elementwise_affine`` was set to ``True``.
-        """
-        out_dtype = x.dtype
-        x = x.to(torch.float32)
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # noqa: PLR6104
-        x = x.to(out_dtype)
-        return x if self.weight is None else x * self.weight
+        super().__init__(size, eps=eps, elementwise_affine=elementwise_affine)
 
 
 class ActionExpertRotaryEmbedding(nn.Module):

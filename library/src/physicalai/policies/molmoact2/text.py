@@ -18,6 +18,8 @@ import torch.nn.functional as F  # noqa: N812
 from torch import nn
 from transformers.activations import ACT2FN
 
+from .rms_norm import RMSNorm
+
 KVState = tuple[torch.Tensor, torch.Tensor]
 
 
@@ -63,25 +65,12 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
     return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
-class MolmoAct2RMSNorm(nn.Module):
+class MolmoAct2RMSNorm(RMSNorm):
     """RMS normalization with a learnable weight (float32 reduction)."""
 
     def __init__(self, size: int, eps: float = 1e-6) -> None:
         """Build the norm weight."""
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(size))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Normalize ``x`` over its last dimension and rescale.
-
-        Returns:
-            Root mean squared normalization of x.
-        """
-        out_dtype = x.dtype
-        x = x.to(torch.float32)
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)  # noqa: PLR6104
-        return self.weight * x.to(out_dtype)
+        super().__init__(size, eps=eps)
 
 
 class MolmoAct2RotaryEmbedding(nn.Module):
