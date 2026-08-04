@@ -111,6 +111,42 @@ if __name__ == "__main__":
 
 - When using the robot on a S0-101, start the model when the SO-101 is in an extended position i.e about to do the task. If not the model will get stuck in a loop in rest position.
 
+## Repo ID and Norm Tag
+
+The model init has two args, `repo_id` and `norm_tag`, which describe the pretrained HuggingFace snapshot and the key for the corresponding normalization statistics, depending on your embodiment. I will explain how best to use them here; we will use the base weights as an example.
+
+MolmoAct2 has multiple [collections](https://huggingface.co/allenai/collections) on HuggingFace.
+
+The `repo_id` is the Hugging Face repository, for example `allenai/MolmoAct2-SO100_101`, which can be found [here](https://huggingface.co/allenai/MolmoAct2-SO100_101).
+
+Inside the repo, there is a Files tab. For the snapshots we support, there is a file called `norm_stats.json`, e.g. [this one](https://huggingface.co/allenai/MolmoAct2-SO100_101/blob/main/norm_stats.json).
+
+You'll see the `metadata_by_tag` key; this is `norm_tag`. We are looking to find the `norm_tag` that describes the embodiment we are using with the corresponding pretrained weights.
+
+```json
+{
+  "format": "molmoact2_norm_stats.v1",
+  "norm_mode": "q01_q99",
+  "metadata_by_tag": {
+    "so100_so101_molmoact2": {
+      "action_key": "action",
+      "state_key": "observation.state",
+      "camera_keys": [],
+      "normalize_gripper": true,
+...
+```
+
+In this example, our `norm_tag` is `so100_so101_molmoact2`.
+
+So, to conclude, to use the finetuned `MolmoAct2` on SO101, we would use:
+
+```python
+policy = MolmoAct2(
+        repo_id="allenai/MolmoAct2-LIBERO",
+        norm_tag="libero",
+    )
+```
+
 ## Action Modes & Training Status
 
 MolmoAct2 supports `continuous`, `discrete`, and `both` action modes in its config, but **only `continuous` action mode is currently supported** — passing anything else will raise a `ValueError`. Discrete output/loss and the `both` mode are not yet implemented.
