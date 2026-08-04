@@ -189,7 +189,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # norm_stats.json. Must be set before processors build.
         # Keep repo_id in checkpoint hparams so load_from_checkpoint reconstructs
         # the same pretrained source during inference adapter reload.
-        self.save_hyperparameters(ignore=["config", "load_weights"])
+        self.save_hyperparameters(ignore=["config", "compile_model", "load_weights"])
 
         self.model: MolmoAct2Model | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
         self._preprocessor: MolmoAct2Preprocessor | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
