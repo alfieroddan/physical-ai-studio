@@ -16,9 +16,10 @@ Useful links:
 import torch
 
 from physicalai.data import Feature, FeatureType, Observation
+from physicalai.devices.utils import get_device
 from physicalai.policies import MolmoAct2
 
-DEVICE = "cuda"
+DEVICE = get_device()
 
 batch = Observation(
     images={
@@ -61,9 +62,10 @@ import numpy as np
 import torch
 
 from physicalai.benchmark.gyms import LiberoBenchmark
+from physicalai.devices.utils import get_device
 from physicalai.policies import MolmoAct2
 
-DEVICE = "cuda"
+DEVICE = get_device()
 SEED = 0
 
 
