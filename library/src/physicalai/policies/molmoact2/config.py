@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from physicalai.config import Config
+from physicalai.training_config import Config
 
 if TYPE_CHECKING:
     from physicalai.data import Feature
