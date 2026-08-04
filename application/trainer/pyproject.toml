@@ -23,6 +23,7 @@ dependencies = [
   "huggingface-hub>=0.27",
   # Training stack (torch resolved via the extras below).
   "physicalai-train[pi0,smolvla]",
+  "torchcodec==0.11.1",
   "click>=8.3.0",
 ]
 
@@ -32,11 +33,11 @@ physicalai-trainer = "trainer.cli:trainer"
 [project.optional-dependencies]
 # executorch enables the ExecuTorch export backend. It conflicts with the xpu
 # torch build (see library conflicts), so it ships only with cpu/cuda.
-cpu = ["torch<2.13", "torchvision<0.26.0", "physicalai-train[executorch]"]
-cuda = ["torch<2.13", "torchvision<0.26.0", "physicalai-train[executorch]"]
+cpu = ["torch>=2.11,<2.12", "torchvision>=0.26,<0.27", "physicalai-train[executorch]"]
+cuda = ["torch>=2.11,<2.12", "torchvision>=0.26,<0.27", "physicalai-train[executorch]"]
 xpu = [
-  "torch<2.13",
-  "torchvision<0.26.0",
+  "torch>=2.11,<2.12",
+  "torchvision>=0.26,<0.27",
   "pytorch-triton-xpu ; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 tests = ["pytest>=9.0.3", "pytest-mock", "httpx"]
@@ -62,7 +63,7 @@ explicit = false
 
 [tool.uv.sources]
 physicalai-train = { path = "../../library", editable = true }
-physicalai = { git = "https://github.com/openvinotoolkit/physicalai.git", rev = "9881601325f724a0f00b1bf43f134d7f34fdef55" }
+physicalai = { git = "https://github.com/openvinotoolkit/physicalai.git", rev = "3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44" }
 torch = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu128", extra = "cuda" },

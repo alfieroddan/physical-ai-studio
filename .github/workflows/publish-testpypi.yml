@@ -7,7 +7,7 @@ permissions: {}
 
 jobs:
   build:
-    runs-on: ${{ github.repository_owner == 'open-edge-platform' && 'overflow' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -32,7 +32,7 @@ jobs:
           path: library/dist/
 
   smoke-test:
-    runs-on: ${{ github.repository_owner == 'open-edge-platform' && 'overflow' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: build
     permissions:
       contents: read
@@ -58,7 +58,7 @@ jobs:
           python - <<'PY'
           import importlib.metadata as metadata
 
-          import physicalai.config
+          import physicalai.training_config
           import physicalai.data
           import physicalai.policies
           import physicalai.train
@@ -67,7 +67,7 @@ jobs:
           PY
 
   publish:
-    runs-on: ${{ github.repository_owner == 'open-edge-platform' && 'overflow' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     needs: smoke-test
     permissions:
       id-token: write
