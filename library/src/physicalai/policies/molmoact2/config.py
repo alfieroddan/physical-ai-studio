@@ -27,11 +27,16 @@ if TYPE_CHECKING:
     from physicalai.data import Feature
 
 DEFAULT_MOLMOACT2_REPO_ID = "allenai/MolmoAct2"
-# The ``<|image|>`` image-placeholder token maps to the same id across MolmoAct3
-# variants (verified against ``allenai/MolmoAct2`` and ``allenai/MolmoAct2-LIBERO``).
-# Hardcoding it avoids an extra ``Qwen2Tokenizer.from_pretrained`` call in
-# ``from_hf.py``; the tokenizer itself is loaded once in the preprocessor.
+# The image special-token layout is shared by the supported MolmoAct2 checkpoints.
+MOLMOACT2_IMAGE_START_TOKEN_ID = 154624
+MOLMOACT2_IMAGE_END_TOKEN_ID = 154625
+MOLMOACT2_IMAGE_PATCH_ID = 154626
+MOLMOACT2_IMAGE_COL_ID = 154627
+MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID = 154628
 MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID = 154629
+MOLMOACT2_IMAGE_LOW_RES_ID = 154630
+MOLMOACT2_FRAME_START_TOKEN_ID = 154631
+MOLMOACT2_FRAME_END_TOKEN_ID = 154632
 
 
 @dataclass
@@ -74,7 +79,7 @@ class MolmoAct2Config(Config):
     num_attention_heads: int = 28
     num_key_value_heads: int | None = 4
     head_dim: int = 128
-    vocab_size: int = 152_064
+    vocab_size: int = 154_624
     additional_vocab_size: int = 128
     qkv_bias: bool = True
     num_hidden_layers: int = 48
@@ -100,7 +105,7 @@ class MolmoAct2Config(Config):
     vision_layer_norm_eps: float = 1e-6
     image_default_input_size: tuple[int, int] = (378, 378)
     image_patch_size: int = 14
-    image_num_pos: int = 577
+    image_num_pos: int = 729
     vision_attention_dropout: float = 0.0
     vision_residual_dropout: float = 0.0
     vision_attn_implementation: str = "eager"
@@ -212,15 +217,15 @@ class MolmoAct2Config(Config):
     use_random_input_noise: bool = False
 
     # Vision/image special tokens
-    image_start_token_id: int | None = None
-    low_res_image_start_token_id: int | None = None
-    image_end_token_id: int | None = None
-    image_low_res_id: int | None = None
+    image_start_token_id: int | None = MOLMOACT2_IMAGE_START_TOKEN_ID
+    low_res_image_start_token_id: int | None = MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID
+    image_end_token_id: int | None = MOLMOACT2_IMAGE_END_TOKEN_ID
+    image_low_res_id: int | None = MOLMOACT2_IMAGE_LOW_RES_ID
     image_placeholder_token_id: int = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
-    image_patch_id: int | None = None
-    image_col_id: int | None = None
-    frame_start_token_id: int | None = None
-    frame_end_token_id: int | None = None
+    image_patch_id: int | None = MOLMOACT2_IMAGE_PATCH_ID
+    image_col_id: int | None = MOLMOACT2_IMAGE_COL_ID
+    frame_start_token_id: int | None = MOLMOACT2_FRAME_START_TOKEN_ID
+    frame_end_token_id: int | None = MOLMOACT2_FRAME_END_TOKEN_ID
 
     # Prompt and expert controls
     add_action_expert: bool = True

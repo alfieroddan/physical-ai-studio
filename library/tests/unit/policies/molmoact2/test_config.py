@@ -10,7 +10,15 @@ import pytest
 from physicalai.config import Config
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
+    MOLMOACT2_FRAME_END_TOKEN_ID,
+    MOLMOACT2_FRAME_START_TOKEN_ID,
+    MOLMOACT2_IMAGE_COL_ID,
+    MOLMOACT2_IMAGE_END_TOKEN_ID,
+    MOLMOACT2_IMAGE_LOW_RES_ID,
+    MOLMOACT2_IMAGE_PATCH_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
+    MOLMOACT2_IMAGE_START_TOKEN_ID,
+    MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID,
     MolmoAct2Config,
 )
 
@@ -33,12 +41,24 @@ class TestMolmoAct2Config:
         assert config.max_action_dim == 32
         assert config.action_mode == "continuous"
         assert config.state_format == "discrete"
+        assert config.image_num_pos == 729
 
     def test_default_tokenizer_values(self) -> None:
         config = MolmoAct2Config()
         assert config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
         assert config.tokenizer_config is None
+
+    def test_default_image_token_ids(self) -> None:
+        config = MolmoAct2Config()
+        assert config.image_start_token_id == MOLMOACT2_IMAGE_START_TOKEN_ID
+        assert config.image_end_token_id == MOLMOACT2_IMAGE_END_TOKEN_ID
+        assert config.image_patch_id == MOLMOACT2_IMAGE_PATCH_ID
+        assert config.image_col_id == MOLMOACT2_IMAGE_COL_ID
+        assert config.low_res_image_start_token_id == MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID
+        assert config.image_low_res_id == MOLMOACT2_IMAGE_LOW_RES_ID
+        assert config.frame_start_token_id == MOLMOACT2_FRAME_START_TOKEN_ID
+        assert config.frame_end_token_id == MOLMOACT2_FRAME_END_TOKEN_ID
 
     def test_custom_config(self) -> None:
         config = MolmoAct2Config(
@@ -172,7 +192,7 @@ class TestMolmoAct2Config:
         assert config.hidden_size == 128
         assert config.num_attention_heads == 4
         assert config.num_hidden_layers == 2
-        assert config.vocab_size == 152_064
+        assert config.vocab_size == 154_624
         assert config.max_position_embeddings == 4096
         assert config.use_cache is True
 

@@ -151,6 +151,30 @@ class TestBuildConfigFromHfConfig:
         config = _build_config()
         assert config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 
+    def test_checkpoint_image_token_ids_override_defaults(self) -> None:
+        config = build_config_from_hf_config(
+            {
+                **_make_hf_config(),
+                "image_start_token_id": 10,
+                "image_end_token_id": 11,
+                "image_patch_id": 12,
+                "image_col_id": 13,
+                "low_res_image_start_token_id": 14,
+                "image_low_res_id": 15,
+                "frame_start_token_id": 16,
+                "frame_end_token_id": 17,
+            },
+            checkpoint_path="/tmp/checkpoint",
+        )
+        assert config.image_start_token_id == 10
+        assert config.image_end_token_id == 11
+        assert config.image_patch_id == 12
+        assert config.image_col_id == 13
+        assert config.low_res_image_start_token_id == 14
+        assert config.image_low_res_id == 15
+        assert config.frame_start_token_id == 16
+        assert config.frame_end_token_id == 17
+
     def test_tokenizer_name_or_path_uses_repo_id(self) -> None:
         config = _build_config(repo_id="allenai/MolmoAct2-LIBERO")
         assert config.tokenizer_name_or_path == "allenai/MolmoAct2-LIBERO"

@@ -497,6 +497,7 @@ class TestImageTokenIdsForGrid:
             image_default_input_size=(28, 28),
             image_patch_size=14,
             image_start_token_id=10,
+            low_res_image_start_token_id=10,
             image_end_token_id=12,
             image_patch_id=11,
             image_col_id=13,
