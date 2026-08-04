@@ -21,10 +21,10 @@ from safetensors.torch import load_file as load_safetensors_file
 from torch import Tensor
 
 from physicalai.data.constants import ACTION
-from physicalai.data.observation import FeatureType
+from physicalai.data.observation import Feature, FeatureType
 from physicalai.policies.base import Model
 
-from .backbone import MolmoAct2ForConditionalGeneration
+from .backbone import MolmoAct2ForConditionalGeneration, make_molmoact2_backbone
 
 if TYPE_CHECKING:
     from physicalai.policies.molmoact2.config import MolmoAct2Config
@@ -75,9 +75,9 @@ _SAFE_WEIGHTS_NAME = "model.safetensors"
 _SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
 
 
-def _env_action_dim(config: MolmoAct2Config) -> int:
+def _env_action_dim(output_features: tuple[Feature, ...]) -> int:
     """Return the environment action dimension from the output features."""
-    for feature in config.output_features or []:
+    for feature in output_features:
         if feature.ftype == FeatureType.ACTION and feature.shape:
             return int(feature.shape[0])
     return 0
@@ -194,13 +194,28 @@ class MolmoAct2Model(Model):
     def __init__(self, config: MolmoAct2Config) -> None:
         """Build the backbone."""
         super().__init__()
-        self.config = config
-        self.backbone = MolmoAct2ForConditionalGeneration(config)
+        self._train_action_expert_only = config.train_action_expert_only
+        self._enable_lora_action_expert = config.enable_lora_action_expert
+        self._lora_rank = config.lora_rank
+        self._lora_alpha = config.lora_alpha
+        self._lora_dropout = config.lora_dropout
+        self._lora_bias = config.lora_bias
+        self._add_action_expert = config.add_action_expert
+        self._chunk_size = config.chunk_size
+        self._n_action_steps = config.n_action_steps
+        self._use_random_input_noise = config.use_random_input_noise
+        self._mask_action_dim_padding = config.mask_action_dim_padding
+        self._output_features = tuple(config.output_features or [])
+        self.backbone = MolmoAct2ForConditionalGeneration(
+            model=make_molmoact2_backbone(config),
+            hidden_size=config.hidden_size,
+            vocab_size=config.vocab_size,
+        )
 
-        if self.config.gradient_checkpointing:
+        if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()
 
-        if self.config.compile_model:
+        if config.compile_model:
             torch.set_float32_matmul_precision("high")
             compile_mode = "default"
             self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
@@ -223,7 +238,7 @@ class MolmoAct2Model(Model):
             ``self``, matching :meth:`nn.Module.train`.
         """
         super().train(mode)
-        if getattr(self.config, "train_action_expert_only", False):
+        if self._train_action_expert_only:
             self._for_cond_gen.eval()
             action_expert = getattr(self._for_cond_gen.model, "action_expert", None)
             if action_expert is not None:
@@ -233,44 +248,6 @@ class MolmoAct2Model(Model):
     def load_pretrained_weights(self, checkpoint_location: str) -> None:
         """Load safetensors weights into the backbone (strict key match)."""
         _strict_load_safetensors_weights(self.backbone, checkpoint_location)
-
-    def override_training_config(self, **overrides: float | None) -> None:
-        """Override optimizer/scheduler settings on the attached training config.
-
-        Applies the supplied keyword overrides to the flat config in place. Only
-        known training field names are accepted;
-        unknown keys raise ``TypeError``. This lets a caller (e.g. a Lightning
-        policy or a fine-tuning script) adjust learning rates and scheduler
-        parameters after the model has been constructed without rebuilding the
-        config.
-
-        Args:
-            **overrides: Flat optimizer/scheduler field names
-                fields (e.g. ``optimizer_lr=2e-5``, ``scheduler_warmup_steps=500``).
-                Values must match the field type.
-
-        Raises:
-            TypeError: If a supplied key is not a flat training config field.
-        """
-        valid_fields = {
-            "optimizer_lr",
-            "optimizer_vit_lr",
-            "optimizer_connector_lr",
-            "optimizer_action_expert_lr",
-            "optimizer_betas",
-            "optimizer_eps",
-            "optimizer_weight_decay",
-            "optimizer_grad_clip_norm",
-            "scheduler_warmup_steps",
-            "scheduler_decay_steps",
-            "scheduler_decay_lr",
-        }
-        unknown = set(overrides) - valid_fields
-        if unknown:
-            msg = f"Unknown training override(s): {sorted(unknown)}"
-            raise TypeError(msg)
-        for key, value in overrides.items():
-            setattr(self.config, key, value)
 
     def gradient_checkpointing_enable(self) -> None:
         """Enable gradient checkpointing on the text, vision and action submodules.
@@ -289,13 +266,6 @@ class MolmoAct2Model(Model):
         backbone.vision_backbone.gradient_checkpointing = True
         if backbone.action_expert is not None:
             backbone.action_expert.gradient_checkpointing = True
-        # Force eager attention so SDPA/flash-attention ops do not appear
-        # inside checkpoint regions, which would otherwise cause a KeyError in
-        # the AOT autograd partitioner when torch.compile traces the backward
-        # graph (functionalize_rng_ops cannot map the
-        # _scaled_dot_product_flash_attention op between fwd/bwd graphs).
-        backbone.transformer.config._attn_implementation = "eager"  # noqa: SLF001
-        backbone.vision_backbone.image_vit.config._attn_implementation = "eager"  # noqa: SLF001
 
     def gradient_checkpointing_disable(self) -> None:
         """Disable gradient checkpointing on all submodules."""
@@ -342,20 +312,20 @@ class MolmoAct2Model(Model):
             raise ImportError(msg) from e
 
         target_modules = _lora_target_modules(
-            enable_action_expert=bool(self.config.enable_lora_action_expert),
+            enable_action_expert=self._enable_lora_action_expert,
         )
         lora_config = LoraConfig(
-            r=self.config.lora_rank,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
+            r=self._lora_rank,
+            lora_alpha=self._lora_alpha,
+            lora_dropout=self._lora_dropout,
             target_modules=target_modules,
-            bias=self.config.lora_bias,
+            bias=self._lora_bias,
         )
 
         for param in self.backbone.parameters():
             param.requires_grad = False
         self.backbone = get_peft_model(self.backbone, lora_config)  # type: ignore[assignment, arg-type]  # pyrefly: ignore[bad-assignment]
-        if not self.config.enable_lora_action_expert:
+        if not self._enable_lora_action_expert:
             self._unfreeze_action_expert_parameters()
         self.train(self.training)
 
@@ -365,7 +335,7 @@ class MolmoAct2Model(Model):
         Raises:
             RuntimeError: If no action-expert parameters were found.
         """
-        if self.config.add_action_expert is False:
+        if not self._add_action_expert:
             msg = "enable_lora_action_expert=False, but no action_expert parameters were found."
             raise RuntimeError(msg)
         trainable = 0
@@ -399,12 +369,12 @@ class MolmoAct2Model(Model):
         model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
         actions = self._for_cond_gen.model.generate_actions_from_inputs(
             **model_inputs,
-            action_horizon=int(self.config.chunk_size),
-            sample_noise=bool(self.config.use_random_input_noise) if sample_noise is None else sample_noise,
+            action_horizon=int(self._chunk_size),
+            sample_noise=self._use_random_input_noise if sample_noise is None else sample_noise,
             generator=generator,
         )
-        env_action_dim = _env_action_dim(self.config) or actions.shape[-1]
-        return actions[:, : int(self.config.n_action_steps), :env_action_dim].to(torch.float32)
+        env_action_dim = _env_action_dim(self._output_features) or actions.shape[-1]
+        return actions[:, : int(self._n_action_steps), :env_action_dim].to(torch.float32)
 
     def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
         """Run the model.
@@ -431,13 +401,13 @@ class MolmoAct2Model(Model):
             token_pooling=batch.get("token_pooling"),
             actions=batch[ACTION],
             action_dim_is_pad=batch.get("action_dim_is_pad"),
-            freeze_encoder=bool(self.config.train_action_expert_only),
+            freeze_encoder=self._train_action_expert_only,
         )
         loss = _masked_flow_loss(
             predicted,
             target,
             action_horizon_is_pad=batch.get("action_horizon_is_pad"),
-            action_dim_is_pad=batch.get("action_dim_is_pad") if self.config.mask_action_dim_padding else None,
+            action_dim_is_pad=batch.get("action_dim_is_pad") if self._mask_action_dim_padding else None,
         )
         value = loss.detach()
         return loss, {"action_flow_loss": value, "loss": value}
@@ -465,7 +435,7 @@ class MolmoAct2Model(Model):
             predicted[:, :horizon, :action_dim],
             target,
             action_horizon_is_pad=action_horizon_is_pad,
-            action_dim_is_pad=action_dim_is_pad if self.config.mask_action_dim_padding else None,
+            action_dim_is_pad=action_dim_is_pad if self._mask_action_dim_padding else None,
         )
         return loss, {"loss": float(loss.detach().float())}
 
@@ -492,7 +462,7 @@ class MolmoAct2Model(Model):
     @property
     def action_delta_indices(self) -> list[int] | None:
         """Future action indices required to train the configured action chunk."""
-        return list(range(int(self.config.chunk_size)))
+        return list(range(int(self._chunk_size)))
 
     @property
     def observation_delta_indices(self) -> None:

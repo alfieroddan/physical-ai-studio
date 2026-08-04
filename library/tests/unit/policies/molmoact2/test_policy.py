@@ -46,10 +46,7 @@ class TestMolmoact2Policy:
         assert policy._postprocessor is None
 
     def test_repo_id_defaults_to_none(self) -> None:
-        assert MolmoAct2.__init__.__defaults__ is not None
-        repo_index = MolmoAct2.__init__.__code__.co_varnames.index("repo_id")
-        default = MolmoAct2.__init__.__defaults__[repo_index - 1]
-        assert default is None
+        assert MolmoAct2.__init__.__kwdefaults__["repo_id"] is None
 
     def test_hyperparameters_saved(self) -> None:
         policy = MolmoAct2(

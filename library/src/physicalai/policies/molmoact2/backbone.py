@@ -54,71 +54,38 @@ def _sample_beta_timesteps(
 class MolmoAct2Backbone(nn.Module):
     """Text + vision + action expert. Checkpoint prefix: ``model.*``."""
 
-    def __init__(self, config: MolmoAct2Config) -> None:
-        """Build the text decoder, vision backbone and (optional) action expert."""
+    def __init__(
+        self,
+        *,
+        transformer: MolmoAct2TextModel,
+        vision_backbone: MolmoAct2VisionBackbone,
+        action_expert: ActionExpert | None,
+        image_patch_id: int,
+        mask_action_dim_padding: bool,
+        flow_matching_num_steps: int,
+        max_action_dim: int,
+        num_flow_timesteps: int,
+        flow_matching_cutoff: float,
+        flow_matching_time_offset: float,
+        flow_matching_time_scale: float,
+        flow_matching_beta_alpha: float,
+        flow_matching_beta_beta: float,
+    ) -> None:
+        """Assemble already constructed model components and rollout settings."""
         super().__init__()
-        self.config = config
-        self.transformer = MolmoAct2TextModel(
-            hidden_size=config.hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            vocab_size=config.vocab_size,
-            additional_vocab_size=config.additional_vocab_size,
-            qkv_bias=config.qkv_bias,
-            num_hidden_layers=config.num_hidden_layers,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            rope_theta=config.rope_theta,
-            use_qk_norm=config.use_qk_norm,
-            qk_norm_type=config.qk_norm_type,
-            layer_norm_eps=config.layer_norm_eps,
-            norm_after=config.norm_after,
-        )
-        self.vision_backbone = MolmoAct2VisionBackbone(
-            vision_hidden_size=config.vision_hidden_size,
-            vision_intermediate_size=config.vision_intermediate_size,
-            vision_num_hidden_layers=config.vision_num_hidden_layers,
-            vision_num_attention_heads=config.vision_num_attention_heads,
-            vision_num_key_value_heads=config.vision_num_key_value_heads,
-            vision_head_dim=config.vision_head_dim,
-            vision_hidden_act=config.vision_hidden_act,
-            vision_layer_norm_eps=config.vision_layer_norm_eps,
-            image_default_input_size=config.image_default_input_size,
-            image_patch_size=config.image_patch_size,
-            image_num_pos=config.image_num_pos,
-            vision_attention_dropout=config.vision_attention_dropout,
-            vision_residual_dropout=config.vision_residual_dropout,
-            adapter_vit_layers=config.adapter_vit_layers,
-            adapter_pooling_attention_mask=config.adapter_pooling_attention_mask,
-            adapter_hidden_size=config.adapter_hidden_size,
-            adapter_num_attention_heads=config.adapter_num_attention_heads,
-            adapter_num_key_value_heads=config.adapter_num_key_value_heads,
-            adapter_head_dim=config.adapter_head_dim,
-            adapter_attention_dropout=config.adapter_attention_dropout,
-            adapter_residual_dropout=config.adapter_residual_dropout,
-            adapter_hidden_act=config.adapter_hidden_act,
-            adapter_intermediate_size=config.adapter_intermediate_size,
-            adapter_text_hidden_size=config.adapter_text_hidden_size,
-            image_feature_dropout=config.image_feature_dropout,
-        )
-        self.action_expert: ActionExpert | None = None
-        if config.add_action_expert:
-            self.action_expert = ActionExpert(
-                max_action_dim=config.action_expert_max_action_dim,
-                hidden_size=config.action_expert_hidden_size,
-                num_layers=config.action_expert_num_layers,
-                num_heads=config.action_expert_num_heads,
-                mlp_ratio=config.action_expert_mlp_ratio,
-                ffn_multiple_of=config.action_expert_ffn_multiple_of,
-                timestep_embed_dim=config.action_expert_timestep_embed_dim,
-                context_layer_norm=config.action_expert_context_layer_norm,
-                qk_norm=config.action_expert_qk_norm,
-                qk_norm_eps=config.action_expert_qk_norm_eps,
-                rope=config.action_expert_rope,
-                llm_kv_dim=config.num_key_value_heads * config.head_dim,
-                llm_num_layers=config.num_hidden_layers,
-            )
+        self.transformer = transformer
+        self.vision_backbone = vision_backbone
+        self.action_expert = action_expert
+        self.image_patch_id = image_patch_id
+        self.mask_action_dim_padding = mask_action_dim_padding
+        self.flow_matching_num_steps = flow_matching_num_steps
+        self.max_action_dim = max_action_dim
+        self.num_flow_timesteps = num_flow_timesteps
+        self.flow_matching_cutoff = flow_matching_cutoff
+        self.flow_matching_time_offset = flow_matching_time_offset
+        self.flow_matching_time_scale = flow_matching_time_scale
+        self.flow_matching_beta_alpha = flow_matching_beta_alpha
+        self.flow_matching_beta_beta = flow_matching_beta_beta
 
     def _require_action_expert(self) -> ActionExpert:
         """Return the action expert.
@@ -151,7 +118,7 @@ class MolmoAct2Backbone(nn.Module):
             return embeddings
 
         image_features = self.vision_backbone(images, token_pooling).to(embeddings.dtype)
-        is_image_patch = (token_ids == self.config.image_patch_id).reshape(-1)  # pyrefly: ignore[missing-attribute]
+        is_image_patch = (token_ids == self.image_patch_id).reshape(-1)
         flat = embeddings.reshape(-1, embeddings.shape[-1]).clone()
         flat[is_image_patch] += image_features
         return flat.reshape_as(embeddings)
@@ -216,7 +183,7 @@ class MolmoAct2Backbone(nn.Module):
         Returns:
             The masked tensor (or the input unchanged when masking is off).
         """
-        if not self.config.mask_action_dim_padding or action_dim_is_pad is None:
+        if not self.mask_action_dim_padding or action_dim_is_pad is None:
             return tensor
         valid = (~action_dim_is_pad.to(device=tensor.device, dtype=torch.bool))[:, None, :]
         return tensor * valid
@@ -270,7 +237,7 @@ class MolmoAct2Backbone(nn.Module):
             ValueError: If ``num_steps`` is not positive.
         """
         action_expert = self._require_action_expert()
-        steps = int(num_steps or self.config.flow_matching_num_steps)
+        steps = int(num_steps or self.flow_matching_num_steps)
         if steps <= 0:
             msg = f"num_steps must be >= 1, got {steps}."
             raise ValueError(msg)
@@ -290,7 +257,7 @@ class MolmoAct2Backbone(nn.Module):
             dtype=dtype,
         )
 
-        shape = (batch_size, action_horizon, self.config.max_action_dim)
+        shape = (batch_size, action_horizon, self.max_action_dim)
         if sample_noise:
             noise = torch.randn(*shape, device=device, dtype=dtype, generator=generator)
             trajectory = self._mask_action_dims(noise, action_dim_is_pad)
@@ -361,16 +328,16 @@ class MolmoAct2Backbone(nn.Module):
             ``batch_size * num_flow_timesteps`` dimension.
         """
         batch_size, horizon, action_dim = actions.shape
-        num_flow_timesteps = max(1, int(self.config.num_flow_timesteps))
+        num_flow_timesteps = max(1, int(self.num_flow_timesteps))
         flat_batch = batch_size * num_flow_timesteps
         timesteps = _sample_beta_timesteps(
             batch_size=flat_batch,
             device=actions.device,
-            cutoff=self.config.flow_matching_cutoff,
-            time_offset=self.config.flow_matching_time_offset,
-            time_scale=self.config.flow_matching_time_scale,
-            alpha=self.config.flow_matching_beta_alpha,
-            beta=self.config.flow_matching_beta_beta,
+            cutoff=self.flow_matching_cutoff,
+            time_offset=self.flow_matching_time_offset,
+            time_scale=self.flow_matching_time_scale,
+            alpha=self.flow_matching_beta_alpha,
+            beta=self.flow_matching_beta_beta,
         ).to(dtype)
         expanded_action_dim_is_pad = (
             action_dim_is_pad.repeat_interleave(num_flow_timesteps, dim=0) if action_dim_is_pad is not None else None
@@ -416,7 +383,7 @@ class MolmoAct2Backbone(nn.Module):
         dtype = action_expert.action_embed.weight.dtype
         actions = self._mask_action_dims(actions.to(dtype), action_dim_is_pad)
         batch_size, horizon, action_dim = actions.shape
-        num_flow_timesteps = max(1, int(self.config.num_flow_timesteps))
+        num_flow_timesteps = max(1, int(self.num_flow_timesteps))
         x_t, timesteps, target_velocity = self._flow_interpolation(actions, action_dim_is_pad, dtype)
         context = self._encode_action_context(
             input_ids=input_ids,
@@ -440,13 +407,89 @@ class MolmoAct2Backbone(nn.Module):
 class MolmoAct2ForConditionalGeneration(nn.Module):
     """Checkpoint root module: ``model`` backbone + ``lm_head``."""
 
-    def __init__(self, config: MolmoAct2Config) -> None:
+    def __init__(self, *, model: MolmoAct2Backbone, hidden_size: int, vocab_size: int) -> None:
         """Build the backbone and the language-model head."""
         super().__init__()
-        self.config = config
-        self.model = MolmoAct2Backbone(config)
-        self.lm_head = nn.Linear(
-            config.hidden_size,
-            config.vocab_size,
-            bias=False,
+        self.model = model
+        self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
+
+
+def make_molmoact2_backbone(config: MolmoAct2Config) -> MolmoAct2Backbone:
+    """Create graph modules from the policy's resolved flat config."""
+    transformer = MolmoAct2TextModel(
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_key_value_heads=config.num_key_value_heads,
+        head_dim=config.head_dim,
+        vocab_size=config.vocab_size,
+        additional_vocab_size=config.additional_vocab_size,
+        qkv_bias=config.qkv_bias,
+        num_hidden_layers=config.num_hidden_layers,
+        intermediate_size=config.intermediate_size,
+        hidden_act=config.hidden_act,
+        rope_theta=config.rope_theta,
+        use_qk_norm=config.use_qk_norm,
+        qk_norm_type=config.qk_norm_type,
+        layer_norm_eps=config.layer_norm_eps,
+        norm_after=config.norm_after,
+    )
+    vision_backbone = MolmoAct2VisionBackbone(
+        vision_hidden_size=config.vision_hidden_size,
+        vision_intermediate_size=config.vision_intermediate_size,
+        vision_num_hidden_layers=config.vision_num_hidden_layers,
+        vision_num_attention_heads=config.vision_num_attention_heads,
+        vision_num_key_value_heads=config.vision_num_key_value_heads,
+        vision_head_dim=config.vision_head_dim,
+        vision_hidden_act=config.vision_hidden_act,
+        vision_layer_norm_eps=config.vision_layer_norm_eps,
+        image_default_input_size=config.image_default_input_size,
+        image_patch_size=config.image_patch_size,
+        image_num_pos=config.image_num_pos,
+        vision_attention_dropout=config.vision_attention_dropout,
+        vision_residual_dropout=config.vision_residual_dropout,
+        adapter_vit_layers=config.adapter_vit_layers,
+        adapter_pooling_attention_mask=config.adapter_pooling_attention_mask,
+        adapter_hidden_size=config.adapter_hidden_size,
+        adapter_num_attention_heads=config.adapter_num_attention_heads,
+        adapter_num_key_value_heads=config.adapter_num_key_value_heads,
+        adapter_head_dim=config.adapter_head_dim,
+        adapter_attention_dropout=config.adapter_attention_dropout,
+        adapter_residual_dropout=config.adapter_residual_dropout,
+        adapter_hidden_act=config.adapter_hidden_act,
+        adapter_intermediate_size=config.adapter_intermediate_size,
+        adapter_text_hidden_size=config.adapter_text_hidden_size,
+        image_feature_dropout=config.image_feature_dropout,
+    )
+    action_expert = None
+    if config.add_action_expert:
+        action_expert = ActionExpert(
+            max_action_dim=config.action_expert_max_action_dim,
+            hidden_size=config.action_expert_hidden_size,
+            num_layers=config.action_expert_num_layers,
+            num_heads=config.action_expert_num_heads,
+            mlp_ratio=config.action_expert_mlp_ratio,
+            ffn_multiple_of=config.action_expert_ffn_multiple_of,
+            timestep_embed_dim=config.action_expert_timestep_embed_dim,
+            context_layer_norm=config.action_expert_context_layer_norm,
+            qk_norm=config.action_expert_qk_norm,
+            qk_norm_eps=config.action_expert_qk_norm_eps,
+            rope=config.action_expert_rope,
+            causal_attn=config.action_expert_causal_attn,
+            llm_kv_dim=config.num_key_value_heads * config.head_dim,
+            llm_num_layers=config.num_hidden_layers,
         )
+    return MolmoAct2Backbone(
+        transformer=transformer,
+        vision_backbone=vision_backbone,
+        action_expert=action_expert,
+        image_patch_id=config.image_patch_id,
+        mask_action_dim_padding=config.mask_action_dim_padding,
+        flow_matching_num_steps=config.flow_matching_num_steps,
+        max_action_dim=config.max_action_dim,
+        num_flow_timesteps=config.num_flow_timesteps,
+        flow_matching_cutoff=config.flow_matching_cutoff,
+        flow_matching_time_offset=config.flow_matching_time_offset,
+        flow_matching_time_scale=config.flow_matching_time_scale,
+        flow_matching_beta_alpha=config.flow_matching_beta_alpha,
+        flow_matching_beta_beta=config.flow_matching_beta_beta,
+    )

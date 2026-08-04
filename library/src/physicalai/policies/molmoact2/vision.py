@@ -153,10 +153,38 @@ class VisionBlock(nn.Module):
 class VisionBlockCollection(nn.Module):
     """Ordered stack of ViT blocks (checkpoint key: ``transformer.resblocks``)."""
 
-    def __init__(self, *, num_hidden_layers: int, **block_kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        num_hidden_layers: int,
+        hidden_size: int,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        hidden_act: str,
+        layer_norm_eps: float,
+        attention_dropout: float,
+        residual_dropout: float,
+    ) -> None:
         """Build ``num_hidden_layers`` residual blocks."""
         super().__init__()
-        self.resblocks = nn.ModuleList([VisionBlock(**block_kwargs) for _ in range(num_hidden_layers)])
+        self.resblocks = nn.ModuleList(
+            [
+                VisionBlock(
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                    num_attention_heads=num_attention_heads,
+                    num_key_value_heads=num_key_value_heads,
+                    head_dim=head_dim,
+                    hidden_act=hidden_act,
+                    layer_norm_eps=layer_norm_eps,
+                    attention_dropout=attention_dropout,
+                    residual_dropout=residual_dropout,
+                )
+                for _ in range(num_hidden_layers)
+            ],
+        )
 
 
 class VisionTransformer(nn.Module):
@@ -170,7 +198,14 @@ class VisionTransformer(nn.Module):
         image_patch_size: int,
         image_num_patch: tuple[int, int],
         num_hidden_layers: int,
-        **block_kwargs: object,
+        intermediate_size: int,
+        num_attention_heads: int,
+        num_key_value_heads: int,
+        head_dim: int,
+        hidden_act: str,
+        layer_norm_eps: float,
+        attention_dropout: float,
+        residual_dropout: float,
     ) -> None:
         """Build patch/positional embeddings and the block stack."""
         super().__init__()
@@ -180,7 +215,14 @@ class VisionTransformer(nn.Module):
         self.transformer = VisionBlockCollection(
             num_hidden_layers=num_hidden_layers,
             hidden_size=hidden_size,
-            **block_kwargs,
+            intermediate_size=intermediate_size,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            head_dim=head_dim,
+            hidden_act=hidden_act,
+            layer_norm_eps=layer_norm_eps,
+            attention_dropout=attention_dropout,
+            residual_dropout=residual_dropout,
         )
 
     def add_pos_emb(self, x: torch.Tensor, patch_num: tuple[int, int]) -> torch.Tensor:

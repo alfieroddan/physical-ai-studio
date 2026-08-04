@@ -401,6 +401,7 @@ class ActionExpert(nn.Module):
         qk_norm: bool,
         qk_norm_eps: float,
         rope: bool,
+        causal_attn: bool,
         llm_kv_dim: int,
         llm_num_layers: int,
     ) -> None:
@@ -415,6 +416,7 @@ class ActionExpert(nn.Module):
             raise ValueError(msg)
         self.num_heads = num_heads
         self.action_head_dim = hidden_size // num_heads
+        self.causal_attn = causal_attn
         # Toggled by :meth:`gradient_checkpointing_enable` so each block is
         # recomputed during the backward pass to trade compute for memory. Has
         # no effect outside of training (``self.training`` and
@@ -544,7 +546,7 @@ class ActionExpert(nn.Module):
             cross_mask = (1.0 - valid) * torch.finfo(dtype).min
 
         self_mask = None
-        if self.config.causal_attn:
+        if self.causal_attn:
             causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).triu(1)
             self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
 
@@ -584,7 +586,7 @@ class ActionExpert(nn.Module):
                     cross_kv=kv_context,
                     self_attn_mask=context.self_mask,
                     cross_attn_mask=context.cross_mask,
-                    is_causal=self.config.causal_attn,
+                    is_causal=self.causal_attn,
                     rope_cache=context.rope_cache,
                     use_reentrant=False,
                 )
@@ -595,7 +597,7 @@ class ActionExpert(nn.Module):
                     cross_kv=kv_context,
                     self_attn_mask=context.self_mask,
                     cross_attn_mask=context.cross_mask,
-                    is_causal=self.config.causal_attn,
+                    is_causal=self.causal_attn,
                     rope_cache=context.rope_cache,
                 )
         return self.final_layer(x, conditioning)

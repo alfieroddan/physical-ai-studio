@@ -52,7 +52,7 @@ def make_molmoact2_config(
     *,
     input_features: list[Feature] | None,
     output_features: list[Feature] | None,
-    **overrides: Any,
+    **overrides: object,
 ) -> MolmoAct2Config:
     """Create a flat config from defaults and explicit overrides.
 
@@ -75,12 +75,15 @@ def make_molmoact2_config(
     if unknown:
         msg = f"Unknown MolmoAct2 override(s): {sorted(unknown)}"
         raise TypeError(msg)
-    config_data = {
-        "input_features": input_features,
-        "output_features": output_features,
-        **{key: value for key, value in overrides.items() if value is not None},
-    }
-    return MolmoAct2Config(**config_data)
+    config = MolmoAct2Config(
+        input_features=input_features,
+        output_features=output_features,
+    )
+    for name, value in overrides.items():
+        if value is not None:
+            setattr(config, name, value)
+    config.__post_init__()
+    return config
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -96,7 +99,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         load_weights: bool = True,
         adapt_to_so101: bool | None = None,
         compile_model: bool | None = None,
-        **overrides: Any,
+        **overrides: object,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 

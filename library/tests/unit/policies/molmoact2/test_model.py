@@ -31,6 +31,7 @@ from physicalai.policies.molmoact2.backbone import (
     MolmoAct2Backbone,
     MolmoAct2ForConditionalGeneration,
     _sample_beta_timesteps,
+    make_molmoact2_backbone,
 )
 from physicalai.policies.molmoact2.text import (
     MolmoAct2Attention,
@@ -44,6 +45,49 @@ from physicalai.policies.molmoact2.text import (
 )
 from physicalai.policies.molmoact2.model import MolmoAct2Model, _masked_action_mse
 from physicalai.policies.molmoact2.vision import MolmoAct2VisionBackbone
+
+
+def _make_action_expert(
+    config: MolmoAct2Config,
+    *,
+    llm_num_layers: int | None = None,
+) -> ActionExpert:
+    return ActionExpert(
+        max_action_dim=config.action_expert_max_action_dim,
+        hidden_size=config.action_expert_hidden_size,
+        num_layers=config.action_expert_num_layers,
+        num_heads=config.action_expert_num_heads,
+        mlp_ratio=config.action_expert_mlp_ratio,
+        ffn_multiple_of=config.action_expert_ffn_multiple_of,
+        timestep_embed_dim=config.action_expert_timestep_embed_dim,
+        context_layer_norm=config.action_expert_context_layer_norm,
+        qk_norm=config.action_expert_qk_norm,
+        qk_norm_eps=config.action_expert_qk_norm_eps,
+        rope=config.action_expert_rope,
+        causal_attn=config.action_expert_causal_attn,
+        llm_kv_dim=config.num_key_value_heads * config.head_dim,
+        llm_num_layers=config.num_hidden_layers if llm_num_layers is None else llm_num_layers,
+    )
+
+
+def _make_text_model(config: MolmoAct2Config) -> MolmoAct2TextModel:
+    return MolmoAct2TextModel(
+        hidden_size=config.hidden_size,
+        num_attention_heads=config.num_attention_heads,
+        num_key_value_heads=config.num_key_value_heads,
+        head_dim=config.head_dim,
+        vocab_size=config.vocab_size,
+        additional_vocab_size=config.additional_vocab_size,
+        qkv_bias=config.qkv_bias,
+        num_hidden_layers=config.num_hidden_layers,
+        intermediate_size=config.intermediate_size,
+        hidden_act=config.hidden_act,
+        rope_theta=config.rope_theta,
+        use_qk_norm=config.use_qk_norm,
+        qk_norm_type=config.qk_norm_type,
+        layer_norm_eps=config.layer_norm_eps,
+        norm_after=config.norm_after,
+    )
 
 
 class TestRoundUpMultiple:
@@ -114,7 +158,10 @@ class TestTextRMSNorm:
 
 class TestRotaryEmbedding:
     def test_cos_sin_shapes(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
-        rope = MolmoAct2RotaryEmbedding(tiny_molmoact2_config.text_config)
+        rope = MolmoAct2RotaryEmbedding(
+            head_dim=tiny_molmoact2_config.head_dim,
+            rope_theta=tiny_molmoact2_config.rope_theta,
+        )
         x = torch.zeros(2, 4, 64)
         positions = torch.arange(4).unsqueeze(0).expand(2, 4)
         cos, sin = rope(x, positions)
@@ -126,8 +173,17 @@ class TestAttention:
     def test_returns_hidden_and_kv(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.text_config
-        attn = MolmoAct2Attention(config)
+        config = tiny_molmoact2_config
+        attn = MolmoAct2Attention(
+            hidden_size=config.hidden_size,
+            num_attention_heads=config.num_attention_heads,
+            num_key_value_heads=config.num_key_value_heads,
+            head_dim=config.head_dim,
+            qkv_bias=config.qkv_bias,
+            use_qk_norm=config.use_qk_norm,
+            qk_norm_type=config.qk_norm_type,
+            layer_norm_eps=config.layer_norm_eps,
+        )
         hidden = torch.randn(2, 5, config.hidden_size)
         cos = torch.randn(2, 5, config.head_dim)
         sin = torch.randn(2, 5, config.head_dim)
@@ -158,8 +214,8 @@ class TestEmbedding:
 
 class TestTextModel:
     def test_forward_shape(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
-        config = tiny_molmoact2_config.text_config
-        model = MolmoAct2TextModel(config)
+        config = tiny_molmoact2_config
+        model = _make_text_model(config)
         inputs_embeds = torch.randn(2, 6, config.hidden_size)
         hidden, kv_states = model(inputs_embeds)
         assert hidden.shape == (2, 6, config.hidden_size)
@@ -168,19 +224,16 @@ class TestTextModel:
     def test_norm_after_unsupported(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.text_config
-        config.norm_after = True
+        tiny_molmoact2_config.norm_after = True
         with pytest.raises(NotImplementedError, match="norm_after=False"):
-            MolmoAct2TextModel(config)
+            _make_text_model(tiny_molmoact2_config)
 
 
 class TestVisionBackbone:
     def test_constructs_with_tiny_config(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        backbone = MolmoAct2VisionBackbone(
-            tiny_molmoact2_config.vit_config, tiny_molmoact2_config.adapter_config
-        )
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config).vision_backbone
         assert backbone is not None
 
 
@@ -254,71 +307,66 @@ class TestActionExpert:
     def test_constructs(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.action_expert_config
-        assert config is not None
-        expert = ActionExpert(
-            config,
-            llm_kv_dim=tiny_molmoact2_config.num_key_value_heads * tiny_molmoact2_config.head_dim,
-            llm_num_layers=tiny_molmoact2_config.text_config.num_hidden_layers,
-        )
-        assert expert.num_heads == config.num_heads
+        expert = _make_action_expert(tiny_molmoact2_config)
+        assert expert.num_heads == tiny_molmoact2_config.action_expert_num_heads
 
     def test_raises_when_layer_count_mismatch(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.action_expert_config
-        assert config is not None
         with pytest.raises(ValueError, match="one block per text layer"):
-            ActionExpert(config, llm_kv_dim=64, llm_num_layers=99)
+            _make_action_expert(tiny_molmoact2_config, llm_num_layers=99)
 
     def test_prepare_context_and_denoise(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.action_expert_config
-        assert config is not None
-        expert = ActionExpert(
-            config,
-            llm_kv_dim=tiny_molmoact2_config.num_key_value_heads * tiny_molmoact2_config.head_dim,
-            llm_num_layers=tiny_molmoact2_config.text_config.num_hidden_layers,
-        )
+        expert = _make_action_expert(tiny_molmoact2_config)
         batch = 2
         seq_len = 8
         kv_dim = tiny_molmoact2_config.num_key_value_heads * tiny_molmoact2_config.head_dim
         kv_states = [
             (torch.randn(batch, seq_len, kv_dim), torch.randn(batch, seq_len, kv_dim))
-            for _ in range(tiny_molmoact2_config.text_config.num_hidden_layers)
+            for _ in range(tiny_molmoact2_config.num_hidden_layers)
         ]
         mask = torch.ones(batch, seq_len, dtype=torch.bool)
         context = expert.prepare_context(
             encoder_kv_states=kv_states,
             encoder_attention_mask=mask,
-            seq_len=config.max_action_horizon,
+            seq_len=tiny_molmoact2_config.action_expert_max_action_horizon,
             device=torch.device("cpu"),
             dtype=torch.float32,
         )
         assert isinstance(context, ActionExpertContext)
-        assert len(context.kv_contexts) == config.num_layers
+        assert len(context.kv_contexts) == tiny_molmoact2_config.action_expert_num_layers
 
-        actions = torch.randn(batch, config.max_action_horizon, config.max_action_dim)
+        actions = torch.randn(
+            batch,
+            tiny_molmoact2_config.action_expert_max_action_horizon,
+            tiny_molmoact2_config.action_expert_max_action_dim,
+        )
         timesteps = torch.rand(batch)
         velocity = expert.forward_with_context(actions, timesteps, context=context)
-        assert velocity.shape == (batch, config.max_action_horizon, config.max_action_dim)
+        assert velocity.shape == (
+            batch,
+            tiny_molmoact2_config.action_expert_max_action_horizon,
+            tiny_molmoact2_config.action_expert_max_action_dim,
+        )
 
 
 class TestMolmoAct2Backbone:
     def test_constructs_with_tiny_config(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        backbone = MolmoAct2Backbone(tiny_molmoact2_config)
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config)
         assert backbone.transformer is not None
         assert backbone.vision_backbone is not None
         assert backbone.action_expert is not None
+        assert not hasattr(backbone, "config")
 
     def test_no_action_expert_when_disabled(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
         tiny_molmoact2_config.add_action_expert = False
-        backbone = MolmoAct2Backbone(tiny_molmoact2_config)
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config)
         assert backbone.action_expert is None
 
 
@@ -542,12 +590,12 @@ class TestMolmoAct2GradientCheckpointing:
         assert backbone.vision_backbone.gradient_checkpointing is True
         assert backbone.action_expert.gradient_checkpointing is True
 
-    def test_enable_forces_eager_attention(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+    def test_submodules_do_not_retain_config(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
         model = self._make_model(tiny_molmoact2_config)
         model.gradient_checkpointing_enable()
         backbone = model._for_cond_gen.model
-        assert backbone.transformer.config._attn_implementation == "eager"
-        assert backbone.vision_backbone.image_vit.config._attn_implementation == "eager"
+        assert not hasattr(backbone.transformer, "config")
+        assert not hasattr(backbone.vision_backbone.image_vit, "config")
 
     def test_disable_clears_submodule_flags(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
         model = self._make_model(tiny_molmoact2_config)
@@ -577,8 +625,7 @@ class TestMolmoAct2GradientCheckpointing:
         model_ckpt = self._make_model(tiny_molmoact2_config)
         model_ckpt.gradient_checkpointing_enable()
 
-        config = tiny_molmoact2_config.text_config
-        inputs_embeds = torch.randn(2, 4, config.hidden_size, requires_grad=True)
+        inputs_embeds = torch.randn(2, 4, tiny_molmoact2_config.hidden_size, requires_grad=True)
         attention_bias = None
 
         model_eager.eval()
@@ -591,20 +638,17 @@ class TestMolmoAct2GradientCheckpointing:
     def test_checkpointed_action_expert_forward_backward_runs(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
-        config = tiny_molmoact2_config.action_expert_config
-        assert config is not None
-        expert = ActionExpert(
-            config,
-            llm_kv_dim=tiny_molmoact2_config.num_key_value_heads * tiny_molmoact2_config.head_dim,
-            llm_num_layers=tiny_molmoact2_config.text_config.num_hidden_layers,
-        )
+        expert = _make_action_expert(tiny_molmoact2_config)
         expert.gradient_checkpointing = True
         expert.train()
         batch = 2
-        seq_len = config.max_action_horizon
+        seq_len = tiny_molmoact2_config.action_expert_max_action_horizon
         kv_states = [
-            (torch.randn(batch, seq_len, config.hidden_size), torch.randn(batch, seq_len, config.hidden_size))
-            for _ in range(tiny_molmoact2_config.text_config.num_hidden_layers)
+            (
+                torch.randn(batch, seq_len, tiny_molmoact2_config.action_expert_hidden_size),
+                torch.randn(batch, seq_len, tiny_molmoact2_config.action_expert_hidden_size),
+            )
+            for _ in range(tiny_molmoact2_config.num_hidden_layers)
         ]
         mask = torch.ones(batch, seq_len, dtype=torch.bool)
         context = expert.prepare_context(
@@ -614,7 +658,12 @@ class TestMolmoAct2GradientCheckpointing:
             device=torch.device("cpu"),
             dtype=torch.float32,
         )
-        actions = torch.randn(batch, seq_len, config.max_action_dim, requires_grad=True)
+        actions = torch.randn(
+            batch,
+            seq_len,
+            tiny_molmoact2_config.action_expert_max_action_dim,
+            requires_grad=True,
+        )
         timesteps = torch.rand(batch)
         velocity = expert.forward_with_context(actions, timesteps, context=context)
         loss = velocity.sum()
