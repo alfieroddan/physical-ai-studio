@@ -96,9 +96,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         *,
         repo_id: str | Path | None = None,
         norm_tag: str | None = None,
-        load_weights: bool = True,
         adapt_to_so101: bool | None = None,
         compile_model: bool | None = None,
+        load_weights: bool = True,
         **overrides: object,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
@@ -116,13 +116,13 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 :class:`MolmoAct2Config` defaults are the base.
             norm_tag: Optional normalization metadata tag to select schemas and
                 prompt conditioning from a pretrained checkpoint.
-            load_weights: Whether to load base checkpoint weights after model
-                construction when a checkpoint source is available.
             adapt_to_so101: Apply the SO-100/101 joint frame transform to joint
                 observations and actions for pre-#777 LeRobot calibration.
             compile_model: Explicit override for
                 :attr:`MolmoAct2Config.compile_model`; enables compiled model
                 forward and inference paths.
+            load_weights: Whether to load base checkpoint weights after model
+                construction when a checkpoint source is available.
             **overrides: Any other named :class:`MolmoAct2Config` field. A
                 non-``None`` value overrides the selected base config; ``None``
                 preserves the pretrained value or dataclass default.
