@@ -215,6 +215,34 @@ class TestBuildConfigFromHfConfig:
         )
         assert config.chunk_size == 30
 
+    def test_checkpoint_action_horizon_sets_chunk_and_return_steps(self) -> None:
+        hf_config = _make_hf_config()
+        hf_config["max_action_horizon"] = 10
+        hf_config.pop("chunk_size")
+        hf_config.pop("n_action_steps")
+
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+        )
+
+        assert config.chunk_size == 10
+        assert config.n_action_steps == 10
+        assert config.action_expert_max_action_horizon == 10
+
+    def test_explicit_action_step_overrides_beat_checkpoint_horizon(self) -> None:
+        hf_config = _make_hf_config()
+        hf_config["max_action_horizon"] = 10
+
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+            n_action_steps=4,
+        )
+
+        assert config.chunk_size == 10
+        assert config.n_action_steps == 4
+
     def test_use_random_input_noise_override_wins_over_hf_config(self) -> None:
         """Caller-provided use_random_input_noise overrides the HF config value."""
         hf_config = _make_hf_config()

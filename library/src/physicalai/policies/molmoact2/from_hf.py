@@ -74,7 +74,6 @@ def _ensure_processor_assets_downloaded(
     processor_files = [
         "processor_config.json",
     ]
-
     selected_hub_kwargs = {
         k: v
         for k, v in (hub_kwargs or {}).items()
@@ -613,6 +612,11 @@ def build_config_from_hf_config(
         if key in hf_config:
             config_data[key] = hf_config[key]
 
+    checkpoint_action_horizon = hf_config.get("max_action_horizon")
+    if checkpoint_action_horizon is not None:
+        config_data["chunk_size"] = checkpoint_action_horizon
+        config_data["n_action_steps"] = checkpoint_action_horizon
+
     config_data["norm_tag"] = norm_tag
     if checkpoint_path is None:
         msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
@@ -643,6 +647,15 @@ def build_config_from_hf_config(
         for source_key, target_key in processor_field_map.items():
             if source_key in image_processor:
                 config_data[target_key] = image_processor[source_key]
+
+        processor_token_layout_fields = (
+            "image_use_col_tokens",
+            "use_single_crop_col_tokens",
+            "use_single_crop_start_token",
+        )
+        for key in processor_token_layout_fields:
+            if key in processor_config:
+                config_data[key] = processor_config[key]
 
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
