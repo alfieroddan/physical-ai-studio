@@ -11,7 +11,7 @@ import torch
 from torch import nn
 
 from physicalai.data.observation import ACTION, Feature, FeatureType
-from physicalai.policies.utils.features import feature_by_type
+from physicalai.policies.utils.features import get_feature_by_type
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
 from .joint_transform import JointFrameTransform
@@ -127,7 +127,7 @@ class MolmoAct2Postprocessor(torch.nn.Module):
             joint_offsets: Per-joint offsets for the frame transform.
         """
         super().__init__()
-        action_feature = feature_by_type(output_features, FeatureType.ACTION)
+        action_feature = get_feature_by_type(output_features, FeatureType.ACTION)
         self.action_name = action_feature.name if action_feature else ACTION
         features_map = {f.name: f for f in output_features if f.name}
         action_norm = (

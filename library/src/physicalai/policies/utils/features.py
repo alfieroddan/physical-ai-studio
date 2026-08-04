@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from physicalai.data import Feature, FeatureType
 
 
-def feature_by_type(features: list[Feature], feature_type: FeatureType) -> Feature | None:
+def get_feature_by_type(features: list[Feature], feature_type: FeatureType) -> Feature | None:
     """Return the first feature that matches a given feature type.
 
     Args:
