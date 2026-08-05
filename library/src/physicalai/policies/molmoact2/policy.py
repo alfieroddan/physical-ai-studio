@@ -6,8 +6,9 @@
 """MolmoAct2 policy implementation."""
 
 import dataclasses
+import logging
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 import torch
 from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, InferenceFeatureType
@@ -25,6 +26,8 @@ from .config import MolmoAct2Config
 from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
 from .model import MolmoAct2Model
 from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor, make_molmoact2_preprocessors
+
+logger = logging.getLogger(__name__)
 
 
 def _coerce_dataset_feature(feature: Feature) -> Feature:
@@ -99,6 +102,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         adapt_to_so101: bool | None = None,
         compile_model: bool | None = None,
         load_weights: bool = True,
+        action_mode: Literal["continuous"] = "continuous",
         **overrides: object,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
@@ -123,6 +127,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 forward and inference paths.
             load_weights: Whether to load base checkpoint weights after model
                 construction when a checkpoint source is available.
+            action_mode: Action mode to use for the policy. Currently only "continuous" is supported.
             **overrides: Any other named :class:`MolmoAct2Config` field. A
                 non-``None`` value overrides the selected base config; ``None``
                 preserves the pretrained value or dataclass default.
@@ -169,9 +174,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 **overrides,
             )
 
-        if self.config.action_mode != "continuous":
-            msg = "Only continous action mode is currently supported."
-            raise ValueError(msg)
+        if action_mode != "continuous":
+            # raise warning if action_mode is not continuous
+            msg = f"Only continuous action mode is currently supported. Got: {action_mode}.\
+                Forcefully setting to continuous."
+            logger.warning(msg)
+        # set config to be action mode literal
+        self.config.action_mode = action_mode
+
         super().__init__(n_action_steps=self.config.n_action_steps)
 
         self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
