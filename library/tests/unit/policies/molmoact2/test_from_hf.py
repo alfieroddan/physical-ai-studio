@@ -9,14 +9,15 @@ All HuggingFace Hub interactions are mocked; no network access is required.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
 
 import httpx
 import pytest
 from huggingface_hub.errors import RemoteEntryNotFoundError
 
+from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
@@ -24,10 +25,11 @@ from physicalai.policies.molmoact2.config import (
 )
 from physicalai.policies.molmoact2.from_hf import (
     _load_tokenizer_config,
+    _resolve_feature_overrides,
+    MolmoAct2Snapshot,
     build_config_from_hf_config,
     load_hf_pretrained_container,
 )
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer
 
 
 def _remote_not_found(msg: str) -> RemoteEntryNotFoundError:
@@ -267,22 +269,16 @@ class TestBuildConfigFromHfConfig:
         with pytest.raises(ValueError, match="checkpoint_path is required"):
             build_config_from_hf_config(_make_hf_config(), checkpoint_path=None)
 
-    def test_builds_features_from_norm_stats(
-        self, molmoact2_features: tuple[list, list]
-    ) -> None:
+    def test_builds_features_from_norm_stats(self, molmoact2_features: tuple[list, list]) -> None:
         config = _build_config(norm_stats=_make_norm_stats(), norm_tag="libero")
         assert any(f.name == "state" for f in config.input_features)
         assert any(f.name == "action" for f in config.output_features)
         assert config.setup_type == "tabletop"
         assert config.control_mode == "joint"
 
-    def test_feature_overrides_win_by_name(
-        self, molmoact2_features: tuple[list, list]
-    ) -> None:
+    def test_feature_overrides_win_by_name(self, molmoact2_features: tuple[list, list]) -> None:
         inputs, outputs = molmoact2_features
-        override_state = [
-            f for f in inputs if f.ftype.value == "STATE"
-        ][0]
+        override_state = [f for f in inputs if f.ftype.value == "STATE"][0]
         config = _build_config(
             norm_stats=_make_norm_stats(),
             norm_tag="libero",
@@ -293,10 +289,55 @@ class TestBuildConfigFromHfConfig:
         assert "state" in named
 
 
+class TestResolveFeatureOverrides:
+    def test_renamed_camera_does_not_preserve_pretrained_normalization(self, caplog) -> None:
+        normalization = NormalizationParameters(
+            mean=[0.0, 0.0, 0.0],
+            std=[1.0, 1.0, 1.0],
+            q01=[-1.0, -1.0, -1.0],
+            q99=[1.0, 1.0, 1.0],
+        )
+        pretrained = [
+            Feature(
+                name="wrist_image",
+                ftype=FeatureType.VISUAL,
+                shape=(3, 28, 28),
+                normalization_data=normalization,
+            ),
+        ]
+        override = [
+            Feature(name="image2", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="physicalai.policies.molmoact2.from_hf"):
+            resolved = _resolve_feature_overrides(pretrained, override)
+
+        resolved_by_name = {feature.name: feature for feature in resolved}
+        assert resolved_by_name["wrist_image"].normalization_data is normalization
+        assert resolved_by_name["image2"].normalization_data is None
+        assert "image2" in caplog.text
+        assert "normalization will not be copied" in caplog.text
+
+    def test_reshaped_camera_logs_warning(self, caplog) -> None:
+        pretrained = [
+            Feature(name="wrist_image", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        ]
+        override = [
+            Feature(name="wrist_image", ftype=FeatureType.VISUAL, shape=(3, 32, 32)),
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="physicalai.policies.molmoact2.from_hf"):
+            resolved = _resolve_feature_overrides(pretrained, override)
+
+        assert resolved[0].shape == (3, 32, 32)
+        assert "wrist_image" in caplog.text
+        assert "changed shape" in caplog.text
+
+
 class TestLoadHfPretrainedContainer:
     def test_local_checkpoint_populates_fields(self, mock_hf_repo: Path) -> None:
         container = load_hf_pretrained_container(str(mock_hf_repo))
-        assert isinstance(container, HuggingfacePolicyContainer)
+        assert isinstance(container, MolmoAct2Snapshot)
         assert container.repo_id is None
         assert container.tokenizer_config is not None
         assert container.tokenizer_config["tokenizer_class"] == "Qwen2Tokenizer"
@@ -304,20 +345,8 @@ class TestLoadHfPretrainedContainer:
         assert container.norm_stats is not None
         assert container.processor_config is not None
 
-    def test_hub_checkpoint_sets_repo_id(
-        self, mock_hf_repo: Path, patch_download_policy_artifacts
-    ) -> None:
-        def _fake_ensure(repo_id, checkpoint_location, hub_kwargs=None) -> None:
-            tgt = Path(checkpoint_location) / "processor_config.json"
-            if not tgt.exists():
-                src = mock_hf_repo / "processor_config.json"
-                tgt.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-
-        with patch(
-            "physicalai.policies.molmoact2.from_hf._ensure_processor_assets_downloaded",
-            side_effect=_fake_ensure,
-        ):
-            container = load_hf_pretrained_container("allenai/MolmoAct2-LIBERO")
+    def test_hub_checkpoint_sets_repo_id(self, mock_hf_repo: Path, patch_download_policy_artifacts) -> None:
+        container = load_hf_pretrained_container("allenai/MolmoAct2-LIBERO")
         assert container.repo_id == "allenai/MolmoAct2-LIBERO"
         assert container.tokenizer_config is not None
 
@@ -327,26 +356,3 @@ class TestLoadHfPretrainedContainer:
         (empty / "config.json").write_text("{}", encoding="utf-8")
         with pytest.raises(FileNotFoundError, match="model.safetensors"):
             load_hf_pretrained_container(str(empty))
-
-
-class TestEnsureProcessorAssetsDownloaded:
-    def test_only_downloads_processor_config(
-        self, mock_hf_repo: Path, tmp_path: Path, monkeypatch
-    ) -> None:
-        from physicalai.policies.molmoact2 import from_hf as from_hf_module
-
-        captured: list[str] = []
-
-        def _fake_download(repo_id: str, filename: str, **kwargs: Any) -> str:
-            captured.append(filename)
-            return str(mock_hf_repo / filename)
-
-        monkeypatch.setattr(from_hf_module, "hf_hub_download", _fake_download)
-
-        target = tmp_path / "snapshot"
-        target.mkdir()
-        from_hf_module._ensure_processor_assets_downloaded(
-            "allenai/MolmoAct2", str(target), hub_kwargs={}
-        )
-        assert captured == ["processor_config.json"]
-        assert (target / "processor_config.json").is_file()

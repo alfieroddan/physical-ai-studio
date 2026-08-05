@@ -244,7 +244,6 @@ def patch_hf_hub_download(monkeypatch, mock_hf_repo: Path):
 @pytest.fixture
 def patch_download_policy_artifacts(monkeypatch, mock_hf_repo: Path):
     """Patch ``download_policy_artifacts_from_hub`` to return mock repo paths."""
-    from physicalai.utils import hf_utils
 
     def _fake_download(
         repo_id: str,
@@ -268,7 +267,6 @@ def patch_download_policy_artifacts(monkeypatch, mock_hf_repo: Path):
             norm_stats_file = None
         return config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file
 
-    monkeypatch.setattr(hf_utils, "download_policy_artifacts_from_hub", _fake_download)
     import physicalai.policies.molmoact2.from_hf as from_hf_module
 
     monkeypatch.setattr(from_hf_module, "download_policy_artifacts_from_hub", _fake_download)

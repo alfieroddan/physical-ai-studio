@@ -136,11 +136,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
 
-        self.hf_container = None
         if compile_model is not None:
             overrides["compile_model"] = compile_model
 
-        # if pretrained find hf container
+        self.hf_container = None
+        # if pretrained repo_id exists find hf container
         if repo_id is not None:
             self.hf_container = load_hf_pretrained_container(repo_id)
             if self.hf_container is None:

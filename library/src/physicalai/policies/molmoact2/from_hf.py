@@ -5,28 +5,26 @@
 
 """Hugging Face loading helpers for MolmoAct2.
 
-This module keeps the Hugging Face-specific loading flow separate from the
-policy itself. The steps are:
+Loading pipeline:
 
-1. Resolve the checkpoint location from either a local directory or the
-   Hugging Face Hub.
-2. Download or open the main artifacts needed by MolmoAct2:
-   - `config.json`
-   - `model.safetensors` or `model.safetensors.index.json`
-   - optional `policy_preprocessor.json`
-   - optional `norm_stats.json`
-3. Parse `config.json` and `norm_stats.json` into in-memory payloads.
-4. Build pretrained input/output `Feature` definitions from the selected
-   `norm_tag` metadata.
-5. Merge any caller-provided feature overrides and top-level config overrides.
-6. Return a `HuggingfacePolicyContainer` carrying the resolved artifact paths
-   plus parsed JSON payloads for the policy to consume.
+1. Artifact snapshot: :func:`load_hf_pretrained_container` resolves a local
+    directory or Hub repository into :class:`MolmoAct2Snapshot`, with the model
+    config, weights, optional preprocessing state, normalization data, processor
+    configuration, and tokenizer options.
+2. Feature resolution: the selected ``norm_tag`` produces pretrained visual,
+    state, and action :class:`Feature` definitions. Caller features replace
+    those definitions only by name.
+3. Config translation: :func:`build_config_from_hf_config` maps the nested HF
+    payload, resolved snapshot assets, and explicit caller overrides into the
+    flat :class:`MolmoAct2Config` used by the policy.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,13 +32,14 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
-from physicalai.utils.hf_utils import HuggingfacePolicyContainer, download_policy_artifacts_from_hub
 
 from .config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
     MolmoAct2Config,
 )
+
+logger = logging.getLogger(__name__)
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
@@ -51,49 +50,148 @@ IMAGE_SIZE_DIMS = 2
 # needs to instantiate the tokenizer.
 IMAGE_PROMPT = "<|image|>"
 
+_HF_HUB_DOWNLOAD_KEYS = {
+    "cache_dir",
+    "force_download",
+    "resume_download",
+    "proxies",
+    "token",
+    "revision",
+    "local_files_only",
+}
 
-def _ensure_processor_assets_downloaded(
+
+@dataclass
+class MolmoAct2Snapshot:
+    """Artifacts and parsed metadata resolved for a MolmoAct2 checkpoint."""
+
+    config_file: Path
+    weights_file: Path
+    preprocessor_file: Path | None
+    preprocessor_dir: Path | None
+    checkpoint_location: str
+    hf_config: dict[str, Any]
+    norm_stats: dict[str, Any] | None = None
+    processor_config: dict[str, Any] | None = None
+    repo_id: str | None = None
+    tokenizer_config: dict[str, Any] | None = None
+
+
+def _download_optional_preprocessor(
     repo_id: str,
-    checkpoint_location: str,
-    hub_kwargs: dict[str, object] | None = None,
+    preprocessor_filename: str,
+    *,
+    hub_kwargs: dict[str, object],
+) -> Path | None:
+    try:
+        return Path(hf_hub_download(repo_id, preprocessor_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _download_referenced_state_files(
+    repo_id: str,
+    preprocessor_file: Path,
+    *,
+    hub_kwargs: dict[str, object],
 ) -> None:
-    """Download the processor config asset into the local checkpoint snapshot.
+    with preprocessor_file.open(encoding="utf-8") as f:
+        preproc_data = json.load(f)
+    for step in preproc_data.get("steps", []):
+        state_file = step.get("state_file")
+        if state_file:
+            hf_hub_download(repo_id, state_file, **hub_kwargs)  # nosec B615  # type: ignore[arg-type]
 
-    The tokenizer assets are intentionally not fetched here: the tokenizer
-    ``tokenizer.json`` vocab is pulled on demand by ``MolmoAct2Tokenizers`` from
-    the configured repo id, and ``tokenizer_config.json`` options are loaded
-    separately during container construction. Only ``processor_config.json``
-    needs to live inside the checkpoint snapshot directory for the image
-    processor config to be read back.
 
-    Args:
-        repo_id: HuggingFace model repository ID.
-        checkpoint_location: Path to the checkpoint snapshot directory.
-        hub_kwargs: Optional HuggingFace hub download kwargs.
+def _download_weights_or_shards(
+    repo_id: str,
+    *,
+    weights_filename: str,
+    hub_kwargs: dict[str, object],
+) -> Path:
+    """Download a single safetensors file or a sharded index and all shards.
+
+    Returns:
+        Path to the single weights file or the sharded weights index.
+
+    Raises:
+        FileNotFoundError: If neither weights format exists in the repository.
+        TypeError: If the sharded index has no valid weight map.
     """
-    processor_files = [
-        "processor_config.json",
-    ]
-    selected_hub_kwargs = {
-        k: v
-        for k, v in (hub_kwargs or {}).items()
-        if k in {"cache_dir", "force_download", "resume_download", "proxies", "token", "revision", "local_files_only"}
-    }
-
-    for filename in processor_files:
+    try:
+        return Path(hf_hub_download(repo_id, weights_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
+    except RemoteEntryNotFoundError as single_exc:
+        index_filename = f"{weights_filename}.index.json"
         try:
-            downloaded_path = hf_hub_download(  # pyrefly: ignore[no-matching-overload]
-                repo_id,
-                filename,
-                **selected_hub_kwargs,  # type: ignore[arg-type]
+            index_path = Path(hf_hub_download(repo_id, index_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
+        except RemoteEntryNotFoundError as index_exc:
+            msg = (
+                f"Could not find weights for repo '{repo_id}'. Expected either "
+                f"'{weights_filename}' or '{index_filename}'."
             )
-            # The file is now in cache; ensure it's also in the checkpoint_location snapshot dir
-            target_path = Path(checkpoint_location) / filename
-            if not target_path.exists():
-                shutil.copy2(downloaded_path, target_path)
-        except RemoteEntryNotFoundError:
-            # File doesn't exist in repo, skip it
-            pass
+            raise FileNotFoundError(msg) from index_exc
+
+        with index_path.open(encoding="utf-8") as f:
+            index_payload = json.load(f)
+        weight_map = index_payload.get("weight_map")
+        if not isinstance(weight_map, dict):
+            msg = f"Invalid sharded index format in '{index_filename}': missing 'weight_map'."
+            raise TypeError(msg) from single_exc
+
+        for shard_file in sorted(set(weight_map.values())):
+            hf_hub_download(repo_id, shard_file, **hub_kwargs)  # nosec B615  # type: ignore[arg-type]
+        return index_path
+
+
+def download_policy_artifacts_from_hub(
+    repo_id: str,
+    *,
+    hub_kwargs: dict[str, object] | None = None,
+    config_filename: str = "config.json",
+    weights_filename: str = SAFE_WEIGHTS_NAME,
+    preprocessor_filename: str = "policy_preprocessor.json",
+    norm_stats_filename: str | None = None,
+    download_preprocessor_state_files: bool = True,
+) -> tuple[Path, Path, Path | None, Path | None, Path | None]:
+    """Download the artifacts MolmoAct2 needs from a Hugging Face repository.
+
+    Returns:
+        The config, weights, optional preprocessor file/directory, and optional
+        normalization stats file resolved from the repository.
+    """
+    selected_hub_kwargs = {k: v for k, v in (hub_kwargs or {}).items() if k in _HF_HUB_DOWNLOAD_KEYS}
+    config_file = Path(
+        hf_hub_download(repo_id, config_filename, **selected_hub_kwargs),  # nosec B615  # type: ignore[arg-type]
+    )
+    weights_file = _download_weights_or_shards(
+        repo_id,
+        weights_filename=weights_filename,
+        hub_kwargs=selected_hub_kwargs,
+    )
+    preprocessor_file = _download_optional_preprocessor(
+        repo_id,
+        preprocessor_filename,
+        hub_kwargs=selected_hub_kwargs,
+    )
+    if preprocessor_file is None:
+        preprocessor_dir = None
+    else:
+        preprocessor_dir = preprocessor_file.parent
+        if download_preprocessor_state_files:
+            try:
+                _download_referenced_state_files(repo_id, preprocessor_file, hub_kwargs=selected_hub_kwargs)
+            except Exception:  # noqa: BLE001
+                preprocessor_file = None
+                preprocessor_dir = None
+
+    norm_stats_file = None
+    if norm_stats_filename is not None:
+        norm_stats_file = _download_optional_preprocessor(
+            repo_id,
+            norm_stats_filename,
+            hub_kwargs=selected_hub_kwargs,
+        )
+    return config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file
 
 
 def _load_tokenizer_config(checkpoint_location: str, repo_id: str | None) -> dict[str, Any] | None:
@@ -129,32 +227,6 @@ def _load_tokenizer_config(checkpoint_location: str, repo_id: str | None) -> dic
         with Path(downloaded).open(encoding="utf-8") as f:
             return json.load(f)
     return None
-
-
-def _resolve_local_weights_path(checkpoint_dir: Path) -> Path:
-    """Resolve a local safetensors weights file.
-
-    Args:
-        checkpoint_dir: Local checkpoint directory.
-
-    Returns:
-        Path to `model.safetensors` or `model.safetensors.index.json`.
-
-    Raises:
-        FileNotFoundError: If neither local weights format exists.
-    """
-    single_file_path = checkpoint_dir / SAFE_WEIGHTS_NAME
-    index_path = checkpoint_dir / SAFE_WEIGHTS_INDEX_NAME
-
-    if single_file_path.is_file():
-        return single_file_path
-    if index_path.is_file():
-        return index_path
-
-    msg = (
-        f"MolmoAct2 local checkpoint at {checkpoint_dir} must contain {SAFE_WEIGHTS_NAME} or {SAFE_WEIGHTS_INDEX_NAME}."
-    )
-    raise FileNotFoundError(msg)
 
 
 def _hf_component_config(hf_config: dict[str, Any], component_name: str) -> dict[str, Any]:
@@ -385,55 +457,54 @@ def _resolve_feature_overrides(
 ) -> list[Feature]:
     """Resolve final feature list from pretrained and override inputs.
 
+    Only exact names match. A renamed feature remains independent of the
+    pretrained schema and never inherits its normalization metadata. A warning
+    is logged when an override name is new or when a name-matched feature has a
+    different shape from its pretrained definition.
+
     Args:
         pretrained_features: Features derived from pretrained metadata.
         override_features: Optional user-provided feature overrides.
 
     Returns:
         Final ordered feature list with overrides applied.
+
     """
     if not override_features:
         return pretrained_features
 
     overrides_by_name = {feature.name: feature for feature in override_features}
-    resolved_features = [
-        _merge_feature_override(feature, overrides_by_name[feature.name])
-        for feature in pretrained_features
-        if feature.name in overrides_by_name
-    ]
+    resolved_features: list[Feature] = []
+    for feature in pretrained_features:
+        override_feature = overrides_by_name.get(feature.name)
+        if override_feature is None:
+            continue
+        if (
+            feature.shape is not None
+            and override_feature.shape is not None
+            and tuple(feature.shape) != tuple(override_feature.shape)
+        ):
+            logger.warning(
+                "MolmoAct2 override feature %r changed shape from %s to %s.",
+                feature.name,
+                tuple(feature.shape),
+                tuple(override_feature.shape),
+            )
+        resolved_features.append(_merge_feature_override(feature, override_feature))
     resolved_names = {feature.name for feature in resolved_features if feature.name is not None}
 
     unmatched_pretrained = [feature for feature in pretrained_features if feature.name not in resolved_names]
     unmatched_overrides = [feature for feature in override_features if feature.name not in resolved_names]
 
-    # Name-based matching is preferred. For remaining overrides (for example,
-    # camera alias remaps like wrist_image -> image2), match by type/shape to
-    # preserve pretrained normalization metadata while allowing renamed keys.
-    consumed_pretrained_ids: set[int] = set()
-    consumed_override_ids: set[int] = set()
     for override_feature in unmatched_overrides:
-        for pretrained_feature in unmatched_pretrained:
-            if id(pretrained_feature) in consumed_pretrained_ids:
-                continue
-            if pretrained_feature.ftype != override_feature.ftype:
-                continue
+        logger.warning(
+            "MolmoAct2 override feature %r has no matching pretrained feature name; "
+            "pretrained normalization will not be copied.",
+            override_feature.name,
+        )
 
-            pretrained_shape = tuple(pretrained_feature.shape) if pretrained_feature.shape is not None else None
-            override_shape = tuple(override_feature.shape) if override_feature.shape is not None else None
-            if pretrained_shape is not None and override_shape is not None and pretrained_shape != override_shape:
-                continue
-
-            resolved_features.append(_merge_feature_override(pretrained_feature, override_feature))
-            consumed_pretrained_ids.add(id(pretrained_feature))
-            consumed_override_ids.add(id(override_feature))
-            break
-
-    resolved_features.extend(
-        [feature for feature in unmatched_pretrained if id(feature) not in consumed_pretrained_ids],
-    )
-    resolved_features.extend(
-        [feature for feature in unmatched_overrides if id(feature) not in consumed_override_ids],
-    )
+    resolved_features.extend(unmatched_pretrained)
+    resolved_features.extend(unmatched_overrides)
 
     return resolved_features
 
@@ -475,7 +546,10 @@ def build_config_from_hf_config(
 
     Raises:
         ValueError: If ``checkpoint_path`` is ``None``.
+        TypeError: If unkown MolmoAct2 overrides are supplied.
     """
+    # Stage 1: start from local defaults and translate architecture fields from
+    # the nested Hugging Face config.
     config_data = MolmoAct2Config().to_dict()
 
     component_field_maps = {
@@ -554,6 +628,9 @@ def build_config_from_hf_config(
         for source_key, target_key in field_map.items():
             if source_key in component_data:
                 config_data[target_key] = component_data[source_key]
+
+    # Stage 2: resolve normalized features from the selected dataset tag, then
+    # apply caller-provided feature substitutions.
     if norm_tag is not None:
         pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
             hf_config,
@@ -617,6 +694,7 @@ def build_config_from_hf_config(
         config_data["chunk_size"] = checkpoint_action_horizon
         config_data["n_action_steps"] = checkpoint_action_horizon
 
+    # Stage 3: attach local snapshot assets and image-processor settings.
     config_data["norm_tag"] = norm_tag
     if checkpoint_path is None:
         msg = "checkpoint_path is required to resolve MolmoAct2 pretrained assets."
@@ -662,6 +740,7 @@ def build_config_from_hf_config(
         config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
         config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
 
+    # Stage 4: validate and apply explicit caller overrides last.
     valid_fields = set(config_data)
     unknown = set(overrides) - valid_fields
     if unknown:
@@ -679,7 +758,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
     processor_filename: str = "processor_config.json",
     norm_stats_filename: str = "norm_stats.json",
     **kwargs: object,
-) -> HuggingfacePolicyContainer:
+) -> MolmoAct2Snapshot:
     """Resolve local or HF artifacts for MolmoAct2 pretrained loading.
 
     Args:
@@ -691,6 +770,9 @@ def load_hf_pretrained_container(  # noqa: PLR0914
 
     Returns:
         Container with resolved artifact paths and parsed config payloads.
+
+    Raises:
+        FileNotFoundError: When looking for local weight files.
     """
     path = Path(pretrained_name_or_path)
     is_local = path.is_dir()
@@ -701,7 +783,12 @@ def load_hf_pretrained_container(  # noqa: PLR0914
 
     if is_local:
         config_file = path / config_filename
-        weights_file = _resolve_local_weights_path(path)
+        weights_file = path / SAFE_WEIGHTS_NAME
+        if not weights_file.is_file():
+            weights_file = path / SAFE_WEIGHTS_INDEX_NAME
+        if not weights_file.is_file():
+            msg = f"MolmoAct2 local checkpoint at {path} must contain {SAFE_WEIGHTS_NAME} or {SAFE_WEIGHTS_INDEX_NAME}."
+            raise FileNotFoundError(msg)
         preprocessor_file = path / processor_filename
         preprocessor_dir = path
         norm_stats_file = path / norm_stats_filename
@@ -738,13 +825,18 @@ def load_hf_pretrained_container(  # noqa: PLR0914
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
 
-        # Download the processor config asset into the snapshot directory.
         checkpoint_location_temp = str(Path(weights_file).parent)
-        _ensure_processor_assets_downloaded(
-            str(pretrained_name_or_path),
-            checkpoint_location_temp,
-            hub_kwargs=hub_kwargs,
-        )
+        target_path = Path(checkpoint_location_temp) / processor_filename
+        if not target_path.exists():
+            try:
+                downloaded_path = hf_hub_download(
+                    str(pretrained_name_or_path),
+                    processor_filename,
+                    **hub_kwargs,  # type: ignore[arg-type]
+                )
+                shutil.copy2(downloaded_path, target_path)
+            except RemoteEntryNotFoundError:
+                pass
 
     with Path(config_file).open(encoding="utf-8") as f:
         hf_config = json.load(f)
@@ -764,7 +856,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
     # Hub, then the canonical MolmoAct2 repo as a final fallback.
     tokenizer_config = _load_tokenizer_config(checkpoint_location, repo_id)
 
-    return HuggingfacePolicyContainer(
+    return MolmoAct2Snapshot(
         config_file=Path(config_file),
         weights_file=Path(weights_file),
         preprocessor_file=Path(preprocessor_file) if preprocessor_file is not None else None,
