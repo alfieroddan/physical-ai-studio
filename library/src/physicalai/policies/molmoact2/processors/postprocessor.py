@@ -8,100 +8,12 @@
 from __future__ import annotations
 
 import torch
-from torch import nn
 
 from physicalai.data.observation import ACTION, Feature, FeatureType
 from physicalai.policies.utils.features import get_feature_by_type
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
 from .joint_transform import JointFrameTransform
-
-
-class _MolmoAct2DenormalizeTransform(FeatureNormalizeTransform):
-    """Inverse :class:`FeatureNormalizeTransform` with MolmoAct2 mask support.
-
-    The shared :class:`FeatureNormalizeTransform` ignores any ``mask`` carried
-    on :class:`NormalizationParameters`. MolmoAct2 actions may carry a
-    per-dimension mask selecting which dims are quantile-normalized; for the
-    masked-out dims the denormalized value must equal the (clamped) model
-    output, so the mask is applied here on top of the base inverse transform.
-    """
-
-    def __init__(
-        self,
-        features: dict[str, Feature],
-        norm_map: dict[FeatureType, NormalizationType],
-    ) -> None:
-        """Build the inverse transform and attach optional mask buffers.
-
-        Args:
-            features: Mapping of feature name -> Feature.
-            norm_map: Mapping of feature type -> normalization mode.
-        """
-        super().__init__(features, norm_map, inverse=True)
-        for name, feature in features.items():
-            norm_mode = norm_map.get(feature.ftype, NormalizationType.IDENTITY)  # type: ignore[arg-type]
-            if norm_mode is not NormalizationType.QUANTILES:
-                continue
-            norm_data = feature.normalization_data
-            if norm_data is None or norm_data.mask is None:
-                continue
-            buffer = self.buffers_lookup.get(name)
-            if buffer is None:
-                continue
-            shape = feature.shape if feature.shape is not None else ()
-            mask_tensor = torch.tensor(norm_data.mask, dtype=torch.float32).view(shape)
-            buffer["mask"] = nn.Parameter(mask_tensor, requires_grad=False)
-
-    @staticmethod
-    def _apply_normalization(
-        batch: dict,
-        key: str,
-        norm_mode: NormalizationType,
-        buffer: nn.ParameterDict,
-        *,
-        inverse: bool,
-    ) -> None:
-        """Denormalize, honouring an optional per-dim mask for quantiles.
-
-        For ``QUANTILES`` features that carry a ``mask`` buffer, only the masked
-        dimensions are denormalized; the rest pass through unchanged. Every
-        other mode (and unmasked quantiles) is delegated to the base class so
-        MolmoAct2 stays numerically aligned with the shared implementation.
-
-        Args:
-            batch: Input batch, modified in place.
-            key: Batch key to denormalize.
-            norm_mode: Normalization mode for this feature.
-            buffer: Buffer ``ParameterDict`` (may contain a ``"mask"`` entry).
-            inverse: Whether to apply the inverse transformation.
-        """
-        if batch[key] is None:
-            return
-        feature_mask = buffer.get("mask") if hasattr(buffer, "get") else None
-        if norm_mode is NormalizationType.QUANTILES and feature_mask is not None:
-            q01 = buffer["q01"]
-            q99 = buffer["q99"]
-            denom = q99 - q01
-            denom = torch.where(
-                denom == 0,
-                torch.tensor(1e-8, device=denom.device, dtype=denom.dtype),
-                denom,
-            )
-            transformed = (batch[key] + 1.0) * denom / 2.0 + q01 if inverse else 2.0 * (batch[key] - q01) / denom - 1.0
-            mask_bool = feature_mask.bool()
-            for _ in range(batch[key].ndim - mask_bool.ndim):
-                mask_bool = mask_bool.unsqueeze(0)
-            mask_bool = mask_bool.expand_as(batch[key])
-            batch[key] = torch.where(mask_bool, transformed, batch[key])
-            return
-        FeatureNormalizeTransform._apply_normalization(  # noqa: SLF001
-            batch,
-            key,
-            norm_mode,
-            buffer,
-            inverse=inverse,
-        )
 
 
 class MolmoAct2Postprocessor(torch.nn.Module):
@@ -135,9 +47,10 @@ class MolmoAct2Postprocessor(torch.nn.Module):
             if action_feature is not None and action_feature.normalization_data is not None
             else NormalizationType.IDENTITY
         )
-        self._denormalizer = _MolmoAct2DenormalizeTransform(
+        self._denormalizer = FeatureNormalizeTransform(
             features_map,
             {FeatureType.ACTION: action_norm},
+            inverse=True,
         )
         self._adapt_to_so101 = adapt_to_so101
         self._joint_transform = JointFrameTransform(joint_signs or [], joint_offsets or []) if adapt_to_so101 else None
