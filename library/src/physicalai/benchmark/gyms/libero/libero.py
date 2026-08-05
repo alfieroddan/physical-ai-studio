@@ -57,6 +57,9 @@ class LiberoBenchmark(Benchmark):
             - "libero_10" (10 tasks, mixed)
             - "libero_90" (90 tasks, long-horizon)
         task_ids: Specific task IDs to evaluate. None means all tasks.
+        camera_name_mapping: Optional remap from default output camera keys to
+            policy-facing keys. For example, ``{"image2": "wrist_image"}``
+            renames the wrist camera after LIBERO normalizes its camera names.
         num_episodes: Number of episodes per task (default: 20).
         max_steps: Maximum steps per episode (default: 300).
         seed: Random seed for reproducibility (default: 42).
@@ -69,6 +72,12 @@ class LiberoBenchmark(Benchmark):
         >>> # Full LIBERO-10 benchmark
         >>> benchmark = LiberoBenchmark(task_suite="libero_10", num_episodes=20)
         >>> results = benchmark.evaluate(policy)
+
+        >>> # Rename the wrist camera key to match what MolmoAct2 expects
+        >>> benchmark = LiberoBenchmark(
+        ...     task_suite="libero_10",
+        ...     camera_name_mapping={"image2": "wrist_image"},
+        ... )
 
         >>> # Quick test on specific tasks
         >>> benchmark = LiberoBenchmark(

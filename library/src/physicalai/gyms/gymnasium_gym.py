@@ -11,7 +11,7 @@ Note:
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import gymnasium as gym
@@ -25,6 +25,43 @@ from .base import Gym
 from .types import SingleOrBatch
 
 logger = logging.getLogger(__name__)
+
+
+def validate_camera_name_mapping(
+    mapping: Mapping[str, str] | None,
+    camera_keys: list[str],
+) -> dict[str, str]:
+    """Validate a mapping from existing image keys to output image keys."""
+    if mapping is None:
+        return {}
+
+    unknown_keys = sorted(set(mapping) - set(camera_keys))
+    if unknown_keys:
+        msg = (
+            "camera_name_mapping keys must map from existing output keys. "
+            f"Unknown keys: {unknown_keys}. Existing keys: {sorted(set(camera_keys))}"
+        )
+        raise ValueError(msg)
+
+    if any(not isinstance(value, str) or not value for value in mapping.values()):
+        msg = "camera_name_mapping values must be non-empty strings."
+        raise ValueError(msg)
+
+    mapped_keys = [mapping.get(key, key) for key in camera_keys]
+    if len(mapped_keys) != len(set(mapped_keys)):
+        msg = f"camera_name_mapping creates duplicate output keys: {mapped_keys}"
+        raise ValueError(msg)
+
+    return dict(mapping)
+
+
+def remap_camera_images(
+    images: dict[str, Any],
+    mapping: Mapping[str, str] | None,
+) -> dict[str, Any]:
+    """Return image outputs renamed according to a validated camera mapping."""
+    mapping = validate_camera_name_mapping(mapping, list(images))
+    return {mapping.get(key, key): image for key, image in images.items()}
 
 
 class ActionValidationError(ValueError):
@@ -52,6 +89,7 @@ class GymnasiumGym(Gym):
         vector_env: gym.Env | AsyncVectorEnv | SyncVectorEnv | None = None,
         device: str | torch.device = "cpu",
         render_mode: str | None = "rgb_array",
+        camera_name_mapping: Mapping[str, str] | None = None,
         **gym_kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize a Gymnasium environment.
@@ -61,6 +99,8 @@ class GymnasiumGym(Gym):
             vector_env: A preconstructed vectorized environment.
             device: Torch device used for returned tensors.
             render_mode: Rendering mode passed to ``gym.make``.
+            camera_name_mapping: Optional renames from output image keys to
+                policy-facing image keys.
             **gym_kwargs: Additional arguments forwarded to ``gym.make``.
         """
         if vector_env is not None:
@@ -71,6 +111,7 @@ class GymnasiumGym(Gym):
             self._env = gym.make(gym_id, **gym_kwargs)
 
         self._device = torch.device(device)
+        self.camera_name_mapping = dict(camera_name_mapping) if camera_name_mapping is not None else {}
         self.num_envs = getattr(self._env, "num_envs", 1)
         self._is_vectorized = self.num_envs > 1
 
@@ -296,9 +337,10 @@ class GymnasiumGym(Gym):
         Returns:
             Observation: The parsed and structured observation.
         """
-        return self.convert_raw_to_observation(raw_obs=raw_obs).to_torch(
-            device=self.device,
-        )
+        observation = self.convert_raw_to_observation(raw_obs=raw_obs)
+        if isinstance(observation.images, dict):
+            observation.images = remap_camera_images(observation.images, self.camera_name_mapping)
+        return observation.to_torch(device=self.device)
 
     @staticmethod
     def convert_raw_to_observation(
@@ -375,6 +417,7 @@ class GymnasiumGym(Gym):
         async_mode: bool = False,
         render_mode: str | None = "rgb_array",
         device: str | torch.device = "cpu",
+        camera_name_mapping: Mapping[str, str] | None = None,
         **gym_kwargs: Any,  # noqa: ANN401
     ) -> "GymnasiumGym":
         """Creates a vectorized `GymnasiumWrapper` for parallel environments.
@@ -411,7 +454,7 @@ class GymnasiumGym(Gym):
                 render_mode=render_mode,
                 **gym_kwargs,
             )
-        return cls(vector_env=vec, device=device)
+        return cls(vector_env=vec, device=device, camera_name_mapping=camera_name_mapping)
 
 
 def make_sync_vector_env(

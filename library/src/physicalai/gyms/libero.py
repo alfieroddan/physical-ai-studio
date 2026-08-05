@@ -74,6 +74,7 @@ from gymnasium import spaces
 
 from physicalai.data.observation import Observation
 from physicalai.gyms.base import Gym
+from physicalai.gyms.gymnasium_gym import validate_camera_name_mapping
 
 if TYPE_CHECKING:
     from libero.libero.benchmark import Benchmark
@@ -234,29 +235,8 @@ class LiberoGym(Gym):
         )
 
     def _validate_camera_name_mapping(self, mapping: dict[str, str] | None) -> dict[str, str]:
-        if mapping is None:
-            return {}
-
         default_output_keys = [self.CAMERA_NAME_MAPPING[camera] for camera in self.camera_names]
-        unknown_keys = sorted(set(mapping) - set(default_output_keys))
-        if unknown_keys:
-            msg = (
-                "camera_name_mapping keys must map from existing output keys. "
-                f"Unknown keys: {unknown_keys}. Existing keys: {sorted(set(default_output_keys))}"
-            )
-            raise ValueError(msg)
-
-        remapped_values = [value for value in mapping.values() if value]
-        if len(remapped_values) != len(mapping):
-            msg = "camera_name_mapping values must be non-empty strings."
-            raise ValueError(msg)
-
-        final_output_keys = [mapping.get(key, key) for key in default_output_keys]
-        if len(final_output_keys) != len(set(final_output_keys)):
-            msg = f"camera_name_mapping creates duplicate output keys: {final_output_keys}"
-            raise ValueError(msg)
-
-        return dict(mapping)
+        return validate_camera_name_mapping(mapping, default_output_keys)
 
     def _mapped_output_camera_key(self, camera_name: str) -> str:
         default_key = self.CAMERA_NAME_MAPPING[camera_name]
