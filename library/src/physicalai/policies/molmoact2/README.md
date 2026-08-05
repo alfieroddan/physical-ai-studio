@@ -177,9 +177,59 @@ Results:
 | libero_10      |     10 |                 100.0 |        1.00 |               241.4 |     12.61 |
 | **Average**    | **40** |              **97.5** |    **0.98** |           **153.7** | **11.63** |
 
-## Tips and Tricks
+## Zero Shot SO-101
 
-- When using the robot on a S0-101, start the model when the SO-101 is in an extended position i.e about to do the task. If not the model will get stuck in a loop in rest position.
+To run zero-shot MolmoAct2 on the SO-101 embodiment. Please export the model using:
+
+```python
+from physicalai.policies import MolmoAct2
+from physicalai.data import Feature, FeatureType
+import torch
+
+input_features = [
+    Feature(
+        name="overview",
+        ftype=FeatureType.VISUAL,
+        shape=(3, 480, 640),
+    ),
+    Feature(
+        name="wrist",
+        ftype=FeatureType.VISUAL,
+        shape=(3, 480, 640),
+    ),
+    Feature(
+        name="state",
+        ftype=FeatureType.STATE,
+        shape=(6,),
+    ),
+]
+
+
+output_features = [
+    Feature(
+        name="action",
+        ftype=FeatureType.ACTION,
+        shape=(6,),
+    ),
+]
+
+if __name__ == "__main__":
+    policy = MolmoAct2(
+        repo_id="allenai/MolmoAct2-SO100_101",
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=True,
+    ).eval()
+    policy.config.sample_noise = True
+    policy = policy.to(dtype=torch.bfloat16)
+    policy.export("model_dir/molmoact2-so101-torch", backend="torch")
+```
+
+You can then use the [runtime framework](https://github.com/openvinotoolkit/physicalai) to run the policy.
+
+> [!NOTE]
+> When using the robot on a S0-101, start the model when the SO-101 is in an extended position i.e about to do the task. If not the model will get stuck in a loop in rest position.
+
+## Tips and Tricks
 
 ## Repo ID and Norm Tag
 
