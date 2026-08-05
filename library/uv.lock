@@ -3795,6 +3795,7 @@ xpu = [
 dev = [
     { name = "diffusers" },
     { name = "mypy" },
+    { name = "peft" },
     { name = "pyrefly" },
     { name = "ruff" },
 ]
@@ -3870,6 +3871,7 @@ provides-extras = ["cpu", "cu128", "xpu", "tests", "loggers", "libero", "diffusi
 dev = [
     { name = "diffusers", specifier = ">=0.38.0" },
     { name = "mypy", specifier = ">=1.19.1" },
+    { name = "peft", specifier = ">=0.13.0,<1.0.0" },
     { name = "pyrefly", specifier = ">=0.18.0" },
     { name = "ruff", specifier = ">=0.14.14" },
 ]

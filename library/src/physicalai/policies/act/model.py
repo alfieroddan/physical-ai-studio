@@ -15,7 +15,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from itertools import chain
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import einops
 import numpy as np
@@ -197,7 +197,10 @@ class ACT(Model):
 
         return ACTConfig(**filtered_config_dict)
 
-    def forward(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]] | torch.Tensor:
+    def forward(
+        self,
+        batch: dict[str, torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]] | torch.Tensor:
         """Forward pass through the ACT model.
 
         In training mode, computes loss components including L1 loss and optional KL divergence loss
@@ -222,7 +225,7 @@ class ACT(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
-    def compute_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute training loss (L1 + optional KL divergence).
 
         Args:
@@ -255,7 +258,7 @@ class ACT(Model):
         return loss, loss_dict
 
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Compute validation loss (L1 + optional KL divergence).
 
         Temporarily sets the inner model to training mode so the VAE encoder
