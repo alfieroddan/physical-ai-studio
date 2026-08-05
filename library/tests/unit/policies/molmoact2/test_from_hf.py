@@ -207,6 +207,19 @@ class TestBuildConfigFromHfConfig:
         assert config.chunk_size == 12
         assert config.n_action_steps == 4
 
+    def test_action_mode_override_is_applied_before_validation(self) -> None:
+        hf_config = {**_make_hf_config(), "action_mode": "discrete"}
+
+        config = build_config_from_hf_config(
+            hf_config,
+            checkpoint_path="/tmp/checkpoint",
+            train_action_expert_only=True,
+            action_mode="continuous",
+        )
+
+        assert config.action_mode == "continuous"
+        assert config.train_action_expert_only is True
+
     def test_chunk_size_defaults_to_thirty_when_not_overridden(self) -> None:
         """When the HF config omits chunk_size, the override default of 30 applies."""
         hf_config = _make_hf_config()

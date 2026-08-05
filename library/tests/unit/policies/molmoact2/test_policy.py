@@ -86,9 +86,9 @@ class TestMolmoact2Policy:
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 
-    def test_action_mode_non_continuous_rejected(self) -> None:
-        with pytest.raises(ValueError, match="continous action mode"):
-            MolmoAct2(repo_id=None, action_mode="discrete")
+    def test_action_mode_override_is_applied_to_config(self) -> None:
+        policy = MolmoAct2(repo_id=None, action_mode="discrete")
+        assert policy.config.action_mode == "discrete"
 
     def test_only_one_feature_set_rejected(self) -> None:
         from physicalai.data.observation import Feature, FeatureType

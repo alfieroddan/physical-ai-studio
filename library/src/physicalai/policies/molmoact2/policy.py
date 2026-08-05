@@ -143,6 +143,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         if compile_model is not None:
             overrides["compile_model"] = compile_model
+        if action_mode is not None:
+            overrides["action_mode"] = action_mode
 
         self.hf_container = None
         # if pretrained repo_id exists find hf container
@@ -173,14 +175,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 norm_tag=norm_tag,
                 **overrides,
             )
-
-        if action_mode != "continuous":
-            # raise warning if action_mode is not continuous
-            msg = f"Only continuous action mode is currently supported. Got: {action_mode}.\
-                Forcefully setting to continuous."
-            logger.warning(msg)
-        # set config to be action mode literal
-        self.config.action_mode = action_mode
 
         super().__init__(n_action_steps=self.config.n_action_steps)
 
