@@ -26,7 +26,7 @@ import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import RemoteEntryNotFoundError
@@ -50,15 +50,46 @@ IMAGE_SIZE_DIMS = 2
 # needs to instantiate the tokenizer.
 IMAGE_PROMPT = "<|image|>"
 
-_HF_HUB_DOWNLOAD_KEYS = {
-    "cache_dir",
-    "force_download",
-    "resume_download",
-    "proxies",
-    "token",
-    "revision",
-    "local_files_only",
-}
+
+class HFHubDownloadKwargs(TypedDict, total=False):
+    """Supported keyword arguments for ``hf_hub_download``."""
+
+    cache_dir: str | Path | None
+    force_download: bool
+    token: bool | str | None
+    revision: str | None
+    local_files_only: bool
+
+
+def _select_hf_hub_download_kwargs(kwargs: dict[str, object]) -> HFHubDownloadKwargs:
+    """Filter untyped caller options into the supported Hub download arguments.
+
+    Returns:
+        Validated arguments accepted by ``hf_hub_download``.
+    """
+    selected: HFHubDownloadKwargs = {}
+
+    cache_dir = kwargs.get("cache_dir")
+    if cache_dir is None or isinstance(cache_dir, (str, Path)):
+        selected["cache_dir"] = cache_dir
+
+    force_download = kwargs.get("force_download")
+    if isinstance(force_download, bool):
+        selected["force_download"] = force_download
+
+    token = kwargs.get("token")
+    if token is None or isinstance(token, (bool, str)):
+        selected["token"] = token
+
+    revision = kwargs.get("revision")
+    if revision is None or isinstance(revision, str):
+        selected["revision"] = revision
+
+    local_files_only = kwargs.get("local_files_only")
+    if isinstance(local_files_only, bool):
+        selected["local_files_only"] = local_files_only
+
+    return selected
 
 
 @dataclass
@@ -81,7 +112,7 @@ def _download_optional_preprocessor(
     repo_id: str,
     preprocessor_filename: str,
     *,
-    hub_kwargs: dict[str, object],
+    hub_kwargs: HFHubDownloadKwargs,
 ) -> Path | None:
     try:
         return Path(hf_hub_download(repo_id, preprocessor_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
@@ -93,7 +124,7 @@ def _download_referenced_state_files(
     repo_id: str,
     preprocessor_file: Path,
     *,
-    hub_kwargs: dict[str, object],
+    hub_kwargs: HFHubDownloadKwargs,
 ) -> None:
     with preprocessor_file.open(encoding="utf-8") as f:
         preproc_data = json.load(f)
@@ -107,7 +138,7 @@ def _download_weights_or_shards(
     repo_id: str,
     *,
     weights_filename: str,
-    hub_kwargs: dict[str, object],
+    hub_kwargs: HFHubDownloadKwargs,
 ) -> Path:
     """Download a single safetensors file or a sharded index and all shards.
 
@@ -146,7 +177,7 @@ def _download_weights_or_shards(
 def download_policy_artifacts_from_hub(
     repo_id: str,
     *,
-    hub_kwargs: dict[str, object] | None = None,
+    hub_kwargs: HFHubDownloadKwargs | None = None,
     config_filename: str = "config.json",
     weights_filename: str = SAFE_WEIGHTS_NAME,
     preprocessor_filename: str = "policy_preprocessor.json",
@@ -159,7 +190,7 @@ def download_policy_artifacts_from_hub(
         The config, weights, optional preprocessor file/directory, and optional
         normalization stats file resolved from the repository.
     """
-    selected_hub_kwargs = {k: v for k, v in (hub_kwargs or {}).items() if k in _HF_HUB_DOWNLOAD_KEYS}
+    selected_hub_kwargs = hub_kwargs or HFHubDownloadKwargs()
     config_file = Path(
         hf_hub_download(repo_id, config_filename, **selected_hub_kwargs),  # nosec B615  # type: ignore[arg-type]
     )
@@ -509,49 +540,8 @@ def _resolve_feature_overrides(
     return resolved_features
 
 
-def build_config_from_hf_config(
-    hf_config: dict[str, Any],
-    *,
-    norm_stats: dict[str, Any] | None = None,
-    input_features: list[Feature] | None = None,
-    output_features: list[Feature] | None = None,
-    norm_tag: str | None = None,
-    checkpoint_path: str | None = None,
-    repo_id: str | None = None,
-    tokenizer_config: dict[str, Any] | None = None,
-    processor_config: dict[str, Any] | None = None,
-    **overrides: Any,
-) -> MolmoAct2Config:
-    """Build a flat policy config from Hugging Face data and explicit overrides.
-
-    Args:
-        hf_config: Parsed Hugging Face `config.json` payload.
-        norm_stats: Parsed `norm_stats.json` payload.
-        input_features: Optional input feature definitions.
-        output_features: Optional output feature definitions.
-        norm_tag: Selected normalization metadata tag.
-        checkpoint_path: Local checkpoint directory.
-        repo_id: Original Hugging Face repo id when the checkpoint came from the
-            Hub. Used as the tokenizer source; falls back to
-            ``DEFAULT_MOLMOACT2_REPO_ID`` when not provided.
-        tokenizer_config: Optional parsed ``tokenizer_config.json`` options to
-            carry into the config so the tokenizer can be rebuilt by downloading
-            only ``tokenizer.json`` at runtime.
-        processor_config: Optional pre-loaded processor config dict.
-        **overrides: Flat :class:`MolmoAct2Config` values. ``None`` means
-            retain the value supplied by the checkpoint or dataclass default.
-
-    Returns:
-        Resolved `MolmoAct2Config` instance.
-
-    Raises:
-        ValueError: If ``checkpoint_path`` is ``None``.
-        TypeError: If unkown MolmoAct2 overrides are supplied.
-    """
-    # Stage 1: start from local defaults and translate architecture fields from
-    # the nested Hugging Face config.
-    config_data = MolmoAct2Config().to_dict()
-
+def _translate_component_configs(config_data: dict[str, Any], hf_config: dict[str, Any]) -> None:
+    """Copy nested Hugging Face component fields into the flat config."""
     component_field_maps = {
         "vit_config": {
             "hidden_size": "vision_hidden_size",
@@ -629,21 +619,33 @@ def build_config_from_hf_config(
             if source_key in component_data:
                 config_data[target_key] = component_data[source_key]
 
-    # Stage 2: resolve normalized features from the selected dataset tag, then
-    # apply caller-provided feature substitutions.
-    if norm_tag is not None:
-        pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
-            hf_config,
-            norm_stats,
-            norm_tag,
-        )
-        config_data["input_features"] = _resolve_feature_overrides(pretrained_input_features, input_features)
-        config_data["output_features"] = _resolve_feature_overrides(pretrained_output_features, output_features)
-    else:
+
+def _resolve_config_features(
+    config_data: dict[str, Any],
+    hf_config: dict[str, Any],
+    norm_stats: dict[str, Any] | None,
+    norm_tag: str | None,
+    input_features: list[Feature] | None,
+    output_features: list[Feature] | None,
+) -> None:
+    """Resolve feature schemas from normalization metadata and caller overrides."""
+    if norm_tag is None:
         config_data["input_features"] = list(input_features or [])
         config_data["output_features"] = list(output_features or [])
+        return
 
-    top_level_keys = (
+    pretrained_input_features, pretrained_output_features = _build_features_from_norm_stats(
+        hf_config,
+        norm_stats,
+        norm_tag,
+    )
+    config_data["input_features"] = _resolve_feature_overrides(pretrained_input_features, input_features)
+    config_data["output_features"] = _resolve_feature_overrides(pretrained_output_features, output_features)
+
+
+def _translate_top_level_config(config_data: dict[str, Any], hf_config: dict[str, Any]) -> None:
+    """Copy supported top-level Hugging Face config fields into the flat config."""
+    keys = (
         "action_mode",
         "action_expert_num_heads",
         "action_expert_num_layers",
@@ -674,18 +676,11 @@ def build_config_from_hf_config(
         "num_flow_timesteps",
         "state_format",
         "use_random_input_noise",
-    )
-
-    preprocessor_keys = (
         "num_state_tokens",
         "add_setup_tokens",
         "add_control_tokens",
     )
-
-    for key in top_level_keys:
-        if key in hf_config:
-            config_data[key] = hf_config[key]
-    for key in preprocessor_keys:
+    for key in keys:
         if key in hf_config:
             config_data[key] = hf_config[key]
 
@@ -693,6 +688,84 @@ def build_config_from_hf_config(
     if checkpoint_action_horizon is not None:
         config_data["chunk_size"] = checkpoint_action_horizon
         config_data["n_action_steps"] = checkpoint_action_horizon
+
+
+def _translate_processor_config(config_data: dict[str, Any], processor_config: dict[str, Any] | None) -> None:
+    """Copy supported image processor and token-layout fields into the flat config."""
+    if processor_config is None:
+        return
+
+    image_processor = processor_config.get("image_processor", processor_config)
+    processor_field_map = {
+        "crop_mode": "image_processor_crop_mode",
+        "image_mean": "image_processor_mean",
+        "image_std": "image_processor_std",
+        "patch_size": "image_processor_patch_size",
+        "pooling_size": "image_processor_pooling_size",
+        "size": "image_processor_size",
+    }
+    for source_key, target_key in processor_field_map.items():
+        if source_key in image_processor:
+            config_data[target_key] = image_processor[source_key]
+
+    for key in (
+        "image_use_col_tokens",
+        "use_single_crop_col_tokens",
+        "use_single_crop_start_token",
+    ):
+        if key in processor_config:
+            config_data[key] = processor_config[key]
+
+
+def build_config_from_hf_config(
+    hf_config: dict[str, Any],
+    *,
+    norm_stats: dict[str, Any] | None = None,
+    input_features: list[Feature] | None = None,
+    output_features: list[Feature] | None = None,
+    norm_tag: str | None = None,
+    checkpoint_path: str | None = None,
+    repo_id: str | None = None,
+    tokenizer_config: dict[str, Any] | None = None,
+    processor_config: dict[str, Any] | None = None,
+    **overrides: object,
+) -> MolmoAct2Config:
+    """Build a flat policy config from Hugging Face data and explicit overrides.
+
+    Args:
+        hf_config: Parsed Hugging Face `config.json` payload.
+        norm_stats: Parsed `norm_stats.json` payload.
+        input_features: Optional input feature definitions.
+        output_features: Optional output feature definitions.
+        norm_tag: Selected normalization metadata tag.
+        checkpoint_path: Local checkpoint directory.
+        repo_id: Original Hugging Face repo id when the checkpoint came from the
+            Hub. Used as the tokenizer source; falls back to
+            ``DEFAULT_MOLMOACT2_REPO_ID`` when not provided.
+        tokenizer_config: Optional parsed ``tokenizer_config.json`` options to
+            carry into the config so the tokenizer can be rebuilt by downloading
+            only ``tokenizer.json`` at runtime.
+        processor_config: Optional pre-loaded processor config dict.
+        **overrides: Flat :class:`MolmoAct2Config` values. ``None`` means
+            retain the value supplied by the checkpoint or dataclass default.
+
+    Returns:
+        Resolved `MolmoAct2Config` instance.
+
+    Raises:
+        ValueError: If ``checkpoint_path`` is ``None``.
+        TypeError: If unkown MolmoAct2 overrides are supplied.
+    """
+    # Stage 1: start from local defaults and translate architecture fields from
+    # the nested Hugging Face config.
+    config_data = MolmoAct2Config().to_dict()
+
+    _translate_component_configs(config_data, hf_config)
+
+    # Stage 2: resolve normalized features from the selected dataset tag, then
+    # apply caller-provided feature substitutions.
+    _resolve_config_features(config_data, hf_config, norm_stats, norm_tag, input_features, output_features)
+    _translate_top_level_config(config_data, hf_config)
 
     # Stage 3: attach local snapshot assets and image-processor settings.
     config_data["norm_tag"] = norm_tag
@@ -712,28 +785,7 @@ def build_config_from_hf_config(
     # Hardcoded across MolmoAct2 variants (see ``config.py``); avoids
     # instantiating the tokenizer here just to look up the placeholder id.
     config_data["image_placeholder_token_id"] = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
-    if processor_config is not None:
-        image_processor = processor_config.get("image_processor", processor_config)
-        processor_field_map = {
-            "crop_mode": "image_processor_crop_mode",
-            "image_mean": "image_processor_mean",
-            "image_std": "image_processor_std",
-            "patch_size": "image_processor_patch_size",
-            "pooling_size": "image_processor_pooling_size",
-            "size": "image_processor_size",
-        }
-        for source_key, target_key in processor_field_map.items():
-            if source_key in image_processor:
-                config_data[target_key] = image_processor[source_key]
-
-        processor_token_layout_fields = (
-            "image_use_col_tokens",
-            "use_single_crop_col_tokens",
-            "use_single_crop_start_token",
-        )
-        for key in processor_token_layout_fields:
-            if key in processor_config:
-                config_data[key] = processor_config[key]
+    _translate_processor_config(config_data, processor_config)
 
     if norm_stats is not None and norm_tag is not None:
         tag_metadata = _resolve_norm_tag_metadata(norm_stats, norm_tag)
@@ -777,6 +829,11 @@ def load_hf_pretrained_container(  # noqa: PLR0914
     path = Path(pretrained_name_or_path)
     is_local = path.is_dir()
     norm_stats: dict[str, Any] | None = None
+    config_file: Path
+    weights_file: Path
+    preprocessor_file: Path | None
+    preprocessor_dir: Path | None
+    norm_stats_file: Path | None
     # ``None`` for local checkpoints (no Hub repo id); the original pretrained
     # identifier otherwise. This is later used as the tokenizer source.
     repo_id: str | None = None if is_local else str(pretrained_name_or_path)
@@ -796,20 +853,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
     else:
-        hub_kwargs = {
-            k: v
-            for k, v in kwargs.items()
-            if k
-            in {
-                "cache_dir",
-                "force_download",
-                "resume_download",
-                "proxies",
-                "token",
-                "revision",
-                "local_files_only",
-            }
-        }
+        hub_kwargs = _select_hf_hub_download_kwargs(kwargs)
         (
             config_file,
             weights_file,
@@ -832,7 +876,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
                 downloaded_path = hf_hub_download(
                     str(pretrained_name_or_path),
                     processor_filename,
-                    **hub_kwargs,  # type: ignore[arg-type]
+                    **hub_kwargs,
                 )
                 shutil.copy2(downloaded_path, target_path)
             except RemoteEntryNotFoundError:

@@ -386,7 +386,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to_dict())
-        return self.model.compute_val_loss(processed_batch)
+        loss, metrics = self.model.compute_val_loss(processed_batch)
+        return loss, {name: float(value) for name, value in metrics.items()}
 
     def get_optim_params(self) -> list[dict[str, Any]]:
         """Group trainable parameters by component with per-component learning rates.

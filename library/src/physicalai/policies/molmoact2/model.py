@@ -221,7 +221,7 @@ class MolmoAct2Model(Model):
             self.predict_action_chunk = torch.compile(self.predict_action_chunk, mode=compile_mode)  # type: ignore[method-assign]
             self.forward = torch.compile(self.forward, mode=compile_mode)  # type: ignore[method-assign]
 
-    def train(self, mode: bool = True) -> MolmoAct2Model:
+    def train(self, mode: bool = True) -> MolmoAct2Model:  # noqa: FBT001, FBT002
         """Set training mode, keeping a frozen VLM in eval when action-expert-only.
 
         Mirrors the reference MolmoAct2 training recipe: when
@@ -414,7 +414,7 @@ class MolmoAct2Model(Model):
 
     @override
     @torch.no_grad()
-    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Validation MSE between predicted and ground-truth action chunks.
 
         Returns:

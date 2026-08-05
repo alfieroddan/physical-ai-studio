@@ -130,10 +130,7 @@ class FeatureNormalizeTransform(nn.Module):
             std = buffer["std"]
             check_inf(mean, "mean")
             check_inf(std, "std")
-            if inverse:
-                transformed = value * std + mean
-            else:
-                transformed = (value - mean) / (std + 1e-8)
+            transformed = value * std + mean if inverse else (value - mean) / (std + 1e-08)
 
         elif norm_mode == NormalizationType.MIN_MAX:
             min_ = buffer["min"]
@@ -160,10 +157,7 @@ class FeatureNormalizeTransform(nn.Module):
                 torch.tensor(1e-8, device=denom.device, dtype=denom.dtype),
                 denom,
             )
-            if inverse:
-                transformed = (value + 1.0) * denom / 2.0 + q01
-            else:
-                transformed = 2.0 * (value - q01) / denom - 1.0
+            transformed = (value + 1.0) * denom / 2.0 + q01 if inverse else 2.0 * (value - q01) / denom - 1.0
 
         elif norm_mode == NormalizationType.IDENTITY:
             # No transformation for identity normalization
@@ -183,7 +177,7 @@ class FeatureNormalizeTransform(nn.Module):
         batch[key] = torch.where(mask.expand_as(value), transformed, value)
 
     @staticmethod
-    def _create_stats_buffers(  # noqa: C901
+    def _create_stats_buffers(  # noqa: C901, PLR0914, PLR0915
         features: dict[str, Feature],
         norm_map: dict[FeatureType, NormalizationType],
     ) -> dict[str, dict[str, nn.ParameterDict]]:

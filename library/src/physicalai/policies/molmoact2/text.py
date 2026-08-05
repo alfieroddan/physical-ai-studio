@@ -112,7 +112,8 @@ class MolmoAct2Attention(nn.Module):
         """Build the fused QKV projection, output projection and QK norms.
 
         Raises:
-            ValueError: if the number of key value heads is None.
+            NotImplementedError: If ``qk_norm_type`` is not ``"qwen3"`` when QK
+                normalization is enabled.
         """
         super().__init__()
         self.num_heads = num_attention_heads

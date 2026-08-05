@@ -270,7 +270,7 @@ class ImageProjectorMLP(nn.Module):
 class MolmoAct2VisionBackbone(nn.Module):
     """Encode crops into pooled image features aligned to the text hidden size."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         vision_hidden_size: int,

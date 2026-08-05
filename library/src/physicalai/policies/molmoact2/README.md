@@ -119,7 +119,7 @@ The model init has two args, `repo_id` and `norm_tag`, which describe the pretra
 
 MolmoAct2 has multiple [collections](https://huggingface.co/allenai/collections) on HuggingFace.
 
-The `repo_id` is the Hugging Face repository, for example `allenai/MolmoAct2-SO100_101`, which can be found [here](https://huggingface.co/allenai/MolmoAct2-SO100_101).
+The `repo_id` is the Hugging Face repository, for example `allenai/MolmoAct2-SO100_101`, which can be found in the [MolmoAct2-SO100_101 repository](https://huggingface.co/allenai/MolmoAct2-SO100_101).
 
 Inside the repo, there is a Files tab. For the snapshots we support, there is a file called `norm_stats.json`, e.g. [this one](https://huggingface.co/allenai/MolmoAct2-SO100_101/blob/main/norm_stats.json).
 

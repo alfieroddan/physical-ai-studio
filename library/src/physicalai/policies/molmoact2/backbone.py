@@ -415,11 +415,27 @@ class MolmoAct2ForConditionalGeneration(nn.Module):
 
 
 def make_molmoact2_backbone(config: MolmoAct2Config) -> MolmoAct2Backbone:
-    """Create graph modules from the policy's resolved flat config."""
+    """Create graph modules from the policy's resolved flat config.
+
+    Returns:
+        The assembled MolmoAct2 backbone.
+
+    Raises:
+        ValueError: If a required text or image token configuration value is unresolved.
+    """
+    num_key_value_heads = config.num_key_value_heads
+    if num_key_value_heads is None:
+        msg = "num_key_value_heads must be resolved before building the MolmoAct2 backbone."
+        raise ValueError(msg)
+    image_patch_id = config.image_patch_id
+    if image_patch_id is None:
+        msg = "image_patch_id must be set before building the MolmoAct2 backbone."
+        raise ValueError(msg)
+
     transformer = MolmoAct2TextModel(
         hidden_size=config.hidden_size,
         num_attention_heads=config.num_attention_heads,
-        num_key_value_heads=config.num_key_value_heads,
+        num_key_value_heads=num_key_value_heads,
         head_dim=config.head_dim,
         vocab_size=config.vocab_size,
         additional_vocab_size=config.additional_vocab_size,
@@ -475,14 +491,14 @@ def make_molmoact2_backbone(config: MolmoAct2Config) -> MolmoAct2Backbone:
             qk_norm_eps=config.action_expert_qk_norm_eps,
             rope=config.action_expert_rope,
             causal_attn=config.action_expert_causal_attn,
-            llm_kv_dim=config.num_key_value_heads * config.head_dim,
+            llm_kv_dim=num_key_value_heads * config.head_dim,
             llm_num_layers=config.num_hidden_layers,
         )
     return MolmoAct2Backbone(
         transformer=transformer,
         vision_backbone=vision_backbone,
         action_expert=action_expert,
-        image_patch_id=config.image_patch_id,
+        image_patch_id=image_patch_id,
         mask_action_dim_padding=config.mask_action_dim_padding,
         flow_matching_num_steps=config.flow_matching_num_steps,
         max_action_dim=config.max_action_dim,

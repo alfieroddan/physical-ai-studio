@@ -31,7 +31,15 @@ def validate_camera_name_mapping(
     mapping: Mapping[str, str] | None,
     camera_keys: list[str],
 ) -> dict[str, str]:
-    """Validate a mapping from existing image keys to output image keys."""
+    """Validate a mapping from existing image keys to output image keys.
+
+    Returns:
+        A copy of the validated mapping, or an empty mapping when no mapping is provided.
+
+    Raises:
+        ValueError: If source keys are unknown, output keys are empty or non-string, or
+            the mapping creates duplicate output keys.
+    """
     if mapping is None:
         return {}
 
@@ -435,6 +443,8 @@ class GymnasiumGym(Gym):
                 Defaults to `"rgb_array"`.
             device (str | torch.device, optional): Torch device for returned tensors.
                 Defaults to ``"cpu"``.
+            camera_name_mapping (Mapping[str, str] | None, optional): Maps existing image
+                keys to output image keys. Defaults to ``None``.
             **gym_kwargs (Any): Additional arguments passed to `gym.make`.
 
         Returns:
