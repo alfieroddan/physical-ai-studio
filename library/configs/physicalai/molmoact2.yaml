@@ -6,32 +6,52 @@ model:
   class_path: physicalai.policies.MolmoAct2
   init_args:
     # Pretrained checkpoint
-    repo_id: allenai/MolmoAct2-LIBERO
-    norm_tag: libero
+    repo_id: allenai/MolmoAct2
     load_weights: true
-    # Input / output structure
-    n_obs_steps: 30
+
+    # Observation / action configuration
+    n_obs_steps: 1
+    chunk_size: 10
     n_action_steps: 10
-    chunk_size: 30
-    # Action mode (only "continuous" is currently supported)
     action_mode: continuous
-    # SO-100/101 joint calibration correction (needed for zero-shot / finetuning
-    # from the pre-#777 LeRobot calibration checkpoint)
-    adapt_to_so101: false
-    # Compile-oriented config flags
-    compile_model: false
+
+    # Noise
+    use_random_input_noise: true
+
+    # LoRA
+    use_lora: true
+    enable_lora_action_expert: false
+    lora_rank: 64
+    lora_alpha: 16
+    lora_dropout: 0.05
+    lora_bias: none
+
+    # Memory optimization
+    gradient_checkpointing: true
+
+    # Environment metadata
+    setup_type: "single 2D point-mass pusher robot in the PushT block-pushing simulation"
+    control_mode: "absolute planar end-effector position"
+
+    # Learning rates
+    optimizer_lr: 5e-5
+    optimizer_vit_lr: 5e-5
+    optimizer_connector_lr: 5e-5
+
+    # Scheduler
+    scheduler_decay_steps: 15000
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule
   init_args:
-    repo_id: "lerobot/libero"
+    repo_id: lerobot/pusht
     train_batch_size: 8
-    data_format: "physicalai"
+    data_format: physicalai
 
 trainer:
-  max_epochs: 100
+  max_epochs: 30
   accelerator: gpu
   devices: 1
-  precision: 32
-  log_every_n_steps: 100
-  check_val_every_n_epoch: 10
+  precision: bf16-mixed
+  log_every_n_steps: 20
+  check_val_every_n_epoch: 1
