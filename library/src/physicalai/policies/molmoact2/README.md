@@ -56,17 +56,29 @@ if __name__ == "__main__":
 ## Benchmark Example (LIBERO)
 
 ```python
+import csv
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
 
 from physicalai.benchmark.gyms import LiberoBenchmark
+from physicalai.benchmark.gyms.results import TaskResult
 from physicalai.devices.utils import get_device
 from physicalai.policies import MolmoAct2
 
 DEVICE = get_device()
+print("Using device:", DEVICE)
+
 SEED = 0
+TASK_SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
+NUM_EPISODES = 1
+OBSERVATION_HEIGHT = 378
+OBSERVATION_WIDTH = 378
+RECORD_MODE = "all"
+VIDEO_DIR = "./videos/"
+RESULTS_CSV = Path("./results/libero_multi_suite_results.csv")
 
 
 def set_seed(seed: int) -> None:
@@ -78,6 +90,40 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def save_combined_csv(path: Path, rows: list[dict[str, str | int | float]]) -> None:
+    """Write per-task benchmark rows to a single CSV file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "suite",
+        "task_id",
+        "task_name",
+        "n_episodes",
+        "success_rate",
+        "avg_reward",
+        "avg_episode_length",
+        "avg_fps",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def task_row(suite: str, task: TaskResult) -> dict[str, str | int | float]:
+    """Convert TaskResult to a CSV row with suite metadata."""
+    return {
+        "suite": suite,
+        "task_id": task.task_id,
+        "task_name": task.task_name,
+        "n_episodes": task.n_episodes,
+        "success_rate": task.success_rate,
+        "avg_reward": task.avg_reward,
+        "avg_episode_length": task.avg_episode_length,
+        "avg_fps": task.avg_fps,
+    }
+
+
 if __name__ == "__main__":
     set_seed(SEED)
 
@@ -85,29 +131,51 @@ if __name__ == "__main__":
         repo_id="allenai/MolmoAct2-LIBERO",
         norm_tag="libero",
         n_action_steps=10,
+        # Start flow matching from sampled Gaussian noise (matches the reference model).
+        use_random_input_noise=True,
     )
-    # Start flow matching from sampled Gaussian noise (matches the reference model).
-    policy.config.use_random_input_noise = True
     policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
 
-    benchmark = LiberoBenchmark(
-        task_suite="libero_10",
-        num_episodes=1,
-        seed=SEED,
-        camera_name_mapping={"image2": "wrist_image"},
-        observation_height=378,
-        observation_width=378,
-        record_mode="all",
-        video_dir="./videos/",
-    )
+    csv_rows: list[dict[str, str | int | float]] = []
 
-    results = benchmark.evaluate(policy)
-    summary = results.summary()
+    for task_suite in TASK_SUITES:
+        benchmark = LiberoBenchmark(
+            task_suite=task_suite,
+            num_episodes=NUM_EPISODES,
+            seed=SEED,
+            camera_name_mapping={"image2": "wrist_image"},
+            observation_height=OBSERVATION_HEIGHT,
+            observation_width=OBSERVATION_WIDTH,
+            record_mode=RECORD_MODE,
+            video_dir=VIDEO_DIR,
+        )
 
-    block_header = f"\n{'=' * 28} libero_10 {'=' * 28}\n"
-    print(block_header, end="")
-    print(summary)
+        try:
+            results = benchmark.evaluate(policy)
+            summary = results.summary()
+
+            block_header = f"\n{'=' * 28} {task_suite} {'=' * 28}\n"
+            print(block_header, end="")
+            print(summary)
+
+            csv_rows.extend(task_row(task_suite, task) for task in results.task_results)
+        finally:
+            for gym in benchmark.gyms:
+                gym.close()
+
+    save_combined_csv(RESULTS_CSV, csv_rows)
+    print(f"\nSaved CSV results to: {RESULTS_CSV}")
 ```
+
+Results:
+
+| Suite | Tasks | Avg. Success Rate (%) | Avg. Reward | Avg. Episode Length | Avg. FPS |
+|-------|------:|----------------------:|------------:|--------------------:|----------:|
+| libero_spatial | 10 | 100.0 | 1.00 | 106.4 | 10.56 |
+| libero_object | 10 | 100.0 | 1.00 | 132.7 | 11.82 |
+| libero_goal | 10 | 90.0 | 0.90 | 134.2 | 11.51 |
+| libero_10 | 10 | 100.0 | 1.00 | 241.4 | 12.61 |
+| **Average** | **40** | **97.5** | **0.98** | **153.7** | **11.63** |
 
 ## Tips and Tricks
 
@@ -162,12 +230,14 @@ from physicalai.train import Trainer
 
 if __name__ == "__main__":
     # dataset sets input / output features
-    policy = MolmoAct2()
-    policy.config.use_random_input_noise = True
-    policy.config.train_action_expert_only = True
+    policy = MolmoAct2(
+        use_random_input_noise=True,
+        train_action_expert_only=True,
+    )
 
+    # datamodule
     dm = LeRobotDataModule(
-        repo_id="lerobot/svla_so101_pickplace",
+        repo_id="lerobot/pusht",
         train_batch_size=1,
         val_batch_size=1,
         val_split=0.1,
@@ -175,6 +245,7 @@ if __name__ == "__main__":
         episodes=[0, 1],
     )
 
+    # trainer
     trainer = Trainer(max_steps=2, limit_val_batches=1, val_check_interval=1, precision="bf16-mixed")
     trainer.fit(model=policy, datamodule=dm)
 ```
