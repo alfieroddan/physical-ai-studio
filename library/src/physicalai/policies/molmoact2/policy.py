@@ -373,7 +373,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.log("train/loss", loss_dict["loss"], prog_bar=True)
         return loss
 
-    def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, float]]:
+    def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute validation loss and metrics.
 
         Args:
