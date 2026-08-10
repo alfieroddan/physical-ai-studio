@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -13,10 +14,27 @@ import pytest
 
 from physicalai.policies.molmoact2.processors.tokenizers import (
     MolmoAct2Tokenizers,
+    _drop_output_only_added_tokens,
 )
 
 
 class TestTokenizerSetup:
+    def test_openvino_view_keeps_prompt_tokens(self) -> None:
+        class StubQwenTokenizer:
+            added_tokens_decoder = {
+                1: SimpleNamespace(content="<state_7>"),
+                2: SimpleNamespace(content="<action_output>"),
+                3: SimpleNamespace(content="<action_7>"),
+                4: SimpleNamespace(content="<extra_7>"),
+                5: SimpleNamespace(content="<|image|>"),
+            }
+
+        tokenizer = StubQwenTokenizer()
+        trimmed = _drop_output_only_added_tokens(tokenizer)  # type: ignore[arg-type]
+
+        assert tokenizer.added_tokens_decoder.keys() == {1, 2, 3, 4, 5}
+        assert trimmed.added_tokens_decoder.keys() == {1, 2, 5}
+
     def test_uses_local_directory(self, mock_hf_repo: Path) -> None:
         tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(mock_hf_repo))
         assert tokenizers._tokenizer_dir == str(mock_hf_repo)

@@ -226,11 +226,11 @@ class TestMolmoact2ExportArgs:
 
         assert [spec.type for spec in openvino_args.preprocessors_specs] == [
             "molmoact2",
-            "asset_tokenizer",
+            "ov_tokenizer",
             "molmoact2_inputs",
         ]
         assert [spec.type for spec in openvino_args.postprocessors_specs] == ["molmoact2_postprocess"]
-        assert openvino_args.export_tokenizer is False
+        assert openvino_args.export_tokenizer is True
         assert openvino_args.via_onnx is False
         assert openvino_args.outputs == [ACTION]
 
@@ -238,14 +238,7 @@ class TestMolmoact2ExportArgs:
         assert raw.flat_params["image_keys"] == ["image"]
         assert raw.flat_params["state_stats"]["q01"] == [-1.0] * 6
         assert tokenizer.flat_params == {
-            "artifact": "tokenizer.json",
-            "tokenizer_class": "Qwen2Tokenizer",
-            "tokenizer_options": {
-                "bos_token": "<|im_end|>",
-                "extra_special_tokens": ["<im_start>", "<im_end>", "<|image|>"],
-                "model_max_length": 1010000,
-            },
-            "max_token_len": 255,
+            "artifact": "tokenizer.xml",
         }
         assert model_inputs.flat_params["action_dim"] == 6
         assert model_inputs.flat_params["bos_token_id"] == 11
@@ -253,15 +246,3 @@ class TestMolmoact2ExportArgs:
         assert model_inputs.flat_params["image_size"] == (28, 28)
         assert openvino_args.postprocessors_specs[0].flat_params["action_stats"]["q99"] == [1.0] * 6
 
-    def test_export_assets_bundles_tokenizer_json(self, tmp_path: Path) -> None:
-        policy = MolmoAct2(repo_id=None)
-        tokenizer_source = tmp_path / "source"
-        tokenizer_source.mkdir()
-        (tokenizer_source / "tokenizer.json").write_text('{"version": "1.0"}', encoding="utf-8")
-        policy.config.tokenizer_name_or_path = str(tokenizer_source)
-        export_dir = tmp_path / "export"
-        export_dir.mkdir()
-
-        policy.export_assets(export_dir)
-
-        assert (export_dir / "tokenizer.json").read_text(encoding="utf-8") == '{"version": "1.0"}'

@@ -7,7 +7,6 @@
 
 import dataclasses
 import logging
-import shutil
 from pathlib import Path
 from typing import IO, Any, Literal
 
@@ -282,14 +281,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         resolved_dir, tokenizer_config = resolve_tokenizer_assets(self.config.tokenizer_name_or_path)
         self.config.tokenizer_name_or_path = resolved_dir
         self.config.tokenizer_config = tokenizer_config
-
-    def export_assets(self, export_dir: Path) -> None:
-        """Bundle the local MolmoAct2 tokenizer JSON with an exported model."""
-        tokenizer_file = Path(self.config.tokenizer_name_or_path) / "tokenizer.json"
-        if not tokenizer_file.is_file():
-            msg = f"MolmoAct2 export requires a local tokenizer.json at {tokenizer_file}."
-            raise FileNotFoundError(msg)
-        shutil.copy2(tokenizer_file, export_dir / tokenizer_file.name)
 
         # parameter setting based on config
         if self.config.train_action_expert_only:
@@ -721,11 +712,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 joint_offsets=self.config.joint_offsets,
             ),
             ComponentSpec(
-                type="asset_tokenizer",
-                artifact="tokenizer.json",
-                tokenizer_class="Qwen2Tokenizer",
-                tokenizer_options=self.config.tokenizer_config,
-                max_token_len=self.config.tokenizer_max_length - 1,
+                type="ov_tokenizer",
+                artifact="tokenizer.xml",
             ),
             ComponentSpec(
                 type="molmoact2_inputs",
@@ -765,7 +753,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             ),
             "openvino": OpenVINOExportParameters(
                 outputs=output_names,
-                export_tokenizer=False,
+                export_tokenizer=True,
                 via_onnx=False,
                 exporter_kwargs={},
                 preprocessors_specs=openvino_preprocessors,

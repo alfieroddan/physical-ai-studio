@@ -115,8 +115,13 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
     @property
     def tokenizer(self) -> Any:  # noqa: ANN401
-        """Return the lazily initialized text tokenizer."""
-        return self._tokenizers.tokenizer
+        """Return the tokenizer representation used by OpenVINO export."""
+        return self._tokenizers.openvino_tokenizer
+
+    @property
+    def max_token_len(self) -> int:
+        """Return the pre-BOS tokenizer output width used for export."""
+        return self._tokenizers.max_token_len - 1
 
     @staticmethod
     def _validate_batch(batch: dict[str, Any]) -> None:
