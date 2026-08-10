@@ -5,13 +5,11 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 import torch
 
 from physicalai.data.constants import EXTRA
-from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
+from physicalai.data.observation import ACTION, IMAGES, STATE, TASK
 from physicalai.policies.molmoact2.config import (
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
     MolmoAct2Config,
@@ -20,9 +18,7 @@ from physicalai.policies.molmoact2.processors.factory import make_molmoact2_prep
 from physicalai.policies.molmoact2.processors.image import MolmoAct2ImageProcessor
 from physicalai.policies.molmoact2.processors.inputs import (
     _expand_image_placeholders,
-    _image_token_ids,
     _image_token_ids_for_grid,
-    build_model_inputs,
 )
 from physicalai.policies.molmoact2.processors.joint_transform import JointFrameTransform
 from physicalai.policies.molmoact2.processors.postprocessor import MolmoAct2Postprocessor

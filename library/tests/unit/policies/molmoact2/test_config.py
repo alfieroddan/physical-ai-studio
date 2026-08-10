@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from physicalai.training_config import Config
+from physicalai.config import Config
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_FRAME_END_TOKEN_ID,
