@@ -256,10 +256,7 @@ class MolmoAct2Model(Model):
         transformer, vision backbone, and (when present) action expert so each
         per-layer / per-block forward is recomputed during the backward pass,
         trading compute for a smaller activation-memory footprint during
-        training. Forces the attention implementation to ``"eager"`` so
-        SDPA/Flash-Attention ops do not appear inside checkpoint regions (they
-        otherwise break the AOT autograd partitioner when ``torch.compile``
-        traces the backward graph).
+        training.
         """
         backbone = self._for_cond_gen.model
         backbone.transformer.gradient_checkpointing = True

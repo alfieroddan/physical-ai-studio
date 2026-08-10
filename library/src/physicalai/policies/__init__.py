@@ -24,7 +24,7 @@ __all__ = [
     "Groot",
     "GrootConfig",
     "GrootModel",
-    # MalmoAct2
+    # MolmoAct2
     "MolmoAct2",
     "MolmoAct2Config",
     "MolmoAct2Model",
