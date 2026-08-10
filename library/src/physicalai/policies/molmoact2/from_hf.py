@@ -23,32 +23,32 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypedDict
 
-from huggingface_hub import hf_hub_download
-from huggingface_hub.errors import RemoteEntryNotFoundError
+from huggingface_hub import snapshot_download
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 
-from .config import (
-    DEFAULT_MOLMOACT2_REPO_ID,
-    MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-    MolmoAct2Config,
-)
+from .config import MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID, MolmoAct2Config
 
 logger = logging.getLogger(__name__)
 
 SAFE_WEIGHTS_NAME = "model.safetensors"
 SAFE_WEIGHTS_INDEX_NAME = "model.safetensors.index.json"
+TOKENIZER_NAME = "tokenizer.json"
+TOKENIZER_CONFIG_NAME = "tokenizer_config.json"
+TOKENIZER_ALLOW_PATTERNS = [TOKENIZER_NAME, TOKENIZER_CONFIG_NAME]
+SNAPSHOT_ALLOW_PATTERNS = ["*.safetensors", "*.json", "*.txt", "*.md"]
 IMAGE_SIZE_DIMS = 2
 # Text prompt placeholder that gets expanded into image patch tokens. Kept for
 # reference; its token id is hardcoded as
 # ``MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID`` so that ``from_hf.py`` no longer
 # needs to instantiate the tokenizer.
 IMAGE_PROMPT = "<|image|>"
+_COMMIT_HASH_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 class HFHubDownloadKwargs(TypedDict, total=False):
@@ -105,73 +105,18 @@ class MolmoAct2Snapshot:
     norm_stats: dict[str, Any] | None = None
     processor_config: dict[str, Any] | None = None
     repo_id: str | None = None
+    tokenizer_revision: str | None = None
     tokenizer_config: dict[str, Any] | None = None
 
 
-def _download_optional_preprocessor(
-    repo_id: str,
-    preprocessor_filename: str,
-    *,
-    hub_kwargs: HFHubDownloadKwargs,
-) -> Path | None:
-    try:
-        return Path(hf_hub_download(repo_id, preprocessor_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _download_referenced_state_files(
-    repo_id: str,
-    preprocessor_file: Path,
-    *,
-    hub_kwargs: HFHubDownloadKwargs,
-) -> None:
-    with preprocessor_file.open(encoding="utf-8") as f:
-        preproc_data = json.load(f)
-    for step in preproc_data.get("steps", []):
-        state_file = step.get("state_file")
-        if state_file:
-            hf_hub_download(repo_id, state_file, **hub_kwargs)  # nosec B615  # type: ignore[arg-type]
-
-
-def _download_weights_or_shards(
-    repo_id: str,
-    *,
-    weights_filename: str,
-    hub_kwargs: HFHubDownloadKwargs,
-) -> Path:
-    """Download a single safetensors file or a sharded index and all shards.
-
-    Returns:
-        Path to the single weights file or the sharded weights index.
-
-    Raises:
-        FileNotFoundError: If neither weights format exists in the repository.
-        TypeError: If the sharded index has no valid weight map.
-    """
-    try:
-        return Path(hf_hub_download(repo_id, weights_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
-    except RemoteEntryNotFoundError as single_exc:
-        index_filename = f"{weights_filename}.index.json"
-        try:
-            index_path = Path(hf_hub_download(repo_id, index_filename, **hub_kwargs))  # nosec B615  # type: ignore[arg-type]
-        except RemoteEntryNotFoundError as index_exc:
-            msg = (
-                f"Could not find weights for repo '{repo_id}'. Expected either "
-                f"'{weights_filename}' or '{index_filename}'."
-            )
-            raise FileNotFoundError(msg) from index_exc
-
-        with index_path.open(encoding="utf-8") as f:
-            index_payload = json.load(f)
-        weight_map = index_payload.get("weight_map")
-        if not isinstance(weight_map, dict):
-            msg = f"Invalid sharded index format in '{index_filename}': missing 'weight_map'."
-            raise TypeError(msg) from single_exc
-
-        for shard_file in sorted(set(weight_map.values())):
-            hf_hub_download(repo_id, shard_file, **hub_kwargs)  # nosec B615  # type: ignore[arg-type]
-        return index_path
+def _resolve_snapshot_revision(config_file: Path, requested_revision: object) -> str | None:
+    """Resolve an immutable revision from a Hub request or cache snapshot path."""
+    if isinstance(requested_revision, str) and _COMMIT_HASH_RE.fullmatch(requested_revision):
+        return requested_revision
+    snapshot_revision = config_file.parent.name
+    if _COMMIT_HASH_RE.fullmatch(snapshot_revision):
+        return snapshot_revision
+    return None
 
 
 def download_policy_artifacts_from_hub(
@@ -184,80 +129,106 @@ def download_policy_artifacts_from_hub(
     norm_stats_filename: str | None = None,
     download_preprocessor_state_files: bool = True,
 ) -> tuple[Path, Path, Path | None, Path | None, Path | None]:
-    """Download the artifacts MolmoAct2 needs from a Hugging Face repository.
+    """Download and validate the MolmoAct2 Hugging Face repository snapshot.
 
     Returns:
         The config, weights, optional preprocessor file/directory, and optional
         normalization stats file resolved from the repository.
+
+    Raises:
+        FileNotFoundError: If a required config, weights, or tokenizer file is
+            missing from the downloaded snapshot.
     """
     selected_hub_kwargs = hub_kwargs or HFHubDownloadKwargs()
-    config_file = Path(
-        hf_hub_download(repo_id, config_filename, **selected_hub_kwargs),  # nosec B615  # type: ignore[arg-type]
-    )
-    weights_file = _download_weights_or_shards(
-        repo_id,
-        weights_filename=weights_filename,
-        hub_kwargs=selected_hub_kwargs,
-    )
-    preprocessor_file = _download_optional_preprocessor(
-        repo_id,
-        preprocessor_filename,
-        hub_kwargs=selected_hub_kwargs,
-    )
-    if preprocessor_file is None:
-        preprocessor_dir = None
-    else:
-        preprocessor_dir = preprocessor_file.parent
-        if download_preprocessor_state_files:
-            try:
-                _download_referenced_state_files(repo_id, preprocessor_file, hub_kwargs=selected_hub_kwargs)
-            except Exception:  # noqa: BLE001
-                preprocessor_file = None
-                preprocessor_dir = None
-
-    norm_stats_file = None
-    if norm_stats_filename is not None:
-        norm_stats_file = _download_optional_preprocessor(
+    snapshot_dir = Path(
+        snapshot_download(  # nosec B615 - revision remains caller-configurable during initial integration
             repo_id,
-            norm_stats_filename,
-            hub_kwargs=selected_hub_kwargs,
+            allow_patterns=SNAPSHOT_ALLOW_PATTERNS,
+            **selected_hub_kwargs,  # type: ignore[arg-type]
+        ),
+    )
+    del download_preprocessor_state_files
+
+    config_file = snapshot_dir / config_filename
+    if not config_file.is_file():
+        msg = f"MolmoAct2 repository '{repo_id}' is missing required file '{config_filename}'."
+        raise FileNotFoundError(msg)
+
+    weights_file = snapshot_dir / weights_filename
+    if not weights_file.is_file():
+        weights_file = snapshot_dir / f"{weights_filename}.index.json"
+    if not weights_file.is_file():
+        msg = (
+            f"MolmoAct2 repository '{repo_id}' is missing required weights "
+            f"'{weights_filename}' or '{weights_filename}.index.json'."
         )
+        raise FileNotFoundError(msg)
+
+    tokenizer_file = snapshot_dir / TOKENIZER_NAME
+    if not tokenizer_file.is_file():
+        msg = f"MolmoAct2 repository '{repo_id}' is missing required file '{TOKENIZER_NAME}'."
+        raise FileNotFoundError(msg)
+    tokenizer_config_file = snapshot_dir / TOKENIZER_CONFIG_NAME
+    if not tokenizer_config_file.is_file():
+        msg = f"MolmoAct2 repository '{repo_id}' is missing required file '{TOKENIZER_CONFIG_NAME}'."
+        raise FileNotFoundError(msg)
+
+    preprocessor_candidate = snapshot_dir / preprocessor_filename
+    preprocessor_file = preprocessor_candidate if preprocessor_candidate.is_file() else None
+    preprocessor_dir = snapshot_dir if preprocessor_file is not None else None
+    norm_stats_candidate = snapshot_dir / norm_stats_filename if norm_stats_filename is not None else None
+    norm_stats_file = norm_stats_candidate if norm_stats_candidate is not None and norm_stats_candidate.is_file() else None
     return config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file
 
 
-def _load_tokenizer_config(checkpoint_location: str, repo_id: str | None) -> dict[str, Any] | None:
-    """Load ``tokenizer_config.json`` options for the MolmoAct2 tokenizer.
+def _load_tokenizer_config(checkpoint_location: str) -> dict[str, Any]:
+    """Load tokenizer construction options from the resolved snapshot."""
+    config_path = Path(checkpoint_location) / TOKENIZER_CONFIG_NAME
+    if not config_path.is_file():
+        msg = f"MolmoAct2 checkpoint at {checkpoint_location} must contain '{TOKENIZER_CONFIG_NAME}'."
+        raise FileNotFoundError(msg)
+    with config_path.open(encoding="utf-8") as file:
+        payload = json.load(file)
+    if not isinstance(payload, dict):
+        msg = f"Invalid MolmoAct2 tokenizer config in {config_path}: expected a JSON object."
+        raise TypeError(msg)
+    return payload
 
-    The options are resolved in order from: the local checkpoint snapshot
-    directory, the Hugging Face Hub (when ``repo_id`` is provided), and finally
-    the canonical ``DEFAULT_MOLMOACT2_REPO_ID`` repo. Returns ``None`` only when
-    the file cannot be found on the Hub at all.
+
+def resolve_tokenizer_assets(
+    tokenizer_name_or_path: str | Path,
+    *,
+    hub_kwargs: HFHubDownloadKwargs | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve only the tokenizer files needed for preprocessing.
 
     Args:
-        checkpoint_location: Local checkpoint snapshot directory to check first.
-        repo_id: Hugging Face repo id to download from when the local file is
-            missing.
+        tokenizer_name_or_path: Local tokenizer directory or Hugging Face repo ID.
+        hub_kwargs: Optional Hugging Face snapshot arguments.
 
     Returns:
-        Parsed ``tokenizer_config.json`` payload, or ``None`` when unavailable
-        both locally and on the Hub.
-    """
-    local_path = Path(checkpoint_location) / "tokenizer_config.json"
-    if local_path.is_file():
-        with local_path.open(encoding="utf-8") as f:
-            return json.load(f)
+        Local tokenizer directory and parsed tokenizer construction options.
 
-    candidate_repos = [repo_id, DEFAULT_MOLMOACT2_REPO_ID]
-    for candidate in candidate_repos:
-        if not candidate:
-            continue
-        try:
-            downloaded = hf_hub_download(candidate, "tokenizer_config.json")
-        except RemoteEntryNotFoundError:
-            continue
-        with Path(downloaded).open(encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    Raises:
+        FileNotFoundError: If either required tokenizer file is missing.
+    """
+    tokenizer_path = Path(tokenizer_name_or_path)
+    if tokenizer_path.is_dir():
+        tokenizer_dir = tokenizer_path
+    else:
+        tokenizer_dir = Path(
+            snapshot_download(  # nosec B615 - tokenizer-only fallback follows the configured repository revision
+                str(tokenizer_name_or_path),
+                allow_patterns=TOKENIZER_ALLOW_PATTERNS,
+                **(hub_kwargs or HFHubDownloadKwargs()),  # type: ignore[arg-type]
+            ),
+        )
+
+    tokenizer_file = tokenizer_dir / TOKENIZER_NAME
+    if not tokenizer_file.is_file():
+        msg = f"Tokenizer source '{tokenizer_name_or_path}' is missing required file '{TOKENIZER_NAME}'."
+        raise FileNotFoundError(msg)
+    return str(tokenizer_dir), _load_tokenizer_config(str(tokenizer_dir))
 
 
 def _hf_component_config(hf_config: dict[str, Any], component_name: str) -> dict[str, Any]:
@@ -726,6 +697,7 @@ def build_config_from_hf_config(
     norm_tag: str | None = None,
     checkpoint_path: str | None = None,
     repo_id: str | None = None,
+    tokenizer_revision: str | None = None,
     tokenizer_config: dict[str, Any] | None = None,
     processor_config: dict[str, Any] | None = None,
     **overrides: object,
@@ -742,6 +714,7 @@ def build_config_from_hf_config(
         repo_id: Original Hugging Face repo id when the checkpoint came from the
             Hub. Used as the tokenizer source; falls back to
             ``DEFAULT_MOLMOACT2_REPO_ID`` when not provided.
+        tokenizer_revision: Immutable commit revision for tokenizer assets.
         tokenizer_config: Optional parsed ``tokenizer_config.json`` options to
             carry into the config so the tokenizer can be rebuilt by downloading
             only ``tokenizer.json`` at runtime.
@@ -775,12 +748,8 @@ def build_config_from_hf_config(
     # Carry the resolved checkpoint snapshot directory on the config so it can
     # still locate the pretrained weights to load.
     config_data["checkpoint_path"] = checkpoint_path
-    # Resolve the tokenizer source: prefer the original Hub repo id so the
-    # tokenizer can be re-downloaded at runtime; fall back to the canonical
-    # MolmoAct2 repo. ``checkpoint_path`` is intentionally not used as the
-    # tokenizer source so exported checkpoints still resolve the tokenizer once
-    # the local snapshot directory is gone.
-    config_data["tokenizer_name_or_path"] = repo_id or DEFAULT_MOLMOACT2_REPO_ID
+    config_data["tokenizer_name_or_path"] = checkpoint_path
+    config_data["tokenizer_revision"] = tokenizer_revision
     config_data["tokenizer_config"] = tokenizer_config
     # Hardcoded across MolmoAct2 variants (see ``config.py``); avoids
     # instantiating the tokenizer here just to look up the placeholder id.
@@ -837,6 +806,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
     # ``None`` for local checkpoints (no Hub repo id); the original pretrained
     # identifier otherwise. This is later used as the tokenizer source.
     repo_id: str | None = None if is_local else str(pretrained_name_or_path)
+    tokenizer_revision: str | None = None
 
     if is_local:
         config_file = path / config_filename
@@ -865,27 +835,19 @@ def load_hf_pretrained_container(  # noqa: PLR0914
             hub_kwargs=hub_kwargs,
             norm_stats_filename=norm_stats_filename,
         )
+        tokenizer_revision = _resolve_snapshot_revision(config_file, hub_kwargs.get("revision"))
         if norm_stats_file is not None:
             with norm_stats_file.open(encoding="utf-8") as f:
                 norm_stats = json.load(f)
-
-        checkpoint_location_temp = str(Path(weights_file).parent)
-        target_path = Path(checkpoint_location_temp) / processor_filename
-        if not target_path.exists():
-            try:
-                downloaded_path = hf_hub_download(
-                    str(pretrained_name_or_path),
-                    processor_filename,
-                    **hub_kwargs,
-                )
-                shutil.copy2(downloaded_path, target_path)
-            except RemoteEntryNotFoundError:
-                pass
 
     with Path(config_file).open(encoding="utf-8") as f:
         hf_config = json.load(f)
 
     checkpoint_location = str(Path(weights_file).parent)
+    tokenizer_file = Path(checkpoint_location) / TOKENIZER_NAME
+    if not tokenizer_file.is_file():
+        msg = f"MolmoAct2 checkpoint at {checkpoint_location} must contain '{TOKENIZER_NAME}'."
+        raise FileNotFoundError(msg)
 
     # Load processor config from checkpoint location
     processor_config: dict[str, Any] | None = None
@@ -894,11 +856,7 @@ def load_hf_pretrained_container(  # noqa: PLR0914
         with processor_config_path.open(encoding="utf-8") as f:
             processor_config = json.load(f)
 
-    # Load tokenizer options once here (``tokenizer_config.json``) so the config
-    # carried on the policy can rebuild the tokenizer by downloading only the
-    # ``tokenizer.json`` vocab file. Prefer a local file when present, then the
-    # Hub, then the canonical MolmoAct2 repo as a final fallback.
-    tokenizer_config = _load_tokenizer_config(checkpoint_location, repo_id)
+    tokenizer_config = _load_tokenizer_config(checkpoint_location)
 
     return MolmoAct2Snapshot(
         config_file=Path(config_file),
@@ -910,5 +868,6 @@ def load_hf_pretrained_container(  # noqa: PLR0914
         norm_stats=norm_stats,
         processor_config=processor_config,
         repo_id=repo_id,
+        tokenizer_revision=tokenizer_revision,
         tokenizer_config=tokenizer_config,
     )

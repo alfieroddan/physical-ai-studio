@@ -570,6 +570,25 @@ class TestExpandImagePlaceholders:
         assert int(expanded[expanded.index(12)]) == 12
         assert int(expanded[-1]) == 5
 
+    def test_preserves_masked_tokenizer_padding(self) -> None:
+        config = self._config()
+        placeholder = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
+        input_ids = torch.tensor([[placeholder, 5, 0, 0]])
+        attention_mask = torch.tensor([[1, 1, 0, 0]])
+        grids = torch.tensor([[2, 2, 0, 0]])
+
+        out_ids, out_mask, _ = _expand_image_placeholders(
+            config=config,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            image_grids=grids,
+            image_placeholder_token_id=placeholder,
+        )
+
+        assert out_ids.shape == (1, 9)
+        assert out_mask.shape == (1, 9)
+        assert int(out_mask.sum()) == 7
+
     def test_raises_when_too_few_grids(self) -> None:
         config = self._config()
         placeholder = MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
@@ -587,6 +606,20 @@ class TestExpandImagePlaceholders:
 
 
 class TestMakeMolmoact2Preprocessors:
+    def test_uses_configured_tokenizer_padding(
+        self,
+        tiny_molmoact2_config: MolmoAct2Config,
+        molmoact2_features: tuple[list, list],
+    ) -> None:
+        inputs, outputs = molmoact2_features
+        tiny_molmoact2_config.input_features = inputs
+        tiny_molmoact2_config.output_features = outputs
+        tiny_molmoact2_config.tokenizer_padding = "longest"
+
+        preprocessor, _ = make_molmoact2_preprocessors(tiny_molmoact2_config)
+
+        assert preprocessor._tokenizers.padding == "longest"
+
     def test_returns_pre_and_post(
         self,
         tiny_molmoact2_config: MolmoAct2Config,
@@ -605,7 +638,7 @@ class TestMakeMolmoact2Preprocessors:
     ) -> None:
         tiny_molmoact2_config.input_features = None
         tiny_molmoact2_config.output_features = None
-        with pytest.raises(ValueError, match="None"):
+        with pytest.raises(ValueError, match="Input and output features must be set"):
             make_molmoact2_preprocessors(tiny_molmoact2_config)
 
 

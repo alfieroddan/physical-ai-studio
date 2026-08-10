@@ -13,29 +13,21 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
-from huggingface_hub.errors import RemoteEntryNotFoundError
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
-from physicalai.policies.molmoact2.config import (
-    DEFAULT_MOLMOACT2_REPO_ID,
-    MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-    MolmoAct2Config,
-)
+from physicalai.policies.molmoact2.config import MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID, MolmoAct2Config
 from physicalai.policies.molmoact2.from_hf import (
     _load_tokenizer_config,
     _resolve_feature_overrides,
     MolmoAct2Snapshot,
+    SNAPSHOT_ALLOW_PATTERNS,
+    TOKENIZER_ALLOW_PATTERNS,
     build_config_from_hf_config,
+    download_policy_artifacts_from_hub,
     load_hf_pretrained_container,
+    resolve_tokenizer_assets,
 )
-
-
-def _remote_not_found(msg: str) -> RemoteEntryNotFoundError:
-    request = httpx.Request("GET", "https://example.com")
-    response = httpx.Response(404, request=request)
-    return RemoteEntryNotFoundError(msg, response=response)
 
 
 def _make_hf_config() -> dict[str, Any]:
@@ -79,73 +71,37 @@ def _build_config(**overrides: Any):
 
 
 class TestLoadTokenizerConfig:
-    def test_prefers_local_file(self, mock_hf_repo: Path) -> None:
-        result = _load_tokenizer_config(str(mock_hf_repo), repo_id="some/repo")
-        assert result is not None
+    def test_loads_local_file(self, mock_hf_repo: Path) -> None:
+        result = _load_tokenizer_config(str(mock_hf_repo))
         assert result["tokenizer_class"] == "Qwen2Tokenizer"
+        assert result["extra_special_tokens"] == ["<im_start>", "<im_end>", "<|image|>"]
 
-    def test_falls_back_to_repo(self, tmp_path: Path, mock_hf_repo: Path, monkeypatch) -> None:
+    def test_resolves_tokenizer_only_snapshot(self, mock_hf_repo: Path, monkeypatch) -> None:
+        captured: dict[str, object] = {}
 
-        captured: list[str] = []
-
-        def _fake_download(repo_id: str, filename: str, **kwargs: Any) -> str:
-            captured.append(repo_id)
-            if filename == "tokenizer_config.json" and mock_hf_repo.joinpath(filename).is_file():
-                return str(mock_hf_repo / filename)
-            msg = f"{filename} not found"
-            raise _remote_not_found(msg)
+        def _fake_snapshot_download(repo_id: str, **kwargs: object) -> str:
+            captured["repo_id"] = repo_id
+            captured.update(kwargs)
+            return str(mock_hf_repo)
 
         from physicalai.policies.molmoact2 import from_hf as from_hf_module
 
-        monkeypatch.setattr(from_hf_module, "hf_hub_download", _fake_download)
+        monkeypatch.setattr(from_hf_module, "snapshot_download", _fake_snapshot_download)
 
-        empty_dir = tmp_path / "empty"
-        empty_dir.mkdir()
-        result = _load_tokenizer_config(str(empty_dir), repo_id="custom/repo")
-        assert result is not None
-        assert "custom/repo" in captured
-        assert DEFAULT_MOLMOACT2_REPO_ID not in captured
+        tokenizer_dir, tokenizer_config = resolve_tokenizer_assets("allenai/MolmoAct2")
 
-    def test_falls_back_to_default_repo(self, tmp_path: Path, mock_hf_repo: Path, monkeypatch) -> None:
+        assert captured == {
+            "repo_id": "allenai/MolmoAct2",
+            "allow_patterns": TOKENIZER_ALLOW_PATTERNS,
+        }
+        assert tokenizer_dir == str(mock_hf_repo)
+        assert tokenizer_config["model_max_length"] == 1010000
 
-        attempts: list[str] = []
-        first_repo_only = {"custom/repo": True}
+    def test_rejects_missing_tokenizer_config(self, tmp_path: Path) -> None:
+        (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
 
-        def _fake_download(repo_id: str, filename: str, **kwargs: Any) -> str:
-            attempts.append(repo_id)
-            if first_repo_only.get(repo_id) and filename == "tokenizer_config.json":
-                first_repo_only[repo_id] = False
-                msg = f"{filename} missing in {repo_id}"
-                raise _remote_not_found(msg)
-            if filename == "tokenizer_config.json" and mock_hf_repo.joinpath(filename).is_file():
-                return str(mock_hf_repo / filename)
-            msg = f"{filename} not found"
-            raise _remote_not_found(msg)
-
-        from physicalai.policies.molmoact2 import from_hf as from_hf_module
-
-        monkeypatch.setattr(from_hf_module, "hf_hub_download", _fake_download)
-
-        empty_dir = tmp_path / "empty"
-        empty_dir.mkdir()
-        result = _load_tokenizer_config(str(empty_dir), repo_id="custom/repo")
-        assert result is not None
-        assert attempts == ["custom/repo", DEFAULT_MOLMOACT2_REPO_ID]
-
-    def test_returns_none_when_unavailable(self, tmp_path: Path, monkeypatch) -> None:
-
-        def _fake_download(repo_id: str, filename: str, **kwargs: Any) -> str:
-            msg = f"{filename} not found in {repo_id}"
-            raise _remote_not_found(msg)
-
-        from physicalai.policies.molmoact2 import from_hf as from_hf_module
-
-        monkeypatch.setattr(from_hf_module, "hf_hub_download", _fake_download)
-
-        empty_dir = tmp_path / "empty"
-        empty_dir.mkdir()
-        result = _load_tokenizer_config(str(empty_dir), repo_id="custom/repo")
-        assert result is None
+        with pytest.raises(FileNotFoundError, match="tokenizer_config.json"):
+            resolve_tokenizer_assets(tmp_path)
 
 
 class TestBuildConfigFromHfConfig:
@@ -177,13 +133,13 @@ class TestBuildConfigFromHfConfig:
         assert config.frame_start_token_id == 16
         assert config.frame_end_token_id == 17
 
-    def test_tokenizer_name_or_path_uses_repo_id(self) -> None:
+    def test_tokenizer_name_or_path_uses_checkpoint(self) -> None:
         config = _build_config(repo_id="allenai/MolmoAct2-LIBERO")
-        assert config.tokenizer_name_or_path == "allenai/MolmoAct2-LIBERO"
+        assert config.tokenizer_name_or_path == "/tmp/checkpoint"
 
-    def test_tokenizer_name_or_path_falls_back_to_default(self) -> None:
+    def test_tokenizer_name_or_path_uses_local_checkpoint_without_repo(self) -> None:
         config = _build_config(repo_id=None)
-        assert config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
+        assert config.tokenizer_name_or_path == "/tmp/checkpoint"
 
     def test_carries_tokenizer_config(self) -> None:
         tok_cfg = {"bos_token": "<|im_end|>"}
@@ -359,8 +315,10 @@ class TestLoadHfPretrainedContainer:
         assert container.processor_config is not None
 
     def test_hub_checkpoint_sets_repo_id(self, mock_hf_repo: Path, patch_download_policy_artifacts) -> None:
-        container = load_hf_pretrained_container("allenai/MolmoAct2-LIBERO")
+        revision = "1dbc166cf8765166998eff31ade2eb64c8a40076"
+        container = load_hf_pretrained_container("allenai/MolmoAct2-LIBERO", revision=revision)
         assert container.repo_id == "allenai/MolmoAct2-LIBERO"
+        assert container.tokenizer_revision == revision
         assert container.tokenizer_config is not None
 
     def test_local_missing_weights_raises(self, tmp_path: Path) -> None:
@@ -369,3 +327,57 @@ class TestLoadHfPretrainedContainer:
         (empty / "config.json").write_text("{}", encoding="utf-8")
         with pytest.raises(FileNotFoundError, match="model.safetensors"):
             load_hf_pretrained_container(str(empty))
+
+    def test_local_missing_tokenizer_raises(self, tmp_path: Path) -> None:
+        checkpoint = tmp_path / "checkpoint"
+        checkpoint.mkdir()
+        (checkpoint / "config.json").write_text("{}", encoding="utf-8")
+        (checkpoint / "model.safetensors").touch()
+
+        with pytest.raises(FileNotFoundError, match="tokenizer.json"):
+            load_hf_pretrained_container(str(checkpoint))
+
+
+class TestDownloadPolicyArtifacts:
+    def test_downloads_allowlisted_snapshot(self, mock_hf_repo: Path, monkeypatch) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_snapshot_download(repo_id: str, **kwargs: object) -> str:
+            captured["repo_id"] = repo_id
+            captured.update(kwargs)
+            return str(mock_hf_repo)
+
+        from physicalai.policies.molmoact2 import from_hf as from_hf_module
+
+        monkeypatch.setattr(from_hf_module, "snapshot_download", _fake_snapshot_download)
+
+        config, weights, processor, processor_dir, norm_stats = download_policy_artifacts_from_hub(
+            "allenai/MolmoAct2-LIBERO",
+            hub_kwargs={"revision": "main"},
+            preprocessor_filename="processor_config.json",
+            norm_stats_filename="norm_stats.json",
+        )
+
+        assert captured == {
+            "repo_id": "allenai/MolmoAct2-LIBERO",
+            "allow_patterns": SNAPSHOT_ALLOW_PATTERNS,
+            "revision": "main",
+        }
+        assert config == mock_hf_repo / "config.json"
+        assert weights == mock_hf_repo / "model.safetensors.index.json"
+        assert processor == mock_hf_repo / "processor_config.json"
+        assert processor_dir == mock_hf_repo
+        assert norm_stats == mock_hf_repo / "norm_stats.json"
+
+    def test_rejects_snapshot_without_tokenizer(self, tmp_path: Path, monkeypatch) -> None:
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        (snapshot / "config.json").write_text("{}", encoding="utf-8")
+        (snapshot / "model.safetensors").touch()
+
+        from physicalai.policies.molmoact2 import from_hf as from_hf_module
+
+        monkeypatch.setattr(from_hf_module, "snapshot_download", lambda *args, **kwargs: str(snapshot))
+
+        with pytest.raises(FileNotFoundError, match="tokenizer.json"):
+            download_policy_artifacts_from_hub("allenai/MolmoAct2-LIBERO")

@@ -19,15 +19,15 @@ import torch
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.policies.molmoact2.config import (
-    DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
     MolmoAct2Config,
 )
 
 
 @pytest.fixture
-def tiny_molmoact2_config() -> MolmoAct2Config:
+def tiny_molmoact2_config(mock_hf_repo: Path) -> MolmoAct2Config:
     """A minimal config suitable for instantiating model components in tests."""
+    tokenizer_config = json.loads((mock_hf_repo / "tokenizer_config.json").read_text(encoding="utf-8"))
     return MolmoAct2Config(
         hidden_size=64,
         num_attention_heads=4,
@@ -63,7 +63,8 @@ def tiny_molmoact2_config() -> MolmoAct2Config:
         n_action_steps=2,
         max_action_dim=4,
         image_placeholder_token_id=MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-        tokenizer_name_or_path=DEFAULT_MOLMOACT2_REPO_ID,
+        tokenizer_name_or_path=str(mock_hf_repo),
+        tokenizer_config=tokenizer_config,
     )
 
 
@@ -111,6 +112,7 @@ _TOKENIZER_CONFIG_PAYLOAD: dict[str, Any] = {
     "clean_up_tokenization_spaces": False,
     "eos_token": "<|im_end|>",
     "errors": "replace",
+    "extra_special_tokens": ["<im_start>", "<im_end>", "<|image|>"],
     "model_max_length": 1010000,
     "pad_token": "",
     "tokenizer_class": "Qwen2Tokenizer",

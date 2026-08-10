@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from unittest.mock import MagicMock, patch
 
 import onnx
+import openvino
 import pytest
 import torch
 
@@ -411,6 +412,8 @@ class TestToOpenVINO:
         assert ExportBackend.OPENVINO in wrapper.get_supported_export_backends()
         assert output_path.exists()
         assert (tmp_path / "model.bin").exists()
+        ov_model = openvino.Core().read_model(output_path)
+        assert [model_input.get_names() for model_input in ov_model.inputs] == [{"input_a"}, {"input_b"}]
 
     def test_to_openvino_with_dict_input(self, tmp_path):
         """Test OpenVINO export with model accepting dict as single parameter."""

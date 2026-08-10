@@ -11,10 +11,14 @@ HuggingFace-container loading path is covered by ``test_from_hf.py``.
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from physicalai.data import Observation
+from physicalai.data.observation import ACTION
 from physicalai.export import ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
@@ -86,6 +90,22 @@ class TestMolmoact2Policy:
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 
+    def test_resolves_tokenizer_assets_lazily(self, tmp_path: Path, monkeypatch) -> None:
+        policy = MolmoAct2(repo_id=None)
+        tokenizer_config = {
+            "extra_special_tokens": ["<im_start>", "<|image|>"],
+            "model_max_length": 1010000,
+        }
+        monkeypatch.setattr(
+            "physicalai.policies.molmoact2.policy.resolve_tokenizer_assets",
+            lambda source: (str(tmp_path), tokenizer_config),
+        )
+
+        policy._ensure_tokenizer_assets()
+
+        assert policy.config.tokenizer_name_or_path == str(tmp_path)
+        assert policy.config.tokenizer_config == tokenizer_config
+
     def test_action_mode_override_is_applied_to_config(self) -> None:
         policy = MolmoAct2(repo_id=None, action_mode="discrete")
         assert policy.config.action_mode == "discrete"
@@ -150,6 +170,98 @@ class TestMolmoact2LoRAArgs:
 
 
 class TestMolmoact2SupportedExportBackends:
-    def test_returns_torch_only(self) -> None:
+    def test_returns_torch_and_openvino(self) -> None:
         backends = MolmoAct2.get_supported_export_backends()
-        assert list(backends) == [ExportBackend.TORCH]
+        assert list(backends) == [ExportBackend.TORCH, ExportBackend.OPENVINO]
+
+
+class TestMolmoact2ExportArgs:
+    def test_export_sample_forces_fixed_tokenizer_padding(self, molmoact2_features) -> None:
+        input_features, output_features = molmoact2_features
+
+        class TestPolicy(MolmoAct2):
+            @property
+            def sample_input(self):
+                return {"task": "sample"}
+
+        policy = TestPolicy(repo_id=None, tokenizer_padding="longest")
+        policy.config.input_features = input_features
+        policy.config.output_features = output_features
+
+        class RecordingPreprocessor(torch.nn.Module):
+            padding: str | None = None
+
+            def forward(self, batch, *, tokenizer_padding=None):
+                del batch
+                self.padding = tokenizer_padding
+                return {"input_ids": torch.ones((1, 4), dtype=torch.int64)}
+
+        preprocessor = RecordingPreprocessor()
+        policy._preprocessor = preprocessor  # type: ignore[assignment]
+
+        sample = policy._get_default_export_input_sample()
+
+        assert preprocessor.padding == "max_length"
+        assert policy.config.tokenizer_padding == "longest"
+        assert sample is not None
+        assert sample["input_ids"].shape == (1, 4)
+
+    def test_openvino_manifest_components(self, molmoact2_features) -> None:
+        input_features, output_features = molmoact2_features
+        policy = MolmoAct2(repo_id=None)
+        policy.config.input_features = input_features
+        policy.config.output_features = output_features
+        policy.config.image_processor_size = {"height": 28, "width": 28}
+        policy.config.tokenizer_config = {
+            "bos_token": "<|im_end|>",
+            "extra_special_tokens": ["<im_start>", "<im_end>", "<|image|>"],
+            "model_max_length": 1010000,
+        }
+        policy.model = torch.nn.Identity()  # type: ignore[assignment]
+        preprocessor = torch.nn.Identity()
+        preprocessor.tokenizer = SimpleNamespace(bos_token_id=11, eos_token_id=12, pad_token_id=0)
+        policy._preprocessor = preprocessor  # type: ignore[assignment]
+
+        openvino_args = policy.extra_export_args["openvino"]
+
+        assert [spec.type for spec in openvino_args.preprocessors_specs] == [
+            "molmoact2",
+            "asset_tokenizer",
+            "molmoact2_inputs",
+        ]
+        assert [spec.type for spec in openvino_args.postprocessors_specs] == ["molmoact2_postprocess"]
+        assert openvino_args.export_tokenizer is False
+        assert openvino_args.via_onnx is False
+        assert openvino_args.outputs == [ACTION]
+
+        raw, tokenizer, model_inputs = openvino_args.preprocessors_specs
+        assert raw.flat_params["image_keys"] == ["image"]
+        assert raw.flat_params["state_stats"]["q01"] == [-1.0] * 6
+        assert tokenizer.flat_params == {
+            "artifact": "tokenizer.json",
+            "tokenizer_class": "Qwen2Tokenizer",
+            "tokenizer_options": {
+                "bos_token": "<|im_end|>",
+                "extra_special_tokens": ["<im_start>", "<im_end>", "<|image|>"],
+                "model_max_length": 1010000,
+            },
+            "max_token_len": 255,
+        }
+        assert model_inputs.flat_params["action_dim"] == 6
+        assert model_inputs.flat_params["bos_token_id"] == 11
+        assert model_inputs.flat_params["pad_token_id"] == 0
+        assert model_inputs.flat_params["image_size"] == (28, 28)
+        assert openvino_args.postprocessors_specs[0].flat_params["action_stats"]["q99"] == [1.0] * 6
+
+    def test_export_assets_bundles_tokenizer_json(self, tmp_path: Path) -> None:
+        policy = MolmoAct2(repo_id=None)
+        tokenizer_source = tmp_path / "source"
+        tokenizer_source.mkdir()
+        (tokenizer_source / "tokenizer.json").write_text('{"version": "1.0"}', encoding="utf-8")
+        policy.config.tokenizer_name_or_path = str(tokenizer_source)
+        export_dir = tmp_path / "export"
+        export_dir.mkdir()
+
+        policy.export_assets(export_dir)
+
+        assert (export_dir / "tokenizer.json").read_text(encoding="utf-8") == '{"version": "1.0"}'

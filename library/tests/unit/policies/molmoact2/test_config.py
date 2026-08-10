@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from physicalai.training_config import Config
+from physicalai.config import Config
 from physicalai.policies.molmoact2.config import (
     DEFAULT_MOLMOACT2_REPO_ID,
     MOLMOACT2_FRAME_END_TOKEN_ID,
@@ -69,8 +69,16 @@ class TestMolmoAct2Config:
     def test_default_tokenizer_values(self) -> None:
         config = MolmoAct2Config()
         assert config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
+        assert config.tokenizer_padding == "max_length"
         assert config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
         assert config.tokenizer_config is None
+
+    def test_tokenizer_padding_accepts_longest(self) -> None:
+        assert MolmoAct2Config(tokenizer_padding="longest").tokenizer_padding == "longest"
+
+    def test_tokenizer_padding_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValueError, match="tokenizer_padding"):
+            MolmoAct2Config(tokenizer_padding="invalid")  # type: ignore[arg-type]
 
     def test_default_image_token_ids(self) -> None:
         config = MolmoAct2Config()
@@ -122,6 +130,12 @@ class TestMolmoAct2Config:
         assert data["tokenizer_config"] == tok_cfg
         restored = MolmoAct2Config.from_dict(data)
         assert restored.tokenizer_config == tok_cfg
+
+    def test_serializer_carries_tokenizer_revision(self) -> None:
+        revision = "1dbc166cf8765166998eff31ade2eb64c8a40076"
+        config = MolmoAct2Config(tokenizer_revision=revision)
+        restored = MolmoAct2Config.from_dict(config.to_dict())
+        assert restored.tokenizer_revision == revision
 
     def test_n_action_steps_validation_below_one(self) -> None:
         with pytest.raises(ValueError, match="n_action_steps"):
