@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer = "2026-07-31T05:10:46.848283Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -572,8 +572,8 @@ wheels = [
 
 [[package]]
 name = "physicalai"
-version = "0.1.2.dev37+g3e163cfeb"
-source = { git = "https://github.com/openvinotoolkit/physicalai.git?rev=3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44#3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44" }
+version = "0.1.2.dev50+ge19a2e522"
+source = { git = "https://github.com/openvinotoolkit/physicalai.git?rev=e19a2e522dbe89e6319fa8de5a6896544badac18#e19a2e522dbe89e6319fa8de5a6896544badac18" }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "jsonargparse", extra = ["shtab", "signatures"] },
@@ -623,7 +623,7 @@ lint = [
 
 [package.metadata]
 requires-dist = [
-    { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=3e163cfebc5f0fe6d97a6e792b4b0a55614d9a44" },
+    { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=e19a2e522dbe89e6319fa8de5a6896544badac18" },
     { name = "pydantic", specifier = ">=2.12" },
 ]
 
