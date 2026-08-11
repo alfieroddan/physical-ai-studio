@@ -117,6 +117,8 @@ class MolmoAct2Backbone(nn.Module):
         if images is None:
             return embeddings
 
+        # Keep the dtype conversion off the input boundary so OpenVINO retains the semantic ``images`` input name.
+        images = images.reshape(images.shape)
         image_features = self.vision_backbone(images.to(self.vision_backbone.dtype), token_pooling).to(embeddings.dtype)
         is_image_patch = (token_ids == self.image_patch_id).reshape(-1)
         flat = embeddings.reshape(-1, embeddings.shape[-1]).clone()
