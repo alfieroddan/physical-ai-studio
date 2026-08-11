@@ -337,10 +337,7 @@ class MolmoAct2Config(Config):
 
     def _validate_text_and_training_settings(self) -> None:
         if self.tokenizer_padding not in {"max_length", "longest"}:
-            msg = (
-                "tokenizer_padding must be one of 'max_length' or 'longest', "
-                f"got {self.tokenizer_padding!r}."
-            )
+            msg = f"tokenizer_padding must be one of 'max_length' or 'longest', got {self.tokenizer_padding!r}."
             raise ValueError(msg)
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads

@@ -99,8 +99,11 @@ class MolmoAct2ImageProcessor:
 
         Returns:
             The normalized pixels (``[-1, 1]`` for the default 0.5/0.5 stats).
+
+        Raises:
+            ValueError: If the image dtype is not float16 or float32.
         """
-        if images.dtype not in (torch.float16, torch.float32):
+        if images.dtype not in {torch.float16, torch.float32}:
             msg = f"Expected images of dtype float16 or float32, got {images.dtype}."
             raise ValueError(msg)
         mean = torch.tensor(self.image_mean, dtype=images.dtype, device=images.device).view(1, -1, 1, 1)

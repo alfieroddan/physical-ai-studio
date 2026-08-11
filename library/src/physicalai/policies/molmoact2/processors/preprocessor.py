@@ -30,6 +30,8 @@ from .preprocess_steps import (
 from .tokenizers import MolmoAct2Tokenizers
 
 if TYPE_CHECKING:
+    from transformers import Qwen2Tokenizer
+
     from physicalai.policies.molmoact2.config import MolmoAct2Config
 
 
@@ -112,13 +114,13 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self._joint_transform = JointFrameTransform(config.joint_signs, config.joint_offsets)
 
     @property
-    def tokenizer(self) -> Any:
-        """Return the tokenizer representation used by OpenVINO export."""
+    def tokenizer(self) -> Qwen2Tokenizer:
+        """Tokenizer representation used by OpenVINO export."""
         return self._tokenizers.tokenizer
 
     @property
     def max_token_len(self) -> int:
-        """Return the pre-BOS tokenizer output width used for export."""
+        """Pre-BOS tokenizer output width used for export."""
         return self._tokenizers.max_token_len - 1
 
     @staticmethod

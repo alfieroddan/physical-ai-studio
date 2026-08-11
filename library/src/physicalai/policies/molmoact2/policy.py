@@ -18,7 +18,7 @@ from torch import Tensor
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin, ExportBackend
-from physicalai.export.backends import ExportParameters, TorchExportParameters
+from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 from physicalai.policies.utils.features import get_feature_by_type
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
@@ -29,6 +29,8 @@ from .model import MolmoAct2Model
 from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor, make_molmoact2_preprocessors
 
 logger = logging.getLogger(__name__)
+
+_NormalizationStats = dict[str, float | list[float] | list[bool] | None]
 
 
 def _coerce_dataset_feature(feature: Feature) -> Feature:
@@ -50,6 +52,20 @@ def _coerce_dataset_feature(feature: Feature) -> Feature:
         shape=shape,
         normalization_data=copied_normalization,
     )
+
+
+def _normalization_stats(feature: Feature | None) -> _NormalizationStats:
+    if feature is None or feature.normalization_data is None:
+        return {}
+
+    normalization = feature.normalization_data
+    stats: _NormalizationStats = {
+        "q01": normalization.q01,
+        "q99": normalization.q99,
+    }
+    if normalization.mask is not None:
+        stats["mask"] = normalization.mask
+    return stats
 
 
 def make_molmoact2_config(
@@ -594,6 +610,45 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             )
         return outputs
 
+    def _openvino_token_ids(self) -> tuple[int, int, list[int]]:
+        required_token_ids = {
+            "image_start_token_id": self.config.image_start_token_id,
+            "image_end_token_id": self.config.image_end_token_id,
+            "image_patch_id": self.config.image_patch_id,
+        }
+        missing_token_ids = [name for name, value in required_token_ids.items() if value is None]
+        if missing_token_ids:
+            msg = f"MolmoAct2 OpenVINO export requires token IDs: {', '.join(missing_token_ids)}"
+            raise ValueError(msg)
+
+        if self._preprocessor is None:
+            msg = "MolmoAct2 preprocessor must be initialized before export."
+            raise ValueError(msg)
+        tokenizer = self._preprocessor.tokenizer
+        bos_token_id = tokenizer.bos_token_id
+        if not isinstance(bos_token_id, int):
+            bos_token_id = tokenizer.eos_token_id
+        pad_token_id = tokenizer.pad_token_id
+        if not isinstance(bos_token_id, int) or not isinstance(pad_token_id, int):
+            msg = "MolmoAct2 tokenizer must define integer BOS/EOS and padding token IDs"
+            raise TypeError(msg)
+
+        image_token_ids = [
+            token_id
+            for token_id in (
+                self.config.image_patch_id,
+                self.config.image_col_id,
+                self.config.image_start_token_id,
+                self.config.low_res_image_start_token_id,
+                self.config.frame_start_token_id,
+                self.config.image_end_token_id,
+                self.config.frame_end_token_id,
+                self.config.image_low_res_id,
+            )
+            if token_id is not None
+        ]
+        return bos_token_id, pad_token_id, image_token_ids
+
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
         """Build backend export arguments for the policy.
@@ -601,6 +656,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Raises:
             ValueError: If the model has not been initialized and input/output features are unavailable.
             ValueError: If any required token IDs are missing.
+            ValueError: If the preprocessor has not been initialized.
         """
         # Ensure input/output features are available for export; they are required to construct the export parameters.
         if self.input_features is None or self.output_features is None:
@@ -613,45 +669,84 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         state_feature = get_feature_by_type(input_features, FeatureType.STATE)
         action_feature = get_feature_by_type(output_features, FeatureType.ACTION)
 
-        # state normalization data
-        state_norm = state_feature.normalization_data if state_feature else None
-        if state_norm:
-            # q01 / q99 / mask
-            state_stats = {
-                "q01": state_norm.q01,
-                "q99": state_norm.q99,
-            }
-            if state_norm.mask is not None:
-                state_stats["mask"] = state_norm.mask
+        state_stats = _normalization_stats(state_feature)
+        action_stats = _normalization_stats(action_feature)
+        bos_token_id, pad_token_id, image_token_ids = self._openvino_token_ids()
 
-        # action normalization data
-        action_norm = action_feature.normalization_data if action_feature else None
-        if action_norm:
-            # q01 / q99 / mask
-            action_stats = {
-                "q01": action_norm.q01,
-                "q99": action_norm.q99,
-            }
-            if action_norm.mask is not None:
-                action_stats["mask"] = action_norm.mask
-
-        # token ids
-        required_token_ids = {
-            "image_start_token_id": self.config.image_start_token_id,
-            "image_end_token_id": self.config.image_end_token_id,
-            "image_patch_id": self.config.image_patch_id,
-        }
-        missing_token_ids = [name for name, value in required_token_ids.items() if value is None]
-        if missing_token_ids:
-            msg = f"MolmoAct2 OpenVINO export requires token IDs: {', '.join(missing_token_ids)}"
+        image_size = (
+            int(self.config.image_processor_size["height"]),
+            int(self.config.image_processor_size["width"]),
+        )
+        image_keys = [
+            str(feature.name) for feature in input_features if feature.ftype == FeatureType.VISUAL and feature.name
+        ]
+        if action_feature is None or not action_feature.shape:
+            msg = "MolmoAct2 OpenVINO export requires an action output feature with a defined shape."
             raise ValueError(msg)
+        output_names = [feature.name for feature in (self.outputs_schema or [])]
 
-        # tokenizer
-        tokenizer = self._preprocessor.tokenizer
-
+        openvino_preprocessors = [
+            ComponentSpec(
+                type="molmoact2",
+                image_keys=image_keys,
+                state_stats=state_stats,
+                image_size=image_size,
+                num_state_tokens=self.config.num_state_tokens,
+                setup_type=self.config.setup_type,
+                control_mode=self.config.control_mode,
+                add_setup_tokens=self.config.add_setup_tokens,
+                add_control_tokens=self.config.add_control_tokens,
+                adapt_to_so101=self.config.adapt_to_so101,
+                joint_signs=self.config.joint_signs,
+                joint_offsets=self.config.joint_offsets,
+            ),
+            ComponentSpec(
+                type="ov_tokenizer",
+                artifact="tokenizer.xml",
+            ),
+            ComponentSpec(
+                type="molmoact2_inputs",
+                max_action_dim=self.config.max_action_dim,
+                action_dim=int(action_feature.shape[-1]),
+                bos_token_id=bos_token_id,
+                pad_token_id=pad_token_id,
+                image_placeholder_token_id=self.config.image_placeholder_token_id,
+                image_start_token_id=self.config.image_start_token_id,
+                image_end_token_id=self.config.image_end_token_id,
+                image_patch_id=self.config.image_patch_id,
+                image_col_id=self.config.image_col_id,
+                low_res_image_start_token_id=self.config.low_res_image_start_token_id,
+                image_size=image_size,
+                patch_size=self.config.image_processor_patch_size,
+                pooling_size=tuple(self.config.image_processor_pooling_size),
+                image_mean=self.config.image_processor_mean,
+                image_std=self.config.image_processor_std,
+                image_use_col_tokens=self.config.image_use_col_tokens,
+                use_single_crop_col_tokens=bool(self.config.use_single_crop_col_tokens),
+                use_single_crop_start_token=self.config.use_single_crop_start_token,
+                image_token_ids=image_token_ids,
+            ),
+        ]
+        openvino_postprocessors = [
+            ComponentSpec(
+                type="molmoact2_postprocess",
+                action_stats=action_stats,
+                adapt_to_so101=self.config.adapt_to_so101,
+                joint_signs=self.config.joint_signs,
+                joint_offsets=self.config.joint_offsets,
+            ),
+        ]
         return {
             "torch": TorchExportParameters(
                 preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
+            ),
+            "openvino": OpenVINOExportParameters(
+                outputs=output_names,
+                export_tokenizer=True,
+                via_onnx=False,
+                exporter_kwargs={},
+                preprocessors_specs=openvino_preprocessors,
+                postprocessors_specs=openvino_postprocessors,
             ),
         }
 

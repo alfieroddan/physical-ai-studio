@@ -10,13 +10,14 @@ from __future__ import annotations
 import re
 from copy import copy
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import torch
 from transformers import Qwen2Tokenizer
 
 _TOKENIZER_JSON_FILENAME = "tokenizer.json"
+_MIN_TOKEN_LEN = 2
 _OUTPUT_ONLY_TOKEN = re.compile(r"^<(?:action|extra)_\d+>$")
 
 
@@ -48,7 +49,7 @@ class MolmoAct2Tokenizers:
         tokenizer_name_or_path: str,
         max_token_len: int = 256,
         padding: Literal["max_length", "longest"] = "max_length",
-        tokenizer_config: dict[str, object] | None = None,
+        tokenizer_config: dict[str, Any] | None = None,
     ) -> None:
         """Initialize lazy tokenizer helpers from a local tokenizer directory.
 
@@ -59,16 +60,17 @@ class MolmoAct2Tokenizers:
             tokenizer_config: Checkpoint-derived tokenizer construction options.
 
         Raises:
-            FileNotFoundError: If the local tokenizer JSON is missing.
+            ValueError: If ``max_token_len`` is less than 2.
         """
         self.tokenizer_name_or_path = tokenizer_name_or_path
-        if max_token_len < 2:  # noqa: PLR2004
+        if max_token_len < _MIN_TOKEN_LEN:
             msg = "max_token_len must be at least 2 to reserve space for BOS."
             raise ValueError(msg)
         self.max_token_len = max_token_len
         self.padding = padding
         self.tokenizer_config = tokenizer_config or {}
         self._tokenizer: Qwen2Tokenizer | None = None
+        self._openvino_tokenizer: Qwen2Tokenizer | None = None
         self._tokenizer_dir = self._resolve_tokenizer_dir()
 
     def _resolve_tokenizer_dir(self) -> str:
@@ -94,6 +96,9 @@ class MolmoAct2Tokenizers:
         ``Qwen2Tokenizer.from_pretrained(..., local_files_only=True)`` is
         called at most once per instance.
 
+        Returns:
+            The ``Qwen2Tokenizer`` instance used for prompt tokenization.
+
         Raises:
             ValueError: If the tokenizer failed to initialize.
         """
@@ -112,12 +117,14 @@ class MolmoAct2Tokenizers:
 
     @property
     def tokenizer(self) -> Qwen2Tokenizer:
-        """Return the main text tokenizer.
+        """The main text tokenizer.
 
         Returns:
             The ``Qwen2Tokenizer`` instance used for prompt tokenization.
         """
-        return _drop_output_only_added_tokens(self._qwen_tokenizer())
+        if self._openvino_tokenizer is None:
+            self._openvino_tokenizer = _drop_output_only_added_tokens(self._qwen_tokenizer())
+        return self._openvino_tokenizer
 
     @staticmethod
     def _insert_bos(
@@ -173,7 +180,8 @@ class MolmoAct2Tokenizers:
             TypeError: If required tokenizer special token ids are missing.
         """
         padding = self.padding if padding is None else padding
-        text_inputs = self.tokenizer(
+        tokenizer = self._qwen_tokenizer()
+        text_inputs = tokenizer(
             prompt_texts,
             max_length=self.max_token_len - 1,
             truncation=True,
@@ -183,15 +191,15 @@ class MolmoAct2Tokenizers:
         input_ids = np.asarray(text_inputs["input_ids"])
         attention_mask = np.asarray(text_inputs["attention_mask"])
 
-        bos_token_id = self.tokenizer.bos_token_id
+        bos_token_id = tokenizer.bos_token_id
         if not isinstance(bos_token_id, int):
-            eos_token_id = self.tokenizer.eos_token_id
+            eos_token_id = tokenizer.eos_token_id
             if not isinstance(eos_token_id, int):
                 msg = "Tokenizer must define bos_token_id or eos_token_id."
                 raise TypeError(msg)
             bos_token_id = eos_token_id
 
-        pad_token_id = self.tokenizer.pad_token_id
+        pad_token_id = tokenizer.pad_token_id
         if not isinstance(pad_token_id, int):
             msg = "Tokenizer must define pad_token_id."
             raise TypeError(msg)

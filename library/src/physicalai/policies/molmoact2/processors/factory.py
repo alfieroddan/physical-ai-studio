@@ -29,7 +29,7 @@ def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Prep
         ValueError: if output or input features are None.
     """
     if (config.input_features is None) or (config.output_features is None):
-        msg = "Input and output features must not be None; please initialize the model first."
+        msg = "Input and output features must be set; please initialize the model first."
         raise ValueError(msg)
 
     preprocessor = MolmoAct2Preprocessor(config=config)

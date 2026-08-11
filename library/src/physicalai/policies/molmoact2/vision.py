@@ -207,7 +207,11 @@ class VisionTransformer(nn.Module):
         attention_dropout: float,
         residual_dropout: float,
     ) -> None:
-        """Build patch/positional embeddings and the block stack."""
+        """Build patch/positional embeddings and the block stack.
+
+        Raises:
+            ValueError: If ``image_num_pos`` is not a perfect square.
+        """
         super().__init__()
         self.image_num_patch = image_num_patch
         self.positional_grid_size = math.isqrt(image_num_pos)

@@ -110,7 +110,11 @@ class MolmoAct2Snapshot:
 
 
 def _resolve_snapshot_revision(config_file: Path, requested_revision: object) -> str | None:
-    """Resolve an immutable revision from a Hub request or cache snapshot path."""
+    """Resolve an immutable revision from a Hub request or cache snapshot path.
+
+    Returns:
+        The immutable revision, if one can be resolved.
+    """
     if isinstance(requested_revision, str) and _COMMIT_HASH_RE.fullmatch(requested_revision):
         return requested_revision
     snapshot_revision = config_file.parent.name
@@ -177,12 +181,22 @@ def download_policy_artifacts_from_hub(
     preprocessor_file = preprocessor_candidate if preprocessor_candidate.is_file() else None
     preprocessor_dir = snapshot_dir if preprocessor_file is not None else None
     norm_stats_candidate = snapshot_dir / norm_stats_filename if norm_stats_filename is not None else None
-    norm_stats_file = norm_stats_candidate if norm_stats_candidate is not None and norm_stats_candidate.is_file() else None
+    norm_stats_file = (
+        norm_stats_candidate if norm_stats_candidate is not None and norm_stats_candidate.is_file() else None
+    )
     return config_file, weights_file, preprocessor_file, preprocessor_dir, norm_stats_file
 
 
 def _load_tokenizer_config(checkpoint_location: str) -> dict[str, Any]:
-    """Load tokenizer construction options from the resolved snapshot."""
+    """Load tokenizer construction options from the resolved snapshot.
+
+    Returns:
+        Parsed tokenizer construction options.
+
+    Raises:
+        FileNotFoundError: If the tokenizer config is missing.
+        TypeError: If the tokenizer config is not a JSON object.
+    """
     config_path = Path(checkpoint_location) / TOKENIZER_CONFIG_NAME
     if not config_path.is_file():
         msg = f"MolmoAct2 checkpoint at {checkpoint_location} must contain '{TOKENIZER_CONFIG_NAME}'."
@@ -711,9 +725,7 @@ def build_config_from_hf_config(
         output_features: Optional output feature definitions.
         norm_tag: Selected normalization metadata tag.
         checkpoint_path: Local checkpoint directory.
-        repo_id: Original Hugging Face repo id when the checkpoint came from the
-            Hub. Used as the tokenizer source; falls back to
-            ``DEFAULT_MOLMOACT2_REPO_ID`` when not provided.
+        repo_id: Original Hugging Face repo id, retained for API compatibility.
         tokenizer_revision: Immutable commit revision for tokenizer assets.
         tokenizer_config: Optional parsed ``tokenizer_config.json`` options to
             carry into the config so the tokenizer can be rebuilt by downloading
@@ -729,6 +741,8 @@ def build_config_from_hf_config(
         ValueError: If ``checkpoint_path`` is ``None``.
         TypeError: If unkown MolmoAct2 overrides are supplied.
     """
+    del repo_id
+
     # Stage 1: start from local defaults and translate architecture fields from
     # the nested Hugging Face config.
     config_data = MolmoAct2Config().to_dict()

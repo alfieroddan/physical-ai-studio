@@ -389,7 +389,6 @@ class MolmoAct2Backbone(nn.Module):
             token_type_ids=token_type_ids,
             images=images,
             token_pooling=token_pooling,
-            batch_size=batch_size,
             seq_len=horizon,
             device=actions.device,
             dtype=dtype,

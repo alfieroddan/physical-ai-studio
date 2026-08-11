@@ -51,6 +51,7 @@ class TestTokenization:
             bos_token_id = 99
             eos_token_id = 98
             pad_token_id = 0
+            added_tokens_decoder: dict[int, object] = {}
 
             def __call__(self, prompt_texts, **kwargs):
                 width = kwargs["max_length"] if kwargs["padding"] == "max_length" else 2
