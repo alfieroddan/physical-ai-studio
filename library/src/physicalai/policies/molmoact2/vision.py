@@ -210,6 +210,10 @@ class VisionTransformer(nn.Module):
         """Build patch/positional embeddings and the block stack."""
         super().__init__()
         self.image_num_patch = image_num_patch
+        self.positional_grid_size = math.isqrt(image_num_pos)
+        if self.positional_grid_size**2 != image_num_pos:
+            msg = f"image_num_pos must be a perfect square, got {image_num_pos}"
+            raise ValueError(msg)
         self.positional_embedding = nn.Parameter(torch.zeros(image_num_pos, hidden_size))
         self.patch_embedding = nn.Linear(image_patch_size**2 * 3, hidden_size, bias=True)
         self.transformer = VisionBlockCollection(
@@ -231,9 +235,9 @@ class VisionTransformer(nn.Module):
         Returns:
             Embeddings with position embeddings added.
         """
-        side = int(math.sqrt(self.positional_embedding.shape[0]))
+        side = self.positional_grid_size
         pos_emb = self.positional_embedding.reshape(side, side, -1)
-        if pos_emb.shape[0] != patch_num[0] or pos_emb.shape[1] != patch_num[1]:
+        if (side, side) != patch_num:
             pos_emb = pos_emb.permute(2, 0, 1).unsqueeze(0)
             pos_emb = F.interpolate(
                 pos_emb,

@@ -242,7 +242,7 @@ class MolmoAct2Backbone(nn.Module):
             msg = f"num_steps must be >= 1, got {steps}."
             raise ValueError(msg)
 
-        batch_size = int(input_ids.shape[0])
+        batch_size = input_ids.shape[0]
         device = action_expert.action_embed.weight.device
         dtype = action_expert.action_embed.weight.dtype
         context = self._encode_action_context(
@@ -251,7 +251,6 @@ class MolmoAct2Backbone(nn.Module):
             token_type_ids=token_type_ids,
             images=images,
             token_pooling=token_pooling,
-            batch_size=batch_size,
             seq_len=action_horizon,
             device=device,
             dtype=dtype,
@@ -280,7 +279,6 @@ class MolmoAct2Backbone(nn.Module):
         token_type_ids: torch.Tensor | None,
         images: torch.Tensor | None,
         token_pooling: torch.Tensor | None,
-        batch_size: int,  # noqa: ARG002
         seq_len: int,
         device: torch.device,
         dtype: torch.dtype,

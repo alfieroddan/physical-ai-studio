@@ -178,6 +178,7 @@ def _expand_image_placeholders(
     pad_token_id = int(pad_values[0]) if int(pad_values.numel()) > 0 else 0
 
     expanded_rows: list[list[int]] = []
+    expanded_widths: list[int] = []
     grid_idx = 0
     for batch_idx in range(int(input_ids.shape[0])):
         valid = attention_mask[batch_idx].to(torch.bool)
@@ -193,8 +194,9 @@ def _expand_image_placeholders(
             else:
                 expanded.append(token_int)
         expanded_rows.append(expanded)
+        expanded_widths.append(len(expanded) + int((~valid).sum()))
 
-    max_len = max((len(row) for row in expanded_rows), default=1)
+    max_len = max(expanded_widths, default=1)
     out_ids = torch.full((len(expanded_rows), max_len), pad_token_id, dtype=input_ids.dtype, device=input_ids.device)
     out_mask = torch.zeros((len(expanded_rows), max_len), dtype=attention_mask.dtype, device=attention_mask.device)
     for batch_idx, row in enumerate(expanded_rows):

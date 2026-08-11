@@ -11,6 +11,8 @@ HuggingFace-container loading path is covered by ``test_from_hf.py``.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import torch
 
@@ -86,6 +88,22 @@ class TestMolmoact2Policy:
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 
+    def test_resolves_tokenizer_assets_lazily(self, tmp_path: Path, monkeypatch) -> None:
+        policy = MolmoAct2(repo_id=None)
+        tokenizer_config = {
+            "extra_special_tokens": ["<im_start>", "<|image|>"],
+            "model_max_length": 1010000,
+        }
+        monkeypatch.setattr(
+            "physicalai.policies.molmoact2.policy.resolve_tokenizer_assets",
+            lambda source: (str(tmp_path), tokenizer_config),
+        )
+
+        policy._ensure_tokenizer_assets()
+
+        assert policy.config.tokenizer_name_or_path == str(tmp_path)
+        assert policy.config.tokenizer_config == tokenizer_config
+
     def test_action_mode_override_is_applied_to_config(self) -> None:
         policy = MolmoAct2(repo_id=None, action_mode="discrete")
         assert policy.config.action_mode == "discrete"
@@ -150,6 +168,7 @@ class TestMolmoact2LoRAArgs:
 
 
 class TestMolmoact2SupportedExportBackends:
-    def test_returns_torch_only(self) -> None:
+    def test_returns_torch(self) -> None:
         backends = MolmoAct2.get_supported_export_backends()
         assert list(backends) == [ExportBackend.TORCH]
+

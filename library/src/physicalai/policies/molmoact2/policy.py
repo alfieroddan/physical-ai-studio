@@ -23,7 +23,7 @@ from physicalai.policies.base import Policy
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
-from .from_hf import build_config_from_hf_config, load_hf_pretrained_container
+from .from_hf import build_config_from_hf_config, load_hf_pretrained_container, resolve_tokenizer_assets
 from .model import MolmoAct2Model
 from .processors import MolmoAct2Postprocessor, MolmoAct2Preprocessor, make_molmoact2_preprocessors
 
@@ -163,6 +163,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 output_features=output_features,
                 checkpoint_path=self.hf_container.checkpoint_location,
                 repo_id=self.hf_container.repo_id,
+                tokenizer_revision=self.hf_container.tokenizer_revision,
                 tokenizer_config=self.hf_container.tokenizer_config,
                 processor_config=self.hf_container.processor_config,
                 norm_tag=norm_tag,
@@ -251,7 +252,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         2. Construct the :class:`MolmoAct2Model` (architecture only, no weights).
         3. Load pretrained weights if a checkpoint path is present in the config.
         """
-        # make pre, post and model from config
+        self._ensure_tokenizer_assets()
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config=self.config)
         self.model = MolmoAct2Model(self.config)
         if self._checkpoint_location is not None and self._load_weights:
@@ -261,6 +262,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # preserved and only the low-rank updates are trainable.
         if self.config.use_lora:
             self.model.apply_lora_adapters()
+
+    def _ensure_tokenizer_assets(self) -> None:
+        """Resolve tokenizer-only assets when no model snapshot was supplied."""
+        tokenizer_dir = Path(self.config.tokenizer_name_or_path)
+        if (tokenizer_dir / "tokenizer.json").is_file() and self.config.tokenizer_config is not None:
+            return
+        resolved_dir, tokenizer_config = resolve_tokenizer_assets(self.config.tokenizer_name_or_path)
+        self.config.tokenizer_name_or_path = resolved_dir
+        self.config.tokenizer_config = tokenizer_config
 
         # parameter setting based on config
         if self.config.train_action_expert_only:
@@ -542,14 +552,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                 )
-            schema.append(
-                InferenceFeature(
-                    ftype=InferenceFeatureType.LANGUAGE,
-                    shape=(),
-                    name=TASK,
-                    dtype=InferenceFeatureDtype.STRING,
-                ),
-            )
+        schema.append(
+            InferenceFeature(
+                ftype=InferenceFeatureType.LANGUAGE,
+                shape=(),
+                name=TASK,
+                dtype=InferenceFeatureDtype.STRING,
+            ),
+        )
         return schema
 
     @property
@@ -585,19 +595,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Extra backend export args for inference-time pre/post graph components."""
-        torch_preprocessor_specs = []
-        if self.config.chunk_size != self.config.n_action_steps:
-            chunk_trimmer = ComponentSpec(
-                type="action_chunk_trimmer",
-                n_action_steps=self.config.n_action_steps,
-            )
-            torch_preprocessor_specs.append(chunk_trimmer)
-
-        torch_preprocessor_specs.append(ComponentSpec(type="to_float_tensor"))
+        """Extra backend export args for inference-time processing components."""
         return {
             "torch": TorchExportParameters(
-                preprocessors_specs=torch_preprocessor_specs,
+                preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
             ),
         }
 

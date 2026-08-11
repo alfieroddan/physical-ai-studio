@@ -147,6 +147,9 @@ class MolmoAct2Config(Config):
     add_setup_tokens: bool = True
     add_control_tokens: bool = True
     tokenizer_name_or_path: str = DEFAULT_MOLMOACT2_REPO_ID
+    tokenizer_revision: str | None = None
+    tokenizer_max_length: int = 256
+    tokenizer_padding: Literal["max_length", "longest"] = "max_length"
     tokenizer_config: dict[str, Any] | None = None
     image_processor_crop_mode: str = "resize"
     image_processor_mean: list[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
@@ -333,6 +336,12 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
 
     def _validate_text_and_training_settings(self) -> None:
+        if self.tokenizer_padding not in {"max_length", "longest"}:
+            msg = (
+                "tokenizer_padding must be one of 'max_length' or 'longest', "
+                f"got {self.tokenizer_padding!r}."
+            )
+            raise ValueError(msg)
         if self.num_key_value_heads is None:
             self.num_key_value_heads = self.num_attention_heads
         if self.num_attention_heads < 1:
