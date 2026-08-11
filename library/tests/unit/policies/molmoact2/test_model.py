@@ -377,6 +377,43 @@ class TestMolmoAct2Backbone:
         assert backbone.action_expert is not None
         assert not hasattr(backbone, "config")
 
+    def test_casts_preprocessed_images_to_vision_dtype(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        tiny_molmoact2_config.adapter_vit_layers = (0,)
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config).to(torch.bfloat16)
+        backbone.image_patch_id = 0
+        patch_dim = tiny_molmoact2_config.image_patch_size**2 * 3
+        images = torch.randn(1, 1, tiny_molmoact2_config.image_num_pos, patch_dim)
+        input_ids = torch.tensor([[backbone.image_patch_id]])
+        token_pooling = torch.arange(tiny_molmoact2_config.image_num_pos).view(1, 1, -1)
+
+        embeddings = backbone.build_input_embeddings(input_ids, images, token_pooling)
+
+        assert embeddings.shape == (1, 1, tiny_molmoact2_config.hidden_size)
+        assert embeddings.dtype == torch.bfloat16
+
+    def test_casts_preprocessed_actions_to_action_expert_dtype(
+        self, tiny_molmoact2_config: MolmoAct2Config
+    ) -> None:
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config).to(torch.bfloat16)
+        horizon = tiny_molmoact2_config.action_expert_max_action_horizon
+        actions = torch.randn(1, horizon, tiny_molmoact2_config.action_expert_max_action_dim)
+
+        predicted, target = backbone.predict_flow_velocity(
+            input_ids=torch.zeros(1, 1, dtype=torch.long),
+            attention_mask=torch.ones(1, 1, dtype=torch.bool),
+            token_type_ids=None,
+            images=None,
+            token_pooling=None,
+            actions=actions,
+            action_dim_is_pad=None,
+            freeze_encoder=False,
+        )
+
+        assert predicted.dtype == torch.bfloat16
+        assert target.dtype == torch.bfloat16
+
     def test_no_action_expert_when_disabled(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:

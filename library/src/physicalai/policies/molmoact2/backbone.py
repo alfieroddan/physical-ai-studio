@@ -117,7 +117,7 @@ class MolmoAct2Backbone(nn.Module):
         if images is None:
             return embeddings
 
-        image_features = self.vision_backbone(images, token_pooling).to(embeddings.dtype)
+        image_features = self.vision_backbone(images.to(self.vision_backbone.dtype), token_pooling).to(embeddings.dtype)
         is_image_patch = (token_ids == self.image_patch_id).reshape(-1)
         flat = embeddings.reshape(-1, embeddings.shape[-1]).clone()
         flat[is_image_patch] += image_features
