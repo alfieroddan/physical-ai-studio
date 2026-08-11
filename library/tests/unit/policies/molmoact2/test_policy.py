@@ -168,7 +168,29 @@ class TestMolmoact2LoRAArgs:
 
 
 class TestMolmoact2SupportedExportBackends:
-    def test_returns_torch(self) -> None:
+    def test_returns_torch_and_openvino(self) -> None:
         backends = MolmoAct2.get_supported_export_backends()
-        assert list(backends) == [ExportBackend.TORCH]
+        assert list(backends) == [ExportBackend.TORCH, ExportBackend.OPENVINO]
+
+
+class TestMolmoact2ExportArgs:
+    @pytest.mark.parametrize("compress_to_fp16", [False, True])
+    def test_openvino_uses_molmo_processors_around_tokenizer(
+        self,
+        molmoact2_features,
+        compress_to_fp16: bool,
+    ) -> None:
+        input_features, output_features = molmoact2_features
+        policy = MolmoAct2(repo_id=None, openvino_compress_to_fp16=compress_to_fp16)
+        policy.config.input_features = input_features
+        policy.config.output_features = output_features
+        tokenizer = type("Tokenizer", (), {"bos_token_id": 1, "eos_token_id": 1, "pad_token_id": 0})()
+        policy._preprocessor = type("Preprocessor", (), {"tokenizer": tokenizer})()
+
+        openvino_args = policy.extra_export_args["openvino"]
+        specs = openvino_args.preprocessors_specs
+
+        assert [spec.type for spec in specs] == ["molmoact2", "ov_tokenizer", "molmoact2_inputs"]
+        assert specs[1].flat_params["artifact"] == "tokenizer.xml"
+        assert openvino_args.compress_to_fp16 is compress_to_fp16
 

@@ -162,6 +162,9 @@ class MolmoAct2Config(Config):
     use_single_crop_start_token: bool = True
     normalization_mode: str = "QUANTILES"
 
+    # Export
+    openvino_compress_to_fp16: bool = False
+
     # Training
     optimizer_lr: float = 1e-5
     optimizer_vit_lr: float = 5e-6

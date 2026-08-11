@@ -743,6 +743,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             "openvino": OpenVINOExportParameters(
                 outputs=output_names,
                 export_tokenizer=True,
+                compress_to_fp16=self.config.openvino_compress_to_fp16,
                 via_onnx=False,
                 exporter_kwargs={},
                 preprocessors_specs=openvino_preprocessors,
@@ -759,4 +760,4 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Returns:
             list[str | ExportBackend]: A list of supported export backends.
         """
-        return [ExportBackend.TORCH]
+        return [ExportBackend.TORCH, ExportBackend.OPENVINO]

@@ -406,7 +406,6 @@ class MolmoAct2VisionBackbone(nn.Module):
             Projected features ``(num_valid_tokens, text_hidden_size)``.
         """
         batch_size = images.shape[0]
-        images = images.to(dtype=self.dtype)
         image_features = self.image_feature_dropout(self.encode_image(images))
         dim = image_features.shape[-1]
 

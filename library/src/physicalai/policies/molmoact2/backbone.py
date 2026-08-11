@@ -185,7 +185,7 @@ class MolmoAct2Backbone(nn.Module):
         """
         if not self.mask_action_dim_padding or action_dim_is_pad is None:
             return tensor
-        valid = (~action_dim_is_pad.to(device=tensor.device, dtype=torch.bool))[:, None, :]
+        valid = (~action_dim_is_pad)[:, None, :]
         return tensor * valid
 
     def encode(

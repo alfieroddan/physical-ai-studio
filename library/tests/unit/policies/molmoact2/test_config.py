@@ -42,6 +42,7 @@ class TestMolmoAct2Config:
         assert config.action_mode == "continuous"
         assert config.state_format == "discrete"
         assert config.image_num_pos == 729
+        assert config.openvino_compress_to_fp16 is False
 
     def test_default_architecture_matches_molmo_base(self) -> None:
         config = MolmoAct2Config()
