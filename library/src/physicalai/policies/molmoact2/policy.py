@@ -596,18 +596,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
         """Extra backend export args for inference-time processing components."""
-        torch_preprocessor_specs = []
-        if self.config.chunk_size != self.config.n_action_steps:
-            torch_preprocessor_specs.append(
-                ComponentSpec(
-                    type="action_chunk_trimmer",
-                    n_action_steps=self.config.n_action_steps,
-                ),
-            )
-        torch_preprocessor_specs.append(ComponentSpec(type="to_float_tensor"))
         return {
             "torch": TorchExportParameters(
-                preprocessors_specs=torch_preprocessor_specs,
+                preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
             ),
         }
 
