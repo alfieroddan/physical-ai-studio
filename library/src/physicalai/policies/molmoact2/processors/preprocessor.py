@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -113,16 +113,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self._action_padder = ActionPadder(max_action_dim=int(config.max_action_dim))
         self._joint_transform = JointFrameTransform(config.joint_signs, config.joint_offsets)
 
-    @property
-    def tokenizer(self) -> Any:  # noqa: ANN401
-        """Return the tokenizer representation used by OpenVINO export."""
-        return self._tokenizers.openvino_tokenizer
-
-    @property
-    def max_token_len(self) -> int:
-        """Return the pre-BOS tokenizer output width used for export."""
-        return self._tokenizers.max_token_len - 1
-
     @staticmethod
     def _validate_batch(batch: dict[str, Any]) -> None:
         """Validate the input batch object.
@@ -163,19 +153,17 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         prompt_texts: list[str],
         *,
         device: torch.device,
-        tokenizer_padding: Literal["max_length", "longest"] | None = None,
     ) -> dict[str, torch.Tensor]:
         """Tokenize prompt text.
 
         Args:
             prompt_texts: Final prompt text list.
             device: Target device for token tensors.
-            tokenizer_padding: Optional tokenizer padding strategy override.
 
         Returns:
             Dictionary containing tokenized prompt tensors.
         """
-        input_ids, attention_mask = self._tokenizers.tokenize_prompts(prompt_texts, padding=tokenizer_padding)
+        input_ids, attention_mask = self._tokenizers.tokenize_prompts(prompt_texts)
 
         return {
             TOKENIZED_PROMPT: input_ids.to(device=device),
@@ -208,12 +196,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             IMAGE_MASKS: image_masks,
         }
 
-    def _preprocess_task_text(
-        self,
-        bundle: PreprocessBatchBundle,
-        *,
-        tokenizer_padding: Literal["max_length", "longest"] | None = None,
-    ) -> dict[str, torch.Tensor]:
+    def _preprocess_task_text(self, bundle: PreprocessBatchBundle) -> dict[str, torch.Tensor]:
         """Encode prompts and tokenize text inputs.
 
         Returns:
@@ -223,7 +206,6 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         return self._build_token_outputs(
             prompt_pack.prompt_texts,
             device=bundle.state.device,
-            tokenizer_padding=tokenizer_padding,
         )
 
     def _apply_input_joint_transform(self, batch: dict[str, Any]) -> dict[str, Any]:
@@ -298,17 +280,11 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         return tensor_outputs
 
-    def forward(
-        self,
-        batch: dict[str, Any],
-        *,
-        tokenizer_padding: Literal["max_length", "longest"] | None = None,
-    ) -> dict[str, torch.Tensor]:
+    def forward(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Preprocess one training/inference batch.
 
         Args:
             batch: Input observation dictionary with image tensors in BCHW format.
-            tokenizer_padding: Optional tokenizer padding strategy override.
 
         Returns:
             A packed dictionary of fully-prepared, backbone-ready model inputs.
@@ -320,7 +296,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
 
         state_outputs = self._preprocess_state(bundle)
         image_outputs = self._preprocess_images(bundle)
-        text_outputs = self._preprocess_task_text(bundle, tokenizer_padding=tokenizer_padding)
+        text_outputs = self._preprocess_task_text(bundle)
 
         packed: dict[str, Any] = {}
         packed.update(text_outputs)

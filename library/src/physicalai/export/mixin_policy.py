@@ -155,13 +155,6 @@ class ExportablePolicyMixin:
         """
         return {}
 
-    def export_assets(self, export_dir: Path) -> None:
-        """Copy policy-specific assets into an export directory.
-
-        Args:
-            export_dir: Directory containing the exported model and manifest.
-        """
-
     @contextmanager
     def _scoped_rtc(self, *, enable: bool) -> Generator[None, None, None]:
         """Temporarily set enable_rtc on the model, restoring the previous value on exit."""
@@ -219,7 +212,6 @@ class ExportablePolicyMixin:
             ),
             **extras,
         )
-        self.export_assets(export_dir)
         manifest.save(export_dir / "manifest.json")
 
     @staticmethod
@@ -500,7 +492,7 @@ class ExportablePolicyMixin:
                     input=input_shapes,
                     **extra_export_kwargs,
                 )
-            _postprocess_openvino_model(ov_model, list(input_sample), extra_model_args.outputs)
+            _postprocess_openvino_model(ov_model, extra_model_args.outputs)
 
         openvino.save_model(ov_model, str(model_path), compress_to_fp16=extra_model_args.compress_to_fp16)
         if extra_model_args.export_tokenizer:
@@ -789,12 +781,8 @@ class ExportablePolicyMixin:
         return [ExportBackend.TORCH]
 
 
-def _postprocess_openvino_model(
-    ov_model: openvino.Model,
-    input_names: list[str],
-    output_names: list[str] | None,
-) -> None:
-    """Postprocess an OpenVINO model by setting input and output tensor names.
+def _postprocess_openvino_model(ov_model: openvino.Model, output_names: list[str] | None) -> None:
+    """Postprocess an OpenVINO model by setting output tensor names.
 
     This function handles two scenarios:
     1. Workaround for OpenVINO Converter (OVC) bug where a single output model
@@ -804,7 +792,6 @@ def _postprocess_openvino_model(
 
     Args:
             ov_model (openvino.Model): The OpenVINO model to postprocess.
-            input_names (list[str]): Ordered names to assign to input tensors.
             output_names (list[str] | None): Optional list of custom names to assign
                 to the model's output tensors. If provided and the model has at least
                 as many outputs as names in the list, the names will be assigned to
@@ -812,17 +799,10 @@ def _postprocess_openvino_model(
 
 
     Note:
-            - Input aliases are replaced with one canonical name per input.
             - If a single output exists without a name, it will be named "output1".
             - When output_names is provided, only the first len(output_names) outputs
             will be renamed, even if the model has more outputs.
     """
-    if len(ov_model.inputs) != len(input_names):
-        msg = f"OpenVINO model has {len(ov_model.inputs)} inputs, but {len(input_names)} names were provided"
-        raise ValueError(msg)
-    for model_input, name in zip(ov_model.inputs, input_names, strict=True):
-        model_input.tensor.set_names({name})
-
     if len(ov_model.outputs) == 1 and len(ov_model.outputs[0].get_names()) == 0:
         # workaround for OVC's bug: single output doesn't have a name in OV model
         ov_model.outputs[0].tensor.set_names({"output1"})
