@@ -20,6 +20,7 @@ from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureTy
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
+from physicalai.policies.utils.features import get_feature_by_type
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
@@ -595,7 +596,59 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Extra backend export args for inference-time processing components."""
+        """Build backend export arguments for the policy.
+
+        Raises:
+            ValueError: If the model has not been initialized and input/output features are unavailable.
+            ValueError: If any required token IDs are missing.
+        """
+        # Ensure input/output features are available for export; they are required to construct the export parameters.
+        if self.input_features is None or self.output_features is None:
+            msg = "Model has not been initialized, input/output features are unavailable for export."
+            raise ValueError(msg)
+
+        # features
+        input_features = list(self.input_features)
+        output_features = list(self.output_features)
+        state_feature = get_feature_by_type(input_features, FeatureType.STATE)
+        action_feature = get_feature_by_type(output_features, FeatureType.ACTION)
+
+        # state normalization data
+        state_norm = state_feature.normalization_data if state_feature else None
+        if state_norm:
+            # q01 / q99 / mask
+            state_stats = {
+                "q01": state_norm.q01,
+                "q99": state_norm.q99,
+            }
+            if state_norm.mask is not None:
+                state_stats["mask"] = state_norm.mask
+
+        # action normalization data
+        action_norm = action_feature.normalization_data if action_feature else None
+        if action_norm:
+            # q01 / q99 / mask
+            action_stats = {
+                "q01": action_norm.q01,
+                "q99": action_norm.q99,
+            }
+            if action_norm.mask is not None:
+                action_stats["mask"] = action_norm.mask
+
+        # token ids
+        required_token_ids = {
+            "image_start_token_id": self.config.image_start_token_id,
+            "image_end_token_id": self.config.image_end_token_id,
+            "image_patch_id": self.config.image_patch_id,
+        }
+        missing_token_ids = [name for name, value in required_token_ids.items() if value is None]
+        if missing_token_ids:
+            msg = f"MolmoAct2 OpenVINO export requires token IDs: {', '.join(missing_token_ids)}"
+            raise ValueError(msg)
+
+        # tokenizer
+        tokenizer = self._preprocessor.tokenizer
+
         return {
             "torch": TorchExportParameters(
                 preprocessors_specs=[ComponentSpec(type="to_float_tensor")],

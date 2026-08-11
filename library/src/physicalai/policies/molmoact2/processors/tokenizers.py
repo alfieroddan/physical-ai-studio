@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import re
+from copy import copy
 from pathlib import Path
 from typing import Literal
 
@@ -15,6 +17,26 @@ import torch
 from transformers import Qwen2Tokenizer
 
 _TOKENIZER_JSON_FILENAME = "tokenizer.json"
+_OUTPUT_ONLY_TOKEN = re.compile(r"^<(?:action|extra)_\d+>$")
+
+
+# Note: This removes discrete action tokens which are only used in the model output,
+# in discrete mode. The OpenVINO tokenizer view is used for inference,
+# where the model does not generate discrete actions.
+def _drop_output_only_added_tokens(tokenizer: Qwen2Tokenizer) -> Qwen2Tokenizer:
+    """Return a conversion view without decoder-only action and extra tokens."""
+    kept_tokens = {
+        token_id: token
+        for token_id, token in tokenizer.added_tokens_decoder.items()
+        if not _OUTPUT_ONLY_TOKEN.match(token.content)
+    }
+    trimmed = copy(tokenizer)
+    trimmed.__class__ = type(
+        f"OpenVINO{type(tokenizer).__name__}",
+        (type(tokenizer),),
+        {"added_tokens_decoder": property(lambda _self: kept_tokens)},
+    )
+    return trimmed
 
 
 class MolmoAct2Tokenizers:
@@ -66,8 +88,7 @@ class MolmoAct2Tokenizers:
             raise FileNotFoundError(msg)
         return str(local_path)
 
-    @property
-    def tokenizer(self) -> Qwen2Tokenizer:
+    def _qwen_tokenizer(self) -> Qwen2Tokenizer:
         """Main text tokenizer loaded lazily.
 
         ``Qwen2Tokenizer.from_pretrained(..., local_files_only=True)`` is
@@ -88,6 +109,15 @@ class MolmoAct2Tokenizers:
             msg = "Failed to initialize MolmoAct2 text tokenizer."
             raise ValueError(msg)
         return self._tokenizer
+
+    @property
+    def tokenizer(self) -> Qwen2Tokenizer:
+        """Return the main text tokenizer.
+
+        Returns:
+            The ``Qwen2Tokenizer`` instance used for prompt tokenization.
+        """
+        return _drop_output_only_added_tokens(self._qwen_tokenizer())
 
     @staticmethod
     def _insert_bos(
