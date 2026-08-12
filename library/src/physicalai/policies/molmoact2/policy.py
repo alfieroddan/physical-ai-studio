@@ -114,11 +114,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
         *,
+        # molmo pretrained args
         repo_id: str | Path | None = None,
         norm_tag: str | None = None,
         adapt_to_so101: bool | None = None,
+        # model export / compilation args
         compile_model: bool | None = None,
         openvino_compress_to_fp16: bool | None = None,
+        # training config
         train_action_expert_only: bool | None = None,
         gradient_checkpointing: bool | None = None,
         use_lora: bool | None = None,
@@ -138,6 +141,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         scheduler_warmup_steps: int = 200,
         scheduler_decay_steps: int | None = 100_000,
         scheduler_decay_lr: float = 1e-6,
+        # other overrides
         load_weights: bool = True,
         action_mode: Literal["continuous"] = "continuous",
         **overrides: object,
@@ -199,6 +203,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
 
+        # useful policy overrides
         config_overrides = {
             "compile_model": compile_model,
             "openvino_compress_to_fp16": openvino_compress_to_fp16,
@@ -215,8 +220,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if action_mode is not None:
             overrides["action_mode"] = action_mode
 
-        self.hf_container = None
         # if pretrained repo_id exists find hf container
+        self.hf_container = None
         if repo_id is not None:
             self.hf_container = load_hf_pretrained_container(repo_id)
             if self.hf_container is None:
@@ -248,6 +253,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         super().__init__(n_action_steps=self.config.n_action_steps)
 
+        # training config
         self.optimizer_lr = optimizer_lr
         self.optimizer_vit_lr = optimizer_vit_lr
         self.optimizer_connector_lr = optimizer_connector_lr
