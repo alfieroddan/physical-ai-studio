@@ -109,7 +109,7 @@ def make_molmoact2_config(
 class MolmoAct2(ExportablePolicyMixin, Policy):
     """MolmoAct2 Policy."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
@@ -118,6 +118,26 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_tag: str | None = None,
         adapt_to_so101: bool | None = None,
         compile_model: bool | None = None,
+        openvino_compress_to_fp16: bool | None = None,
+        train_action_expert_only: bool | None = None,
+        gradient_checkpointing: bool | None = None,
+        use_lora: bool | None = None,
+        enable_lora_action_expert: bool | None = None,
+        lora_rank: int | None = None,
+        lora_alpha: int | None = None,
+        lora_dropout: float | None = None,
+        lora_bias: Literal["all", "lora_only", "none"] | None = None,
+        optimizer_lr: float = 1e-5,
+        optimizer_vit_lr: float = 5e-6,
+        optimizer_connector_lr: float = 5e-6,
+        optimizer_action_expert_lr: float = 5e-5,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-6,
+        optimizer_weight_decay: float = 0.0,
+        optimizer_grad_clip_norm: float = 1.0,
+        scheduler_warmup_steps: int = 200,
+        scheduler_decay_steps: int | None = 100_000,
+        scheduler_decay_lr: float = 1e-6,
         load_weights: bool = True,
         action_mode: Literal["continuous"] = "continuous",
         **overrides: object,
@@ -142,6 +162,27 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             compile_model: Explicit override for
                 :attr:`MolmoAct2Config.compile_model`; enables compiled model
                 forward and inference paths.
+            openvino_compress_to_fp16: Explicit override for OpenVINO export compression.
+            train_action_expert_only: Explicit action-expert fine-tuning override.
+            gradient_checkpointing: Explicit gradient-checkpointing override.
+            use_lora: Explicit LoRA enablement override.
+            enable_lora_action_expert: Whether LoRA also targets the action expert.
+            lora_rank: LoRA rank override.
+            lora_alpha: LoRA scaling override.
+            lora_dropout: LoRA dropout override.
+            lora_bias: LoRA bias-training mode override.
+            optimizer_lr: Learning rate for VLM parameters.
+            optimizer_vit_lr: Learning rate for vision parameters.
+            optimizer_connector_lr: Learning rate for connector parameters.
+            optimizer_action_expert_lr: Learning rate for action-expert parameters.
+            optimizer_betas: AdamW beta coefficients.
+            optimizer_eps: AdamW epsilon.
+            optimizer_weight_decay: AdamW weight decay.
+            optimizer_grad_clip_norm: Default gradient clipping norm.
+            scheduler_warmup_steps: Number of scheduler warmup steps.
+            scheduler_decay_steps: Number of scheduler decay steps, or the
+                full training length when ``None``.
+            scheduler_decay_lr: Final scheduler learning rate.
             load_weights: Whether to load base checkpoint weights after model
                 construction when a checkpoint source is available.
             action_mode: Action mode to use for the policy. Currently only "continuous" is supported.
@@ -158,8 +199,19 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
 
-        if compile_model is not None:
-            overrides["compile_model"] = compile_model
+        config_overrides = {
+            "compile_model": compile_model,
+            "openvino_compress_to_fp16": openvino_compress_to_fp16,
+            "train_action_expert_only": train_action_expert_only,
+            "gradient_checkpointing": gradient_checkpointing,
+            "use_lora": use_lora,
+            "enable_lora_action_expert": enable_lora_action_expert,
+            "lora_rank": lora_rank,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "lora_bias": lora_bias,
+        }
+        overrides.update({name: value for name, value in config_overrides.items() if value is not None})
         if action_mode is not None:
             overrides["action_mode"] = action_mode
 
@@ -195,6 +247,18 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             )
 
         super().__init__(n_action_steps=self.config.n_action_steps)
+
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_vit_lr = optimizer_vit_lr
+        self.optimizer_connector_lr = optimizer_connector_lr
+        self.optimizer_action_expert_lr = optimizer_action_expert_lr
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_weight_decay = optimizer_weight_decay
+        self.optimizer_grad_clip_norm = optimizer_grad_clip_norm
+        self.scheduler_warmup_steps = scheduler_warmup_steps
+        self.scheduler_decay_steps = scheduler_decay_steps
+        self.scheduler_decay_lr = scheduler_decay_lr
 
         self._checkpoint_location = self.hf_container.checkpoint_location if self.hf_container is not None else None
 
@@ -452,10 +516,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 grouped["vlm"].append(param)
 
         learning_rates = {
-            "vlm": self.config.optimizer_lr,
-            "vit": self.config.optimizer_vit_lr,
-            "connector": self.config.optimizer_connector_lr,
-            "action_expert": self.config.optimizer_action_expert_lr,
+            "vlm": self.optimizer_lr,
+            "vit": self.optimizer_vit_lr,
+            "connector": self.optimizer_connector_lr,
+            "action_expert": self.optimizer_action_expert_lr,
         }
         return [{"params": params, "lr": learning_rates[name]} for name, params in grouped.items() if params]
 
@@ -470,22 +534,22 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         optimizer = torch.optim.AdamW(
             self.get_optim_params(),
-            lr=self.config.optimizer_lr,
-            weight_decay=self.config.optimizer_weight_decay,
-            betas=self.config.optimizer_betas,
-            eps=self.config.optimizer_eps,
+            lr=self.optimizer_lr,
+            weight_decay=self.optimizer_weight_decay,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
         )
 
         num_training_steps = int(self.trainer.estimated_stepping_batches)
-        num_decay_steps = self.config.scheduler_decay_steps
+        num_decay_steps = self.scheduler_decay_steps
         if num_decay_steps is None:
             num_decay_steps = num_training_steps
 
         scheduler = cosine_decay_with_warmup_scheduler(
             optimizer,
-            peak_lr=self.config.optimizer_lr,
-            decay_lr=self.config.scheduler_decay_lr,
-            num_warmup_steps=self.config.scheduler_warmup_steps,
+            peak_lr=self.optimizer_lr,
+            decay_lr=self.scheduler_decay_lr,
+            num_warmup_steps=self.scheduler_warmup_steps,
             num_decay_steps=int(num_decay_steps),
             num_training_steps=num_training_steps,
         )
@@ -502,7 +566,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     ) -> None:
         """Clip gradients using the norm configured on the policy."""
         del gradient_clip_algorithm
-        clip_val = gradient_clip_val if gradient_clip_val is not None else self.config.optimizer_grad_clip_norm
+        clip_val = gradient_clip_val if gradient_clip_val is not None else self.optimizer_grad_clip_norm
         if clip_val and clip_val > 0:
             self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
 

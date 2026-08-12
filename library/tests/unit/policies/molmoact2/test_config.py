@@ -114,15 +114,25 @@ class TestMolmoAct2Config:
         assert isinstance(config, Config)
 
     def test_serialization_round_trip(self) -> None:
-        config = MolmoAct2Config(chunk_size=12, n_action_steps=6, optimizer_lr=1e-4, max_action_dim=8)
+        config = MolmoAct2Config(
+            chunk_size=12,
+            n_action_steps=6,
+            max_action_dim=8,
+            compile_model=True,
+            openvino_compress_to_fp16=True,
+        )
         data = config.to_dict()
         assert data["chunk_size"] == 12
-        assert data["optimizer_lr"] == 1e-4
+        assert data["compile_model"] is True
+        assert data["openvino_compress_to_fp16"] is True
+        assert "optimizer_lr" not in data
+        assert "scheduler_warmup_steps" not in data
         restored = MolmoAct2Config.from_dict(data)
         assert restored.chunk_size == 12
         assert restored.n_action_steps == 6
         assert restored.max_action_dim == 8
-        assert restored.optimizer_lr == 1e-4
+        assert restored.compile_model is True
+        assert restored.openvino_compress_to_fp16 is True
 
     def test_serializer_carries_tokenizer_config(self) -> None:
         tok_cfg = {"bos_token": "<|im_end|>", "pad_token": ""}
@@ -216,14 +226,6 @@ class TestMolmoAct2Config:
     def test_flow_matching_beta_beta_validation(self) -> None:
         with pytest.raises(ValueError, match="flow_matching_beta_beta"):
             MolmoAct2Config(flow_matching_beta_beta=-1.0)
-
-    def test_optimizer_lr_validation(self) -> None:
-        with pytest.raises(ValueError, match="optimizer_lr"):
-            MolmoAct2Config(optimizer_lr=0.0)
-
-    def test_scheduler_warmup_validation(self) -> None:
-        with pytest.raises(ValueError, match="scheduler_warmup_steps"):
-            MolmoAct2Config(scheduler_warmup_steps=-1)
 
     def test_text_fields_are_flat(self) -> None:
         config = MolmoAct2Config(hidden_size=128, num_attention_heads=4, num_hidden_layers=2)

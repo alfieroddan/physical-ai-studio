@@ -59,11 +59,15 @@ class TestMolmoact2Policy:
             n_action_steps=2,
             chunk_size=8,
             use_random_input_noise=True,
+            optimizer_lr=2e-5,
+            scheduler_warmup_steps=10,
         )
         assert policy.hparams["n_obs_steps"] == 4
         assert policy.hparams["n_action_steps"] == 2
         assert policy.hparams["chunk_size"] == 8
         assert policy.hparams["use_random_input_noise"] is True
+        assert policy.hparams["optimizer_lr"] == 2e-5
+        assert policy.hparams["scheduler_warmup_steps"] == 10
         assert "repo_id" in policy.hparams
 
     def test_save_hyperparameters_ignores_config_and_load_weights(self) -> None:
@@ -87,6 +91,36 @@ class TestMolmoact2Policy:
         assert policy.config.use_random_input_noise is True
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
+
+    def test_training_options_are_policy_owned(self) -> None:
+        policy = MolmoAct2(
+            repo_id=None,
+            optimizer_lr=2e-5,
+            optimizer_vit_lr=3e-5,
+            scheduler_decay_steps=123,
+        )
+
+        assert policy.optimizer_lr == 2e-5
+        assert policy.optimizer_vit_lr == 3e-5
+        assert policy.scheduler_decay_steps == 123
+        assert not hasattr(policy.config, "optimizer_lr")
+        assert not hasattr(policy.config, "scheduler_decay_steps")
+
+    def test_explicit_config_arguments_override_defaults(self) -> None:
+        policy = MolmoAct2(
+            repo_id=None,
+            compile_model=True,
+            openvino_compress_to_fp16=True,
+            gradient_checkpointing=True,
+            train_action_expert_only=True,
+        )
+
+        assert policy.config.compile_model is True
+        assert policy.config.openvino_compress_to_fp16 is True
+        assert policy.config.gradient_checkpointing is True
+        assert policy.config.train_action_expert_only is True
+        assert "compile_model" not in policy.hparams
+        assert policy.hparams["openvino_compress_to_fp16"] is True
 
     def test_resolves_tokenizer_assets_lazily(self, tmp_path: Path, monkeypatch) -> None:
         policy = MolmoAct2(repo_id=None)
@@ -193,4 +227,3 @@ class TestMolmoact2ExportArgs:
         assert [spec.type for spec in specs] == ["molmoact2", "ov_tokenizer", "molmoact2_inputs"]
         assert specs[1].flat_params["artifact"] == "tokenizer.xml"
         assert openvino_args.compress_to_fp16 is compress_to_fp16
-

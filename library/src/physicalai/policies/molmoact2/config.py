@@ -60,8 +60,6 @@ class MolmoAct2Config(Config):
         Preprocessor fields: ``num_state_tokens`` through
             ``normalization_mode`` define tokenization, image processing, and
             observation/action normalization.
-        Training fields: ``optimizer_lr`` through ``scheduler_decay_lr``
-            define optimizer and learning-rate schedule settings.
         Rollout and flow-matching fields: ``n_obs_steps``, ``chunk_size``,
             ``n_action_steps``, and ``flow_matching_*`` control action chunk
             generation and training targets.
@@ -165,19 +163,6 @@ class MolmoAct2Config(Config):
     # Export
     openvino_compress_to_fp16: bool = False
 
-    # Training
-    optimizer_lr: float = 1e-5
-    optimizer_vit_lr: float = 5e-6
-    optimizer_connector_lr: float = 5e-6
-    optimizer_action_expert_lr: float = 5e-5
-    optimizer_betas: tuple[float, float] = (0.9, 0.95)
-    optimizer_eps: float = 1e-6
-    optimizer_weight_decay: float = 0.0
-    optimizer_grad_clip_norm: float = 1.0
-    scheduler_warmup_steps: int = 200
-    scheduler_decay_steps: int | None = 100_000
-    scheduler_decay_lr: float = 1e-6
-
     # Input and rollout structure
     n_obs_steps: int = 1
     chunk_size: int = 30
@@ -266,7 +251,7 @@ class MolmoAct2Config(Config):
         """Validate configuration parameters after initialization."""
         self._validate_rollout_settings()
         self._validate_flow_matching_params()
-        self._validate_text_and_training_settings()
+        self._validate_text_settings()
         self._sync_action_expert_settings()
 
     @property
@@ -338,7 +323,7 @@ class MolmoAct2Config(Config):
             msg = f"flow_matching_beta_beta must be > 0.0, got {self.flow_matching_beta_beta}"
             raise ValueError(msg)
 
-    def _validate_text_and_training_settings(self) -> None:
+    def _validate_text_settings(self) -> None:
         if self.tokenizer_padding not in {"max_length", "longest"}:
             msg = f"tokenizer_padding must be one of 'max_length' or 'longest', got {self.tokenizer_padding!r}."
             raise ValueError(msg)
@@ -353,26 +338,6 @@ class MolmoAct2Config(Config):
         if self.num_state_tokens < 0:
             msg = f"num_state_tokens must be >= 0, got {self.num_state_tokens}"
             raise ValueError(msg)
-        if self.scheduler_warmup_steps < 0:
-            msg = f"scheduler_warmup_steps must be >= 0, got {self.scheduler_warmup_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_steps is not None and self.scheduler_decay_steps < 1:
-            msg = f"scheduler_decay_steps must be >= 1 or None, got {self.scheduler_decay_steps}"
-            raise ValueError(msg)
-        if self.scheduler_decay_lr < 0.0:
-            msg = f"scheduler_decay_lr must be >= 0.0, got {self.scheduler_decay_lr}"
-            raise ValueError(msg)
-        for field_name in (
-            "optimizer_lr",
-            "optimizer_vit_lr",
-            "optimizer_connector_lr",
-            "optimizer_action_expert_lr",
-            "optimizer_eps",
-        ):
-            value = getattr(self, field_name)
-            if value <= 0.0:
-                msg = f"{field_name} must be > 0.0, got {value}"
-                raise ValueError(msg)
 
     def _sync_action_expert_settings(self) -> None:
         self.action_expert_num_layers = int(self.num_hidden_layers)
