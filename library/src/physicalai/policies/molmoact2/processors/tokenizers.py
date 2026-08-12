@@ -105,7 +105,7 @@ class MolmoAct2Tokenizers:
         if self._tokenizer is not None:
             return self._tokenizer
 
-        self._tokenizer = Qwen2Tokenizer.from_pretrained(
+        self._tokenizer = Qwen2Tokenizer.from_pretrained(  # nosec: B615
             self._tokenizer_dir,
             local_files_only=True,
             **self.tokenizer_config,
