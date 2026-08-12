@@ -167,7 +167,7 @@ if __name__ == "__main__":
     print(f"\nSaved CSV results to: {RESULTS_CSV}")
 ```
 
-Results:
+Results on NVIDIA A100 (FP16):
 
 | Suite          |  Tasks | Avg. Success Rate (%) | Avg. Reward | Avg. Episode Length |  Avg. FPS |
 | -------------- | -----: | --------------------: | ----------: | ------------------: | --------: |
@@ -176,6 +176,16 @@ Results:
 | libero_goal    |     10 |                  90.0 |        0.90 |               134.2 |     11.51 |
 | libero_10      |     10 |                 100.0 |        1.00 |               241.4 |     12.61 |
 | **Average**    | **40** |              **97.5** |    **0.98** |           **153.7** | **11.63** |
+
+Results on OpenVINO GPU (FP16):
+
+| Suite          |  Tasks | Avg. Success Rate (%) | Avg. Reward | Avg. Episode Length | Avg. FPS |
+| -------------- | -----: | --------------------: | ----------: | ------------------: | -------: |
+| libero_spatial |     10 |                 100.0 |        1.00 |               122.0 |     14.6 |
+| libero_object  |     10 |                 100.0 |        1.00 |               145.3 |     16.2 |
+| libero_goal    |     10 |                  80.0 |        0.80 |               159.5 |     16.1 |
+| libero_10      |     10 |                  80.0 |        0.80 |               300.2 |     16.7 |
+| **Average**    | **40** |              **90.0** |    **0.90** |           **181.8** | **15.9** |
 
 ## Zero Shot SO-101
 
