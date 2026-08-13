@@ -368,6 +368,37 @@ class TestActionExpert:
 
 
 class TestMolmoAct2Backbone:
+    @staticmethod
+    def _predict_flow_velocity_with_full_context(
+        backbone: MolmoAct2Backbone,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        actions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        action_expert = backbone._require_action_expert()
+        dtype = action_expert.action_embed.weight.dtype
+        actions = backbone._mask_action_dims(actions.to(dtype), action_dim_is_pad=None)
+        batch_size, horizon, action_dim = actions.shape
+        num_flow_timesteps = max(1, int(backbone.num_flow_timesteps))
+        x_t, timesteps, target = backbone._flow_interpolation(actions, None, dtype)
+        context = backbone._encode_action_context(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=None,
+            images=None,
+            token_pooling=None,
+            seq_len=horizon,
+            device=actions.device,
+            dtype=dtype,
+        )
+        context = action_expert.expand_context_for_flow_timesteps(context, num_flow_timesteps)
+        predicted = action_expert.forward_with_context(x_t, timesteps, context=context)
+        return (
+            predicted.view(batch_size, num_flow_timesteps, horizon, action_dim),
+            target.view(batch_size, num_flow_timesteps, horizon, action_dim),
+        )
+
     def test_constructs_with_tiny_config(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
@@ -413,6 +444,63 @@ class TestMolmoAct2Backbone:
 
         assert predicted.dtype == torch.bfloat16
         assert target.dtype == torch.bfloat16
+
+    @pytest.mark.parametrize("num_flow_timesteps", [1, 8])
+    def test_streamed_flow_matches_full_context(
+        self,
+        tiny_molmoact2_config: MolmoAct2Config,
+        num_flow_timesteps: int,
+    ) -> None:
+        tiny_molmoact2_config.num_flow_timesteps = num_flow_timesteps
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config)
+        input_ids = torch.zeros(2, 3, dtype=torch.long)
+        attention_mask = torch.ones(2, 3, dtype=torch.bool)
+        actions = torch.randn(2, tiny_molmoact2_config.chunk_size, tiny_molmoact2_config.max_action_dim)
+
+        torch.manual_seed(7)
+        expected, expected_target = self._predict_flow_velocity_with_full_context(
+            backbone,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            actions=actions,
+        )
+        torch.manual_seed(7)
+        actual, actual_target = backbone.predict_flow_velocity(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=None,
+            images=None,
+            token_pooling=None,
+            actions=actions,
+            action_dim_is_pad=None,
+            freeze_encoder=False,
+        )
+
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(actual_target, expected_target)
+
+    def test_streamed_flow_does_not_expand_full_context(
+        self,
+        tiny_molmoact2_config: MolmoAct2Config,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        backbone = make_molmoact2_backbone(tiny_molmoact2_config)
+        action_expert = backbone._require_action_expert()
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> None:
+            pytest.fail("streamed flow training must not expand an all-layer context")
+
+        monkeypatch.setattr(action_expert, "expand_context_for_flow_timesteps", fail_if_called)
+        backbone.predict_flow_velocity(
+            input_ids=torch.zeros(1, 2, dtype=torch.long),
+            attention_mask=torch.ones(1, 2, dtype=torch.bool),
+            token_type_ids=None,
+            images=None,
+            token_pooling=None,
+            actions=torch.randn(1, tiny_molmoact2_config.chunk_size, tiny_molmoact2_config.max_action_dim),
+            action_dim_is_pad=None,
+            freeze_encoder=False,
+        )
 
     def test_no_action_expert_when_disabled(
         self, tiny_molmoact2_config: MolmoAct2Config

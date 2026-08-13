@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 import torch.nn.functional as F  # noqa: N812
@@ -433,7 +433,7 @@ class ActionExpert(nn.Module):
         ])
         self.final_layer = ActionExpertFinalLayer(hidden_size, max_action_dim)
 
-    def _time_conditioning(self, timesteps: torch.Tensor) -> torch.Tensor:
+    def time_conditioning(self, timesteps: torch.Tensor) -> torch.Tensor:
         """Embed timesteps into the modulation conditioning vector.
 
         Returns:
@@ -452,6 +452,54 @@ class ActionExpert(nn.Module):
         """
         flat = self.context_norm(proj(x))
         return flat.view(flat.shape[0], flat.shape[1], self.num_heads, self.action_head_dim)
+
+    def project_kv_context(
+        self,
+        block: ActionExpertBlock,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+    ) -> KVContext:
+        """Project one text layer's KV states for its matching action block.
+
+        Returns:
+            Projected key and value tensors in the action-head layout.
+        """
+        key_context = self._project_kv(key_states, self.context_k_proj)
+        value_context = self._project_kv(value_states, self.context_v_proj)
+        if block.cross_attn.k_norm is not None:
+            key_context = block.cross_attn.k_norm(key_context.transpose(1, 2)).transpose(1, 2)
+        return key_context, value_context
+
+    def prepare_context_metadata(
+        self,
+        *,
+        encoder_attention_mask: torch.Tensor | None,
+        seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, tuple[torch.Tensor, torch.Tensor] | None]:
+        """Build the masks and rotary cache shared by all action-expert layers.
+
+        Returns:
+            Cross-attention mask, self-attention mask, and rotary cache.
+        """
+        cross_mask = None
+        if encoder_attention_mask is not None:
+            valid = encoder_attention_mask[:, None, None, :].to(dtype=dtype)
+            cross_mask = (1.0 - valid) * torch.finfo(dtype).min
+
+        self_mask = None
+        if self.causal_attn:
+            causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).triu(1)
+            self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
+
+        rope_cache = None
+        if len(self.blocks) > 0:
+            first_block = cast("ActionExpertBlock", self.blocks[0])
+            rope = first_block.self_attn.rope
+            if rope is not None:
+                rope_cache = rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)
+        return cross_mask, self_mask, rope_cache
 
     @staticmethod
     def expand_context_for_flow_timesteps(
@@ -518,27 +566,13 @@ class ActionExpert(nn.Module):
         """
         kv_contexts: list[KVContext] = []
         for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states, strict=False):
-            k_ctx = self._project_kv(k_in, self.context_k_proj)
-            v_ctx = self._project_kv(v_in, self.context_v_proj)
-            if block.cross_attn.k_norm is not None:  # pyright: ignore[reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute]
-                k_ctx = (
-                    block.cross_attn.k_norm(k_ctx.transpose(1, 2)).transpose(1, 2)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]  # pyrefly: ignore[not-callable, missing-attribute]
-                )
-            kv_contexts.append((k_ctx, v_ctx))
-
-        cross_mask = None
-        if encoder_attention_mask is not None:
-            valid = encoder_attention_mask[:, None, None, :].to(dtype=dtype)
-            cross_mask = (1.0 - valid) * torch.finfo(dtype).min
-
-        self_mask = None
-        if self.causal_attn:
-            causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).triu(1)
-            self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
-
-        rope_cache = None
-        if self.blocks and self.blocks[0].self_attn.rope is not None:  # pyright: ignore[reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute, not-callable]
-            rope_cache = self.blocks[0].self_attn.rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)  # pyright: ignore[reportCallIssue, reportAttributeAccessIssue]  # pyrefly: ignore[missing-attribute]
+            kv_contexts.append(self.project_kv_context(cast("ActionExpertBlock", block), k_in, v_in))
+        cross_mask, self_mask, rope_cache = self.prepare_context_metadata(
+            encoder_attention_mask=encoder_attention_mask,
+            seq_len=seq_len,
+            device=device,
+            dtype=dtype,
+        )
 
         return ActionExpertContext(
             kv_contexts=kv_contexts,
@@ -560,7 +594,7 @@ class ActionExpert(nn.Module):
         Returns:
             Flow velocity for one de-noising step.
         """
-        conditioning = self._time_conditioning(timesteps)
+        conditioning = self.time_conditioning(timesteps)
         x = self.action_embed(actions)
         use_gradient_checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block, kv_context in zip(self.blocks, context.kv_contexts, strict=False):

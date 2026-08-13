@@ -14,13 +14,13 @@ keys are ``model.transformer.*``, ``model.vision_backbone.*``,
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
 from torch.distributions import Beta
 
-from .action_expert import ActionExpert, ActionExpertContext
+from .action_expert import ActionExpert, ActionExpertBlock, ActionExpertContext
 from .text import KVState, MolmoAct2TextModel
 from .vision import MolmoAct2VisionBackbone
 
@@ -351,6 +351,102 @@ class MolmoAct2Backbone(nn.Module):
         x_t = (1.0 - t) * noise + t * actions_expanded
         return x_t, timesteps, actions_expanded - noise
 
+    def _predict_flow_velocity_per_layer(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        token_type_ids: torch.Tensor | None,
+        images: torch.Tensor | None,
+        token_pooling: torch.Tensor | None,
+        x_t: torch.Tensor,
+        timesteps: torch.Tensor,
+        action_horizon: int,
+        num_flow_timesteps: int,
+        freeze_encoder: bool,
+    ) -> torch.Tensor:
+        """Stream each text layer's KV directly through its matching action block.
+
+        Returns:
+            Predicted flow velocity for the flattened flow-timestep batch.
+        """
+        action_expert = self._require_action_expert()
+        dtype = action_expert.action_embed.weight.dtype
+        with torch.no_grad() if freeze_encoder else nullcontext():
+            hidden_states = self.build_input_embeddings(input_ids, images, token_pooling)
+            attention_bias = self._build_attention_bias(hidden_states, attention_mask, token_type_ids)
+            position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+            position_embeddings = self.transformer.rotary_emb(hidden_states, position_ids)
+
+        encoder_mask = self._encoder_attention_mask(input_ids, attention_mask)
+        cross_mask, self_mask, rope_cache = action_expert.prepare_context_metadata(
+            encoder_attention_mask=encoder_mask,
+            seq_len=action_horizon,
+            device=x_t.device,
+            dtype=dtype,
+        )
+        if cross_mask is not None and num_flow_timesteps != 1:
+            cross_mask = cross_mask.repeat_interleave(num_flow_timesteps, dim=0)
+
+        conditioning = action_expert.time_conditioning(timesteps)
+        action_hidden = action_expert.action_embed(x_t)
+        use_gradient_checkpointing = (
+            self.transformer.gradient_checkpointing
+            and action_expert.gradient_checkpointing
+            and self.training
+            and torch.is_grad_enabled()
+        )
+
+        def run_layer(
+            layer_idx: int,
+            layer_hidden: torch.Tensor,
+            layer_action_hidden: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            decoder_block = self.transformer.blocks[layer_idx]
+            action_block = cast("ActionExpertBlock", action_expert.blocks[layer_idx])
+            with torch.no_grad() if freeze_encoder else nullcontext():
+                next_hidden, (key_states, value_states) = decoder_block(
+                    layer_hidden,
+                    position_embeddings,
+                    attention_bias,
+                )
+            key_sequence = self._kv_to_sequence(key_states)
+            value_sequence = self._kv_to_sequence(value_states)
+            key_context, value_context = action_expert.project_kv_context(
+                action_block,
+                key_sequence,
+                value_sequence,
+            )
+            if num_flow_timesteps != 1:
+                key_context = key_context.repeat_interleave(num_flow_timesteps, dim=0)
+                value_context = value_context.repeat_interleave(num_flow_timesteps, dim=0)
+            next_action_hidden = action_block(
+                layer_action_hidden,
+                conditioning,
+                cross_kv=(key_context, value_context),
+                self_attn_mask=self_mask,
+                cross_attn_mask=cross_mask,
+                is_causal=action_expert.causal_attn,
+                rope_cache=rope_cache,
+            )
+            return next_hidden, next_action_hidden
+
+        for layer_idx in range(len(self.transformer.blocks)):
+            if use_gradient_checkpointing:
+                hidden_states, action_hidden = torch.utils.checkpoint.checkpoint(  # pyrefly: ignore[not-iterable]
+                    lambda layer_hidden, layer_action_hidden, idx=layer_idx: run_layer(
+                        idx,
+                        layer_hidden,
+                        layer_action_hidden,
+                    ),
+                    hidden_states,
+                    action_hidden,
+                    use_reentrant=False,
+                )
+            else:
+                hidden_states, action_hidden = run_layer(layer_idx, hidden_states, action_hidden)
+        return action_expert.final_layer(action_hidden, conditioning)
+
     def predict_flow_velocity(
         self,
         *,
@@ -385,19 +481,18 @@ class MolmoAct2Backbone(nn.Module):
         batch_size, horizon, action_dim = actions.shape
         num_flow_timesteps = max(1, int(self.num_flow_timesteps))
         x_t, timesteps, target_velocity = self._flow_interpolation(actions, action_dim_is_pad, dtype)
-        context = self._encode_action_context(
+        predicted_velocity = self._predict_flow_velocity_per_layer(
             input_ids=input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             images=images,
             token_pooling=token_pooling,
-            seq_len=horizon,
-            device=actions.device,
-            dtype=dtype,
+            x_t=x_t,
+            timesteps=timesteps,
+            action_horizon=horizon,
+            num_flow_timesteps=num_flow_timesteps,
             freeze_encoder=freeze_encoder,
         )
-        context = action_expert.expand_context_for_flow_timesteps(context, num_flow_timesteps)
-        predicted_velocity = action_expert.forward_with_context(x_t, timesteps, context=context)
         predicted_velocity = predicted_velocity.view(batch_size, num_flow_timesteps, horizon, action_dim)
         target_velocity = target_velocity.view(batch_size, num_flow_timesteps, horizon, action_dim)
         return predicted_velocity, target_velocity
