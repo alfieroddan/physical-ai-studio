@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 
 from physicalai.config import Config
@@ -119,6 +121,7 @@ class TestMolmoAct2Config:
             n_action_steps=6,
             max_action_dim=8,
             compile_model=True,
+            model_dtype="float32",
             openvino_compress_to_fp16=True,
         )
         data = config.to_dict()
@@ -133,6 +136,15 @@ class TestMolmoAct2Config:
         assert restored.max_action_dim == 8
         assert restored.compile_model is True
         assert restored.openvino_compress_to_fp16 is True
+
+    def test_openvino_fp16_compression_warns_for_non_fp32_model(self) -> None:
+        with pytest.warns(UserWarning, match="only converts FP32 constants"):
+            MolmoAct2Config(openvino_compress_to_fp16=True)
+
+    def test_openvino_fp16_compression_accepts_fp32_model(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            MolmoAct2Config(model_dtype="float32", openvino_compress_to_fp16=True)
 
     def test_serializer_carries_tokenizer_config(self) -> None:
         tok_cfg = {"bos_token": "<|im_end|>", "pad_token": ""}

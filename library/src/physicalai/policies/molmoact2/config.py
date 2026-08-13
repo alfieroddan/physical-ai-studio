@@ -18,6 +18,7 @@ Example (API):
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -251,6 +252,7 @@ class MolmoAct2Config(Config):
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
         self._validate_rollout_settings()
+        self._validate_export_settings()
         self._validate_flow_matching_params()
         self._validate_text_settings()
         self._sync_action_expert_settings()
@@ -303,6 +305,15 @@ class MolmoAct2Config(Config):
         if self.lora_bias not in {"none", "all", "lora_only"}:
             msg = f"MolmoAct2 lora_bias must be one of 'none', 'all', 'lora_only', got {self.lora_bias!r}."
             raise ValueError(msg)
+
+    def _validate_export_settings(self) -> None:
+        if self.openvino_compress_to_fp16 and self.model_dtype != "float32":
+            warnings.warn(
+                "OpenVINO FP16 compression only converts FP32 constants; "
+                "set model_dtype='float32' to produce an FP16 OpenVINO model.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _validate_flow_matching_params(self) -> None:
         if self.flow_matching_num_steps < 1:
