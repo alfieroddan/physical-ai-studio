@@ -229,6 +229,7 @@ class MolmoAct2Config(Config):
 
     # Runtime options
     compile_model: bool = False
+    model_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
 
     # Fine-tuning controls
     train_action_expert_only: bool = False
@@ -289,6 +290,12 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
         if self.enable_lora_action_expert and not self.use_lora:
             msg = "MolmoAct2 enable_lora_action_expert requires use_lora=True."
+            raise ValueError(msg)
+        if self.model_dtype not in {"float32", "bfloat16", "float16"}:
+            msg = (
+                f"Unsupported model_dtype={self.model_dtype!r}. "
+                "Expected 'float32', 'bfloat16', or 'float16'."
+            )
             raise ValueError(msg)
         if self.lora_rank < 1:
             msg = f"MolmoAct2 lora_rank must be >= 1, got {self.lora_rank}."

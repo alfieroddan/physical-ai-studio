@@ -211,6 +211,12 @@ class MolmoAct2Model(Model):
             hidden_size=config.hidden_size,
             vocab_size=config.vocab_size,
         )
+        model_dtype = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }[config.model_dtype]
+        self.backbone.to(dtype=model_dtype)
 
         if config.gradient_checkpointing:
             self.gradient_checkpointing_enable()

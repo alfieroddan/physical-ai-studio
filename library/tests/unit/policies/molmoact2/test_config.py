@@ -174,6 +174,7 @@ class TestMolmoAct2Config:
 
     def test_use_lora_defaults_off_and_train_action_expert_only_defaults_false(self) -> None:
         config = MolmoAct2Config()
+        assert config.model_dtype == "bfloat16"
         assert config.use_lora is False
         assert config.enable_lora_action_expert is False
         assert config.train_action_expert_only is False
@@ -181,6 +182,10 @@ class TestMolmoAct2Config:
         assert config.lora_alpha == 16
         assert config.lora_dropout == 0.05
         assert config.lora_bias == "none"
+
+    def test_model_dtype_must_be_supported(self) -> None:
+        with pytest.raises(ValueError, match="Unsupported model_dtype"):
+            MolmoAct2Config(model_dtype="float64")  # type: ignore[arg-type]
 
     def test_use_lora_incompatible_with_train_action_expert_only(self) -> None:
         with pytest.raises(ValueError, match="use_lora is incompatible with train_action_expert_only"):

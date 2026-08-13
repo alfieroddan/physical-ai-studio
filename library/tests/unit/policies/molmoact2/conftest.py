@@ -65,6 +65,7 @@ def tiny_molmoact2_config(mock_hf_repo: Path) -> MolmoAct2Config:
         image_placeholder_token_id=MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
         tokenizer_name_or_path=str(mock_hf_repo),
         tokenizer_config=tokenizer_config,
+        model_dtype="float32",
     )
 
 

@@ -121,6 +121,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # model export / compilation args
         compile_model: bool | None = None,
         openvino_compress_to_fp16: bool | None = None,
+        model_dtype: Literal["float32", "bfloat16", "float16"] | None = None,
         # training config
         train_action_expert_only: bool | None = None,
         gradient_checkpointing: bool | None = None,
@@ -167,6 +168,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 :attr:`MolmoAct2Config.compile_model`; enables compiled model
                 forward and inference paths.
             openvino_compress_to_fp16: Explicit override for OpenVINO export compression.
+            model_dtype: Storage and forward dtype for model parameters.
             train_action_expert_only: Explicit action-expert fine-tuning override.
             gradient_checkpointing: Explicit gradient-checkpointing override.
             use_lora: Explicit LoRA enablement override.
@@ -207,6 +209,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         config_overrides = {
             "compile_model": compile_model,
             "openvino_compress_to_fp16": openvino_compress_to_fp16,
+            "model_dtype": model_dtype,
             "train_action_expert_only": train_action_expert_only,
             "gradient_checkpointing": gradient_checkpointing,
             "use_lora": use_lora,

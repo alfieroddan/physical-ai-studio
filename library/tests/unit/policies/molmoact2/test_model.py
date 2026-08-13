@@ -533,6 +533,11 @@ class TestMolmoAct2LoRA:
         config.train_action_expert_only = False
         return MolmoAct2Model(config)
 
+    def test_model_uses_configured_dtype(self, tiny_molmoact2_config: MolmoAct2Config) -> None:
+        tiny_molmoact2_config.model_dtype = "bfloat16"
+        model = self._make_model(tiny_molmoact2_config)
+        assert {parameter.dtype for parameter in model.parameters()} == {torch.bfloat16}
+
     def test_apply_lora_wraps_backbone(
         self, tiny_molmoact2_config: MolmoAct2Config
     ) -> None:
