@@ -51,7 +51,7 @@ from gymnasium import spaces
 
 from physicalai.data.observation import Observation
 from physicalai.gyms.base import Gym
-from physicalai.gyms.gymnasium_gym import validate_camera_name_mapping
+from physicalai.gyms.utils import validate_camera_name_mapping
 
 __all__ = [
     "ACTION_DIM",
