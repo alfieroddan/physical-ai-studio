@@ -7,6 +7,7 @@
 
 import dataclasses
 import logging
+import warnings
 from pathlib import Path
 from typing import IO, Any, Literal
 
@@ -291,8 +292,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._postprocessor: MolmoAct2Postprocessor | None = None
         self._load_weights = load_weights
 
-        # eagerly load
-        if (input_features and output_features) or (repo_id and norm_tag):
+        # Eagerly initialize when config resolution produced a complete schema.
+        if self.config.input_features and self.config.output_features:
             self._initialize_model()
 
     @classmethod
@@ -374,28 +375,47 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         Raises:
             TypeError: If the attached train dataset is not a physicalai Dataset.
+            ValueError: If the training dataset features do not match the initialized feature contract.
         """
         del stage
+        datamodule = self.trainer.datamodule  # type: ignore[attr-defined]
+        train_dataset = datamodule.train_dataset
+        if not isinstance(train_dataset, Dataset):
+            msg = f"Expected physicalai Dataset, got {type(train_dataset)}"
+            raise TypeError(msg)
+
+        dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
+
         if self.model is not None:
+            if (
+                self.config.input_features != dataset_input_features
+                or self.config.output_features != dataset_output_features
+            ):
+                msg = "Training dataset features do not match the initialized MolmoAct2 feature contract."
+                raise ValueError(msg)
             return
 
-        if not self.config.input_features or not self.config.output_features:
-            datamodule = self.trainer.datamodule  # type: ignore[attr-defined]
-            train_dataset = datamodule.train_dataset
-            if not isinstance(train_dataset, Dataset):
-                msg = f"Expected physicalai Dataset, got {type(train_dataset)}"
-                raise TypeError(msg)
+        if self.config.input_features != dataset_input_features:
+            if self.config.input_features is not None:
+                warnings.warn(
+                    "Configured input features do not match the training dataset; using the dataset features.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self.config.input_features = dataset_input_features
+            self.hparams["input_features"] = dataset_input_features
 
-            dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
-            if not self.config.input_features:
-                self.config.input_features = dataset_input_features
-                self.hparams["input_features"] = self.config.input_features
-            if not self.config.output_features:
-                self.config.output_features = dataset_output_features
-                self.hparams["output_features"] = self.config.output_features
+        if self.config.output_features != dataset_output_features:
+            if self.config.output_features is not None:
+                warnings.warn(
+                    "Configured output features do not match the training dataset; using the dataset features.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            self.config.output_features = dataset_output_features
+            self.hparams["output_features"] = dataset_output_features
 
-        if self.model is None:
-            self._initialize_model()
+        self._initialize_model()
 
     def _backbone(self) -> torch.nn.Module:
         if self.model is None:
