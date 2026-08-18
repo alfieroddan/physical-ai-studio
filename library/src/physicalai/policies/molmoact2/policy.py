@@ -5,7 +5,6 @@
 
 """MolmoAct2 policy implementation."""
 
-import dataclasses
 import logging
 import warnings
 from pathlib import Path
@@ -69,42 +68,58 @@ def _normalization_stats(feature: Feature | None) -> _NormalizationStats:
     return stats
 
 
-def make_molmoact2_config(
+def make_molmoact2_config(  # noqa: PLR0913
     *,
     input_features: list[Feature] | None,
     output_features: list[Feature] | None,
-    **overrides: object,
+    norm_tag: str | None = None,
+    n_obs_steps: int | None = None,
+    chunk_size: int | None = None,
+    n_action_steps: int | None = None,
+    use_random_input_noise: bool | None = None,
+    setup_type: str | None = None,
+    control_mode: str | None = None,
+    compile_model: bool | None = None,
+    openvino_compress_to_fp16: bool | None = None,
+    model_dtype: Literal["float32", "bfloat16", "float16"] | None = None,
+    train_action_expert_only: bool | None = None,
+    gradient_checkpointing: bool | None = None,
+    use_lora: bool | None = None,
+    enable_lora_action_expert: bool | None = None,
+    lora_rank: int | None = None,
+    lora_alpha: int | None = None,
+    lora_dropout: float | None = None,
+    lora_bias: Literal["all", "lora_only", "none"] | None = None,
+    action_mode: Literal["continuous"] = "continuous",
 ) -> MolmoAct2Config:
-    """Create a flat config from defaults and explicit overrides.
-
-    Args:
-        input_features: Optional observation schema. Populated lazily from the
-            training dataset when omitted.
-        output_features: Optional action schema. Populated lazily from the
-            training dataset when omitted.
-        **overrides: Named :class:`MolmoAct2Config` values. ``None`` values do
-            not override the dataclass defaults.
+    """Create a MolmoAct2 config from explicit policy arguments.
 
     Returns:
-        The resolved flat :class:`MolmoAct2Config`.
-
-    Raises:
-        TypeError: If an override is not a config field.
+        A :class:`MolmoAct2Config` with the supplied arguments applied.
     """
-    valid_fields = {field.name for field in dataclasses.fields(MolmoAct2Config)}
-    unknown = set(overrides) - valid_fields
-    if unknown:
-        msg = f"Unknown MolmoAct2 override(s): {sorted(unknown)}"
-        raise TypeError(msg)
-    config = MolmoAct2Config(
+    return MolmoAct2Config(
         input_features=input_features,
         output_features=output_features,
+        norm_tag=norm_tag,
+        n_obs_steps=n_obs_steps if n_obs_steps is not None else 1,
+        chunk_size=chunk_size if chunk_size is not None else 30,
+        n_action_steps=n_action_steps if n_action_steps is not None else 30,
+        use_random_input_noise=use_random_input_noise if use_random_input_noise is not None else False,
+        setup_type=setup_type if setup_type is not None else "",
+        control_mode=control_mode if control_mode is not None else "",
+        compile_model=compile_model if compile_model is not None else False,
+        openvino_compress_to_fp16=(openvino_compress_to_fp16 if openvino_compress_to_fp16 is not None else False),
+        model_dtype=model_dtype if model_dtype is not None else "bfloat16",
+        train_action_expert_only=train_action_expert_only if train_action_expert_only is not None else False,
+        gradient_checkpointing=gradient_checkpointing if gradient_checkpointing is not None else False,
+        use_lora=use_lora if use_lora is not None else False,
+        enable_lora_action_expert=(enable_lora_action_expert if enable_lora_action_expert is not None else False),
+        lora_rank=lora_rank if lora_rank is not None else 64,
+        lora_alpha=lora_alpha if lora_alpha is not None else 16,
+        lora_dropout=lora_dropout if lora_dropout is not None else 0.05,
+        lora_bias=lora_bias if lora_bias is not None else "none",
+        action_mode=action_mode,
     )
-    for name, value in overrides.items():
-        if value is not None:
-            setattr(config, name, value)
-    config.__post_init__()
-    return config
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -132,6 +147,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         lora_alpha: int | None = None,
         lora_dropout: float | None = None,
         lora_bias: Literal["all", "lora_only", "none"] | None = None,
+        n_obs_steps: int | None = None,
+        chunk_size: int | None = None,
+        n_action_steps: int | None = None,
+        use_random_input_noise: bool | None = None,
+        setup_type: str | None = None,
+        control_mode: str | None = None,
         optimizer_lr: float = 1e-5,
         optimizer_vit_lr: float = 5e-6,
         optimizer_connector_lr: float = 5e-6,
@@ -146,7 +167,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # other overrides
         load_weights: bool = True,
         action_mode: Literal["continuous"] = "continuous",
-        **overrides: object,
     ) -> None:
         """Initialize a MolmoAct2 policy wrapper.
 
@@ -178,6 +198,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             lora_alpha: LoRA scaling override.
             lora_dropout: LoRA dropout override.
             lora_bias: LoRA bias-training mode override.
+            n_obs_steps: Number of observation steps.
+            chunk_size: Number of actions predicted per chunk.
+            n_action_steps: Number of actions returned per policy invocation.
+            use_random_input_noise: Whether flow matching starts from random noise.
+            setup_type: Robot/environment setup prompt text.
+            control_mode: Action control-mode prompt text.
             optimizer_lr: Learning rate for VLM parameters.
             optimizer_vit_lr: Learning rate for vision parameters.
             optimizer_connector_lr: Learning rate for connector parameters.
@@ -193,9 +219,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             load_weights: Whether to load base checkpoint weights after model
                 construction when a checkpoint source is available.
             action_mode: Action mode to use for the policy. Currently only "continuous" is supported.
-            **overrides: Any other named :class:`MolmoAct2Config` field. A
-                non-``None`` value overrides the selected base config; ``None``
-                preserves the pretrained value or dataclass default.
 
         Raises:
             ValueError: If only one of input_features/output_features is provided.
@@ -205,24 +228,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if bool(input_features) != bool(output_features):
             msg = f"Need both input and output features: input: {input_features} - output: {output_features}"
             raise ValueError(msg)
-
-        # useful policy overrides
-        config_overrides = {
-            "compile_model": compile_model,
-            "openvino_compress_to_fp16": openvino_compress_to_fp16,
-            "model_dtype": model_dtype,
-            "train_action_expert_only": train_action_expert_only,
-            "gradient_checkpointing": gradient_checkpointing,
-            "use_lora": use_lora,
-            "enable_lora_action_expert": enable_lora_action_expert,
-            "lora_rank": lora_rank,
-            "lora_alpha": lora_alpha,
-            "lora_dropout": lora_dropout,
-            "lora_bias": lora_bias,
-        }
-        overrides.update({name: value for name, value in config_overrides.items() if value is not None})
-        if action_mode is not None:
-            overrides["action_mode"] = action_mode
 
         # if pretrained repo_id exists find hf container
         self.hf_container = None
@@ -245,14 +250,48 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 tokenizer_config=self.hf_container.tokenizer_config,
                 processor_config=self.hf_container.processor_config,
                 norm_tag=norm_tag,
-                **overrides,
+                n_obs_steps=n_obs_steps,
+                chunk_size=chunk_size,
+                n_action_steps=n_action_steps,
+                use_random_input_noise=use_random_input_noise,
+                setup_type=setup_type,
+                control_mode=control_mode,
+                compile_model=compile_model,
+                openvino_compress_to_fp16=openvino_compress_to_fp16,
+                model_dtype=model_dtype,
+                train_action_expert_only=train_action_expert_only,
+                gradient_checkpointing=gradient_checkpointing,
+                use_lora=use_lora,
+                enable_lora_action_expert=enable_lora_action_expert,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_bias=lora_bias,
+                action_mode=action_mode,
             )
         else:
             self.config = make_molmoact2_config(
                 input_features=input_features,
                 output_features=output_features,
                 norm_tag=norm_tag,
-                **overrides,
+                n_obs_steps=n_obs_steps,
+                chunk_size=chunk_size,
+                n_action_steps=n_action_steps,
+                use_random_input_noise=use_random_input_noise,
+                setup_type=setup_type,
+                control_mode=control_mode,
+                compile_model=compile_model,
+                openvino_compress_to_fp16=openvino_compress_to_fp16,
+                model_dtype=model_dtype,
+                train_action_expert_only=train_action_expert_only,
+                gradient_checkpointing=gradient_checkpointing,
+                use_lora=use_lora,
+                enable_lora_action_expert=enable_lora_action_expert,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_bias=lora_bias,
+                action_mode=action_mode,
             )
 
         super().__init__(n_action_steps=self.config.n_action_steps)

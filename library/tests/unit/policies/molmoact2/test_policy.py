@@ -11,6 +11,7 @@ HuggingFace-container loading path is covered by ``test_from_hf.py``.
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,14 @@ class TestMolmoact2Policy:
     def test_repo_id_defaults_to_none(self) -> None:
         assert MolmoAct2.__init__.__kwdefaults__["repo_id"] is None
 
+    def test_constructor_has_no_variadic_keyword_arguments(self) -> None:
+        parameters = inspect.signature(MolmoAct2.__init__).parameters.values()
+        assert all(parameter.kind is not inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+
+    def test_constructor_rejects_unknown_config_arguments(self) -> None:
+        with pytest.raises(TypeError, match="unexpected keyword argument"):
+            MolmoAct2(repo_id=None, unknown_config_value=True)  # type: ignore[call-arg]
+
     def test_hyperparameters_saved(self) -> None:
         policy = MolmoAct2(
             repo_id=None,
@@ -82,6 +91,8 @@ class TestMolmoact2Policy:
             n_action_steps=1,
             chunk_size=5,
             use_random_input_noise=True,
+            setup_type="tabletop",
+            control_mode="joint",
         )
         assert policy.config is not None
         assert isinstance(policy.config, MolmoAct2Config)
@@ -89,6 +100,8 @@ class TestMolmoact2Policy:
         assert policy.config.n_action_steps == 1
         assert policy.config.chunk_size == 5
         assert policy.config.use_random_input_noise is True
+        assert policy.config.setup_type == "tabletop"
+        assert policy.config.control_mode == "joint"
         assert policy.config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
         assert policy.config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
 

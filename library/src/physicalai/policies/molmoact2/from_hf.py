@@ -26,7 +26,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from huggingface_hub import snapshot_download
 
@@ -702,7 +702,7 @@ def _translate_processor_config(config_data: dict[str, Any], processor_config: d
             config_data[key] = processor_config[key]
 
 
-def build_config_from_hf_config(
+def build_config_from_hf_config(  # noqa: PLR0913
     hf_config: dict[str, Any],
     *,
     norm_stats: dict[str, Any] | None = None,
@@ -714,9 +714,26 @@ def build_config_from_hf_config(
     tokenizer_revision: str | None = None,
     tokenizer_config: dict[str, Any] | None = None,
     processor_config: dict[str, Any] | None = None,
-    **overrides: object,
+    n_obs_steps: int | None = None,
+    chunk_size: int | None = None,
+    n_action_steps: int | None = None,
+    use_random_input_noise: bool | None = None,
+    setup_type: str | None = None,
+    control_mode: str | None = None,
+    compile_model: bool | None = None,
+    openvino_compress_to_fp16: bool | None = None,
+    model_dtype: Literal["float32", "bfloat16", "float16"] | None = None,
+    train_action_expert_only: bool | None = None,
+    gradient_checkpointing: bool | None = None,
+    use_lora: bool | None = None,
+    enable_lora_action_expert: bool | None = None,
+    lora_rank: int | None = None,
+    lora_alpha: int | None = None,
+    lora_dropout: float | None = None,
+    lora_bias: Literal["all", "lora_only", "none"] | None = None,
+    action_mode: Literal["continuous", "discrete", "both"] | None = None,
 ) -> MolmoAct2Config:
-    """Build a flat policy config from Hugging Face data and explicit overrides.
+    """Build a flat policy config from Hugging Face data and explicit arguments.
 
     Args:
         hf_config: Parsed Hugging Face `config.json` payload.
@@ -731,15 +748,30 @@ def build_config_from_hf_config(
             carry into the config so the tokenizer can be rebuilt by downloading
             only ``tokenizer.json`` at runtime.
         processor_config: Optional pre-loaded processor config dict.
-        **overrides: Flat :class:`MolmoAct2Config` values. ``None`` means
-            retain the value supplied by the checkpoint or dataclass default.
+        n_obs_steps: Number of observation steps.
+        chunk_size: Number of actions predicted per chunk.
+        n_action_steps: Number of actions returned per policy invocation.
+        use_random_input_noise: Whether flow matching starts from random noise.
+        setup_type: Explicit robot/environment setup prompt text.
+        control_mode: Explicit action control-mode prompt text.
+        compile_model: Whether to compile model execution paths.
+        openvino_compress_to_fp16: Whether OpenVINO export uses FP16 compression.
+        model_dtype: Model parameter and forward dtype.
+        train_action_expert_only: Whether only the action expert is trained.
+        gradient_checkpointing: Whether gradient checkpointing is enabled.
+        use_lora: Whether LoRA adapters are enabled.
+        enable_lora_action_expert: Whether LoRA targets the action expert.
+        lora_rank: LoRA rank.
+        lora_alpha: LoRA scaling value.
+        lora_dropout: LoRA dropout probability.
+        lora_bias: LoRA bias-training mode.
+        action_mode: Policy action mode.
 
     Returns:
         Resolved `MolmoAct2Config` instance.
 
     Raises:
         ValueError: If ``checkpoint_path`` is ``None``.
-        TypeError: If unkown MolmoAct2 overrides are supplied.
     """
     del repo_id
 
@@ -775,13 +807,28 @@ def build_config_from_hf_config(
         config_data["setup_type"] = str(tag_metadata.get("setup_type") or "")
         config_data["control_mode"] = str(tag_metadata.get("control_mode") or "")
 
-    # Stage 4: validate and apply explicit caller overrides last.
-    valid_fields = set(config_data)
-    unknown = set(overrides) - valid_fields
-    if unknown:
-        msg = f"Unknown MolmoAct2 override(s): {sorted(unknown)}"
-        raise TypeError(msg)
-    config_data.update({key: value for key, value in overrides.items() if value is not None})
+    # Stage 4: apply explicit caller values last.
+    explicit_values = {
+        "n_obs_steps": n_obs_steps,
+        "chunk_size": chunk_size,
+        "n_action_steps": n_action_steps,
+        "use_random_input_noise": use_random_input_noise,
+        "setup_type": setup_type,
+        "control_mode": control_mode,
+        "compile_model": compile_model,
+        "openvino_compress_to_fp16": openvino_compress_to_fp16,
+        "model_dtype": model_dtype,
+        "train_action_expert_only": train_action_expert_only,
+        "gradient_checkpointing": gradient_checkpointing,
+        "use_lora": use_lora,
+        "enable_lora_action_expert": enable_lora_action_expert,
+        "lora_rank": lora_rank,
+        "lora_alpha": lora_alpha,
+        "lora_dropout": lora_dropout,
+        "lora_bias": lora_bias,
+        "action_mode": action_mode,
+    }
+    config_data.update({key: value for key, value in explicit_values.items() if value is not None})
 
     return MolmoAct2Config.from_dict(config_data)
 

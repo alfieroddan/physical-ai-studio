@@ -68,7 +68,7 @@ class MolmoAct2Config(Config):
             control compilation, fine-tuning, and pretrained asset loading.
 
     A policy builds this config from defaults or a pretrained checkpoint, then
-    applies only explicit non-``None`` constructor overrides.
+    applies only its declared non-``None`` constructor arguments.
     """
 
     model_type: str = "molmoact2"
@@ -225,7 +225,7 @@ class MolmoAct2Config(Config):
     # Local path to the pretrained checkpoint snapshot directory carrying
     # ``model.safetensors`` (and the processor/tokenizer assets). Populated by
     # ``build_config_from_hf_config`` so the policy can locate its weights.
-    # Left ``None`` for configs built by :func:`make_molmoact2_config`.
+    # Left ``None`` for configs built without a pretrained checkpoint.
     checkpoint_path: str | None = None
 
     # Runtime options
