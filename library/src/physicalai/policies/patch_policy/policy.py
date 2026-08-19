@@ -3,20 +3,18 @@
 
 """Lightning module for Patch Policy."""
 
-from typing import Any
-
-import torch
+from torch import Tensor
 
 from physicalai.data import Feature, Observation
 from physicalai.export.mixin_policy import ExportablePolicyMixin
 from physicalai.policies.base import Policy
 
 from .model import PatchPolicyModel
+from .processors import make_policy_processors
 
 
 class PatchPolicy(ExportablePolicyMixin, Policy):
     """Patch Policy class."""
-
     def __init__(
             self,
             input_features: list[Feature] | None = None,
@@ -25,29 +23,45 @@ class PatchPolicy(ExportablePolicyMixin, Policy):
             n_action_steps: int = 50,
         ):
         """Initialize Patch Policy."""
-        # init temp args
-        self.input_features = input_features
-        self.output_features = output_features
-        self.n_action_steps = n_action_steps
         # super init
-        super().__init__(n_action_steps=self.n_action_steps)
+        super().__init__(n_action_steps=n_action_steps)
+
+        # init temp args
+        self._input_features = input_features
+        self._output_features = output_features
+        self._n_action_steps = n_action_steps
+
+        # processors
+        self._preprocessor = None
+        self._postprocessor = None
+
         # save hyperparameters and initialize model
         self.save_hyperparameters()
-        self._initialize_model()
+
+        # eager init
+        if self._input_features is not None and self._output_features is not None:
+            self._initialize_model()
 
     def _initialize_model(self):
         """Initialize the model."""
+
+        # init model
         self.model = PatchPolicyModel(
-            input_features=self.input_features,
-            output_features=self.output_features,
-            n_action_steps=self.n_action_steps,
+            input_features=self._input_features,
+            output_features=self._output_features,
+            n_action_steps=self._n_action_steps,
         )
 
-    def forward(self, batch: Observation) -> Any:
-        """Perform forward pass of the policy."""
-        pass
+        # init pre and post processors here
+        self._preprocessor, self._postprocessor = make_policy_processors(self.model.config)
 
-    def predict_action_chunk(self, batch: Observation) -> torch.Tensor:
-        """Predict a chunk of actions from observation."""
-        # temp random
-        return torch.randn(1, self.output_features[0].shape[1])
+    def forward(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor]]:
+        if self.model is None or self._preprocessor is None:
+            raise RuntimeError("Policy is not initialized")
+        return self.model(self._preprocessor(batch.to_dict()))
+
+    def predict_action_chunk(self, batch: Observation) -> Tensor:
+        if self.model is None or self._preprocessor is None or self._postprocessor is None:
+            raise RuntimeError("Policy is not initialized")
+        actions = self.model.predict_action_chunk(self._preprocessor(batch.to_dict()))
+        return self._postprocessor(actions)
