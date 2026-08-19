@@ -15,3 +15,9 @@ class PatchPolicyConfig(Config):
     input_features: list[str] | None = None
     output_features: list[str] | None = None
     n_action_steps: int = 50
+
+    # Image encoder arguments
+    encoder_name: str = "webssl"
+
+    # Goal args
+    use_goal_image: bool = False

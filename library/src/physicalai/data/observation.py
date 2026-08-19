@@ -85,6 +85,7 @@ class Observation:
         TIMESTAMP = "timestamp"
         INFO = "info"
         EXTRA = "extra"
+        GOAL_IMAGE = "goal_image"
 
     def to_dict(self, *, flatten: bool = True) -> dict[str, Any]:
         """Convert Observation to a dictionary format.
@@ -508,3 +509,4 @@ STATE = Observation.FieldName.STATE.value
 TASK = Observation.FieldName.TASK.value
 TASK_INDEX = Observation.FieldName.TASK_INDEX.value
 TIMESTAMP = Observation.FieldName.TIMESTAMP.value
+GOAL_IMAGE = Observation.FieldName.GOAL_IMAGE.value
