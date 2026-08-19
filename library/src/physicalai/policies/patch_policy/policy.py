@@ -22,6 +22,8 @@ class PatchPolicy(ExportablePolicyMixin, Policy):
         output_features: list[Feature] | None = None,
         *,
         n_action_steps: int = 50,
+        n_obs_steps: int = 10,
+        chunk_size: int = 50,
         # image encoder args
         encoder_name: str = "webssl",
         # goal args
@@ -35,6 +37,8 @@ class PatchPolicy(ExportablePolicyMixin, Policy):
         self._input_features = input_features
         self._output_features = output_features
         self._n_action_steps = n_action_steps
+        self._n_obs_steps = n_obs_steps
+        self._chunk_size = chunk_size
         self._encoder_name = encoder_name
         self._use_goal_image = use_goal_image
 
@@ -59,6 +63,8 @@ class PatchPolicy(ExportablePolicyMixin, Policy):
             input_features=self._input_features,
             output_features=self._output_features,
             n_action_steps=self._n_action_steps,
+            n_obs_steps=self._n_obs_steps,
+            chunk_size=self._chunk_size,
             encoder_name=self._encoder_name,
             use_goal_image=self._use_goal_image,
         )
