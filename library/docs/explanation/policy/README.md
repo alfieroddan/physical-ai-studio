@@ -13,17 +13,6 @@ The examples use `MyPolicy`, `MyModel`, and `MyModelConfig`. A concrete policy m
 have different model components and processors, but should preserve the lifecycle and
 ownership boundaries described here.
 
-## Reference Implementation
-
-[`template.py`](template.py) is the complete executable reference for this design. It
-demonstrates eager and lazy construction, explicit config construction, pretrained
-resolution, checkpoint restoration, preprocessing and postprocessing, training,
-inference, and config-driven export metadata in one file.
-
-The template is intended to be copied and adapted when creating or migrating a native
-policy. Its language export entry is metadata-only until a policy adds the tokenizer
-preprocessor required to convert raw task strings for traced backends.
-
 ## Structure
 
 A native policy normally separates configuration, model computation, processing, and
@@ -94,9 +83,7 @@ class MyModel(Model, FromConfig):
 ```
 
 `compute_loss()` returns a loss tensor with gradients and a metrics dictionary with
-at least a `"loss"` key. `compute_val_loss()` may reuse the training loss, but policies
-such as diffusion or flow-matching models should override it when validation requires
-the complete inference process.
+at least a `"loss"` key. `compute_val_loss()` may reuse the training loss.
 
 The model also implements `observation_delta_indices`, `action_delta_indices`, and
 `reward_delta_indices`. Data loading uses these properties to select the temporal
@@ -187,7 +174,7 @@ normalization statistics are available.
 | Owner | Responsibilities |
 | --- | --- |
 | Model config | Ordered features, architecture, chunk size, action horizon, and serializable model behavior |
-| Policy | Training lifecycle, optimizer settings, artifact selection, external weight loading, and model modifications |
+| Policy | Training lifecycle, optimizer settings, export settings, artifact selection, external weight loading, and model modifications |
 | Dataset | Training feature contract, feature order, and optional normalization statistics |
 | Model | Network construction, loss computation, temporal indices, and action prediction |
 | Processors | Conversion and normalization before and after the model |
@@ -359,8 +346,7 @@ Observation
 ```
 
 The preprocessor converts `Observation` fields into model inputs and normalizes
-floating-point features when normalization data is present. During training it also
-normalizes action targets in output-feature order.
+floating-point features when normalization data is present.
 
 The postprocessor reverses output normalization in the same order. For multiple
 action features, concatenation and slicing must follow `config.output_features`
@@ -405,7 +391,7 @@ dataset feature order
     -> runtime input and output order
 ```
 
-Not every policy prototype implements export schema hooks immediately. Inheriting the
+Not every policy implements export schema hooks immediately. Inheriting the
 mixin and defining `inputs_schema`, `outputs_schema`, and any required sample inputs
 are separate implementation steps; model construction must not depend on export.
 
@@ -484,13 +470,10 @@ def outputs_schema(self) -> list[InferenceFeature] | None:
     ]
 ```
 
-Production code should validate that the state, image, and action features exist and
-have concrete shapes before constructing these descriptors. Config feature order is
-retained within the state, image, and output groups; canonical runtime names keep the
+Config feature order is retained within the state, image, and output groups; canonical runtime names keep the
 manifest independent of dataset-specific prefixes.
 
-ACT also demonstrates how config fields drive backend processing. Image size configures
-the resize component, output names come from `outputs_schema`, and a difference between
+Output names come from `outputs_schema`, and a difference between
 the predicted chunk and execution horizon adds a manifest postprocessor:
 
 ```python
