@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from huggingface_hub import snapshot_download
 
@@ -28,10 +28,11 @@ from .pretrained_utils import (
     VISION_CONFIG_MAP,
     copy_component,
 )
-from .processors import make_policy_processors
-
-if TYPE_CHECKING:
-    from .processors import MolmoAct2PostProcessor, MolmoAct2PreProcessor
+from .processors import (
+    MolmoAct2Postprocessor,
+    MolmoAct2Preprocessor,
+    make_molmoact2_preprocessors,
+)
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -74,6 +75,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         setup_type: str | None = None,
         control_mode: str | None = None,
         adapt_to_so101: bool = False,
+        # weight management
         gradient_checkpointing: bool = False,
         use_lora: bool = False,
         train_action_head_only: bool = False,
@@ -118,8 +120,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.save_hyperparameters(ignore=["input_features", "output_features"])
 
         # pre and post processors
-        self._preprocessor: MolmoAct2PreProcessor | None = None
-        self._postprocessor: MolmoAct2PostProcessor | None = None
+        self._preprocessor: MolmoAct2Preprocessor | None = None
+        self._postprocessor: MolmoAct2Postprocessor | None = None
 
         # underlying model
         self._model: MolmoAct2Model | None = None
@@ -202,7 +204,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._adapt_to_so101 = config.adapt_to_so101
 
         self._model = MolmoAct2Model.from_config(config)
-        self._preprocessor, self._postprocessor = make_policy_processors(config)  # type: ignore[assignment]
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
 
         if weights_path is not None:
             self._model.load_weights(weights_path)
@@ -221,17 +223,35 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.train_action_head_only:
             model.freeze_vlm()
 
-    @staticmethod
-    def _normalization_parameters(stats: dict[str, Any]) -> NormalizationParameters:
+    @classmethod
+    def _normalization_parameters(
+        cls,
+        stats: dict[str, Any],
+        feature_key: str,
+        *,
+        normalize_gripper: bool,
+    ) -> NormalizationParameters:
         """Build normalization metadata from saved statistics for a feature.
 
         Args:
             stats: Dictionary of saved normalization statistics for a single feature.
+            feature_key: Name of the feature being normalized.
+            normalize_gripper: Whether gripper dimensions should be normalized.
 
         Returns:
             NormalizationParameters: The normalized feature metadata populated from the input
                 statistics.
+
         """
+        feature_size = cls._feature_size(stats, feature_key)
+        mask = cls._normalization_mask(
+            stats,
+            feature_key,
+            feature_size=feature_size,
+            normalize_gripper=normalize_gripper,
+        )
+        cls._validate_passthrough_bounds(stats, mask, feature_key)
+
         return NormalizationParameters(
             mean=stats.get("mean"),
             std=stats.get("std"),
@@ -239,8 +259,79 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             max=stats.get("max"),
             q01=stats.get("q01"),
             q99=stats.get("q99"),
-            mask=stats.get("mask"),
+            mask=mask,
         )
+
+    @staticmethod
+    def _normalization_mask(
+        stats: dict[str, Any],
+        feature_key: str,
+        *,
+        feature_size: int,
+        normalize_gripper: bool,
+    ) -> list[bool] | None:
+        """Resolve the generic per-dimension normalization mask for a feature.
+
+        Returns:
+            ``None`` when every dimension should be normalized, otherwise the explicit
+            pretrained mask.
+
+        Raises:
+            TypeError: If an explicit mask is missing or malformed.
+            ValueError: If an explicit mask has the wrong size.
+        """
+        if normalize_gripper:
+            return None
+
+        mask = stats.get("mask")
+        if not isinstance(mask, list) or not all(isinstance(value, bool) for value in mask):
+            msg = f"MolmoAct2 normalization stats for {feature_key!r} require a boolean mask."
+            raise TypeError(msg)
+        if len(mask) != feature_size:
+            msg = (
+                f"MolmoAct2 normalization mask for {feature_key!r} has {len(mask)} values; "
+                f"expected {feature_size}."
+            )
+            raise ValueError(msg)
+        return mask
+
+    @staticmethod
+    def _validate_passthrough_bounds(
+        stats: dict[str, Any],
+        mask: list[bool] | None,
+        feature_key: str,
+    ) -> None:
+        """Validate that dimensions excluded from normalization already use unit range.
+
+        Raises:
+            TypeError: If pass-through bounds are unavailable.
+            ValueError: If pass-through bounds are outside [-1, 1].
+        """
+        if mask is None or all(mask):
+            return
+
+        min_values = stats.get("min")
+        max_values = stats.get("max")
+        if not isinstance(min_values, list) or not isinstance(max_values, list):
+            msg = f"MolmoAct2 pass-through dimensions for {feature_key!r} require min/max statistics."
+            raise TypeError(msg)
+
+        passthrough_bounds = [
+            (minimum, maximum)
+            for minimum, maximum, should_normalize in zip(
+                min_values,
+                max_values,
+                mask,
+                strict=True,
+            )
+            if not should_normalize
+        ]
+        if any(minimum < -1.0 or maximum > 1.0 for minimum, maximum in passthrough_bounds):
+            msg = (
+                f"MolmoAct2 {feature_key} pass-through values are not under [-1, 1]. "
+                "Please set normalize_gripper=True."
+            )
+            raise ValueError(msg)
 
     @staticmethod
     def _feature_size(stats: dict[str, Any], feature_key: str) -> int:
@@ -296,12 +387,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self,
         tag_metadata: dict[str, Any],
         image_size: tuple[int, int],
+        *,
+        normalize_gripper: bool,
     ) -> tuple[list[Feature], list[Feature]]:
         """Create input and output feature definitions from normalization metadata.
 
         Args:
             tag_metadata: Metadata describing the selected normalization tag.
             image_size: Spatial dimensions used to construct visual feature shapes.
+            normalize_gripper: Whether gripper dimensions should be normalized.
 
         Returns:
             tuple[list[Feature], list[Feature]]: Input and output feature definitions derived from
@@ -334,7 +428,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 name=state_key.removeprefix("observation."),
                 ftype=FeatureType.STATE,
                 shape=(self._feature_size(state_stats, state_key),),
-                normalization_data=self._normalization_parameters(state_stats),
+                normalization_data=self._normalization_parameters(
+                    state_stats,
+                    state_key,
+                    normalize_gripper=normalize_gripper,
+                ),
             ),
         )
 
@@ -348,7 +446,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 name=action_key,
                 ftype=FeatureType.ACTION,
                 shape=(self._feature_size(action_stats, action_key),),
-                normalization_data=self._normalization_parameters(action_stats),
+                normalization_data=self._normalization_parameters(
+                    action_stats,
+                    action_key,
+                    normalize_gripper=normalize_gripper,
+                ),
             ),
         ]
         return input_features, output_features
@@ -408,16 +510,17 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         if self._norm_tag is not None:
             tag_metadata = self._resolve_norm_tag(norm_stats_config)
+            normalize_gripper = bool(tag_metadata.get("normalize_gripper", False))
             input_features, output_features = self._create_features_from_norm_stats(
                 tag_metadata,
                 config.image_default_input_size,
+                normalize_gripper=normalize_gripper,
             )
             action_horizon = tag_metadata.get("action_horizon")
             if not isinstance(action_horizon, int):
                 msg = f"Invalid action_horizon for normalization tag {self._norm_tag!r}."
                 raise TypeError(msg)
             chunk_size = action_horizon
-            normalize_gripper = bool(tag_metadata.get("normalize_gripper", False))
             if self._setup_type is None:
                 setup_type = str(tag_metadata.get("setup_type") or "")
             if self._control_mode is None:
