@@ -72,6 +72,9 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
         self.optimizer_lr = optimizer_lr
         self.optimizer_weight_decay = optimizer_weight_decay
 
+        # model
+        self._model: NewPolicyModel | None = None
+
         # processors
         self._preprocessor: NewPolicyPreprocessor | None = None
         self._postprocessor: NewPolicyPostprocessor | None = None
@@ -103,9 +106,9 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
         return policy
 
     def _require_model(self) -> NewPolicyModel:
-        if not isinstance(self.model, NewPolicyModel):
+        if not isinstance(self._model, NewPolicyModel):
             raise RuntimeError("Policy model is not initialized")
-        return self.model
+        return self._model
 
     def _initialize_from_config(
         self,
@@ -113,18 +116,18 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
         *,
         weights_path: Path | None = None,
     ) -> None:
-        if self.model is not None:
+        if self._model is not None:
             raise RuntimeError("Policy model is already initialized")
 
         self._input_features = config.input_features
         self._output_features = config.output_features
         self._n_action_steps = config.n_action_steps
         self._chunk_size = config.chunk_size
-        self.model = NewPolicyModel.from_config(config)
+        self._model = NewPolicyModel.from_config(config)
         self._preprocessor, self._postprocessor = make_policy_processors(config)  # type: ignore[assignment]
 
         if weights_path is not None:
-            self.model.load_weights(weights_path)
+            self._model.load_weights(weights_path)
 
         self._apply_model_modifications()
 
@@ -202,7 +205,7 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
 
     def _restore_model_config(self, config_data: Mapping[str, Any]) -> None:
         resolved_config = NewPolicyModelConfig.from_dict(config_data)
-        if self.model is not None:
+        if self._model is not None:
             if self._require_model().config != resolved_config:
                 raise ValueError("Checkpoint feature contract does not match the initialized policy")
             return
@@ -236,7 +239,7 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
 
         dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
 
-        if self.model is not None:
+        if self._model is not None:
             config = self._require_model().config
             if (
                 config.input_features != dataset_input_features
@@ -298,7 +301,7 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
     @property
     def inputs_schema(self) -> list[InferenceFeature] | None:
         """Describe ACT-style state/image inputs with appended language metadata."""
-        if self.model is None:
+        if self._model is None:
             return None
 
         config = self._require_model().config
@@ -342,7 +345,7 @@ class NewPolicy(ExportablePolicyMixin, Policy):  # type: ignore[misc]
     @property
     def outputs_schema(self) -> list[InferenceFeature] | None:
         """Describe the ACT-style action chunk produced by the model."""
-        if self.model is None:
+        if self._model is None:
             return None
 
         config = self._require_model().config
