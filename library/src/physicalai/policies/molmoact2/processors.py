@@ -5,3 +5,7 @@ class MolmoAct2PreProcessor:
 class MolmoAct2PostProcessor:
     def __init__(self) -> None:
         pass
+
+
+def make_policy_processors(config):
+    return MolmoAct2PreProcessor(), MolmoAct2PostProcessor()

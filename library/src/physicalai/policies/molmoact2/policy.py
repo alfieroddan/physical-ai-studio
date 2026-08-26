@@ -19,6 +19,7 @@ from physicalai.export import ExportablePolicyMixin
 from physicalai.policies.base import Policy
 
 from .config import MolmoAct2Config
+from .model import MolmoAct2Model
 from .pretrained_utils import (
     ACTION_EXPERT_CONFIG_MAP,
     ADAPTER_CONFIG_MAP,
@@ -27,6 +28,7 @@ from .pretrained_utils import (
     VISION_CONFIG_MAP,
     copy_component,
 )
+from .processors import make_policy_processors
 
 if TYPE_CHECKING:
     from .processors import MolmoAct2PostProcessor, MolmoAct2PreProcessor
@@ -72,6 +74,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         setup_type: str | None = None,
         control_mode: str | None = None,
         adapt_to_so101: bool = False,
+        gradient_checkpointing: bool = False,
+        use_lora: bool = False,
+        train_action_head_only: bool = False,
     ) -> None:
         """Initialize a MolmoAct2 policy instance.
 
@@ -87,6 +92,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             setup_type: Optional setup identifier used by the model configuration.
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
+            gradient_checkpointing: Whether to enable gradient checkpointing on the model.
+            use_lora: Whether to enable LoRA adapters on the model.
+            train_action_head_only: Whether to freeze the VLM and train only the action head.
         """
         # args
         self._input_features = input_features
@@ -99,6 +107,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self._setup_type = setup_type
         self._control_mode = control_mode
         self._adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
+        self.gradient_checkpointing = gradient_checkpointing
+        self.use_lora = use_lora
+        self.train_action_head_only = train_action_head_only
 
         # initialize super
         super().__init__(n_action_steps=self._n_action_steps)
@@ -107,14 +118,23 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.save_hyperparameters(ignore=["input_features", "output_features"])
 
         # pre and post processors
-        self._pre_processor: MolmoAct2PreProcessor | None = None
-        self._post_processor: MolmoAct2PostProcessor | None = None
+        self._preprocessor: MolmoAct2PreProcessor | None = None
+        self._postprocessor: MolmoAct2PostProcessor | None = None
+
+        # underlying model
+        self._model: MolmoAct2Model | None = None
 
         # only init if features are resolved, lazy otherwise
         user_eager = input_features is not None and output_features is not None
         pretrained_eager = pretrained_name_or_path is not None and norm_tag is not None
         if user_eager or pretrained_eager:
             self.initialize_model()
+
+    def _require_model(self) -> MolmoAct2Model:
+        if not isinstance(self._model, MolmoAct2Model):
+            msg = "Policy model is not initialized"
+            raise TypeError(msg)
+        return self._model
 
     def initialize_model(self) -> None:
         """Initialize the policy model and configuration from pretrained assets or local inputs.
@@ -154,8 +174,52 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 adapt_to_so101=self._adapt_to_so101,
             )
 
+        # resulting config and weights path
         self.config = config
         self._weights_path = weights_path
+
+        # init model
+        self._initialize_from_config(config, weights_path=weights_path)
+
+    def _initialize_from_config(
+        self,
+        config: MolmoAct2Config,
+        *,
+        weights_path: Path | None = None,
+    ) -> None:
+        if self._model is not None:
+            msg = "Policy model is already initialized"
+            raise RuntimeError(msg)
+
+        # update instance attributes from config
+        self._input_features = config.input_features
+        self._output_features = config.output_features
+        self._n_action_steps = config.n_action_steps
+        self._chunk_size = config.chunk_size
+        self._n_obs_steps = config.n_obs_steps
+        self._setup_type = config.setup_type
+        self._control_mode = config.control_mode
+        self._adapt_to_so101 = config.adapt_to_so101
+
+        self._model = MolmoAct2Model.from_config(config)
+        self._preprocessor, self._postprocessor = make_policy_processors(config)  # type: ignore[assignment]
+
+        if weights_path is not None:
+            self._model.load_weights(weights_path)
+
+        self._apply_model_modifications()
+
+    def _apply_model_modifications(self) -> None:
+        model = self._require_model()
+
+        if self.gradient_checkpointing:
+            model.gradient_checkpointing_enable()
+
+        if self.use_lora:
+            model.enable_lora()
+
+        if self.train_action_head_only:
+            model.freeze_vlm()
 
     @staticmethod
     def _normalization_parameters(stats: dict[str, Any]) -> NormalizationParameters:
@@ -459,3 +523,21 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 raise TypeError(msg)
 
         return hf_config, norm_stats_config, tokenizer_config, weights_file
+
+    def forward(self, batch: Any) -> Any:  # ruff: ignore[ANN401]
+        """Run a forward pass for the policy.
+
+        The runtime path is intentionally left unimplemented while init wiring is developed.
+        """
+        del batch
+        msg = "Forward pass is not implemented."
+        raise NotImplementedError(msg)
+
+    def predict_action_chunk(self, batch: Any) -> Any:  # ruff: ignore[ANN401]
+        """Predict an action chunk for policy inference.
+
+        The runtime path is intentionally left unimplemented while init wiring is developed.
+        """
+        del batch
+        msg = "Action prediction is not implemented."
+        raise NotImplementedError(msg)
