@@ -215,7 +215,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         model = self._require_model()
 
         if self.gradient_checkpointing:
-            model.gradient_checkpointing_enable()
+            model.enable_gradient_checkpointing()
 
         if self.use_lora:
             model.enable_lora()

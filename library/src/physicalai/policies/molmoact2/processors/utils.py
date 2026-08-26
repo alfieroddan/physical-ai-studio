@@ -16,14 +16,14 @@ if TYPE_CHECKING:
     from physicalai.data.observation import Feature, FeatureType
 
 
-ACTION_OUTPUT_TOKEN = "<action_output>"  # ruff: ignore[hardcoded-password-string]
-SETUP_START_TOKEN = "<setup_start>"  # ruff: ignore[hardcoded-password-string]
-SETUP_END_TOKEN = "<setup_end>"  # ruff: ignore[hardcoded-password-string]
-CONTROL_START_TOKEN = "<control_start>"  # ruff: ignore[hardcoded-password-string]
-CONTROL_END_TOKEN = "<control_end>"  # ruff: ignore[hardcoded-password-string]
-STATE_START_TOKEN = "<state_start>"  # ruff: ignore[hardcoded-password-string]
-STATE_END_TOKEN = "<state_end>"  # ruff: ignore[hardcoded-password-string]
-STATE_TOKEN_PREFIX = "<state_"  # ruff: ignore[hardcoded-password-string]
+ACTION_OUTPUT_TOKEN = "<action_output>"  # noqa: S105
+SETUP_START_TOKEN = "<setup_start>"  # noqa: S105
+SETUP_END_TOKEN = "<setup_end>"  # noqa: S105
+CONTROL_START_TOKEN = "<control_start>"  # noqa: S105
+CONTROL_END_TOKEN = "<control_end>"  # noqa: S105
+STATE_START_TOKEN = "<state_start>"  # noqa: S105
+STATE_END_TOKEN = "<state_end>"  # noqa: S105
+STATE_TOKEN_PREFIX = "<state_"  # noqa: S105
 
 _TRAILING_PUNCTUATION = ".,!?;:"
 _PREFIX_PATTERNS = tuple(

@@ -130,13 +130,23 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         if not isinstance(batch, dict):
             msg = f"MolmoAct2Preprocessor expects a dictionary, got {type(batch)}."
             raise TypeError(msg)
-        if STATE not in batch and f"observation.{STATE}" not in batch:
+        if batch.get(STATE) is None:
             msg = f"{STATE} is required."
             raise ValueError(msg)
-        if TASK not in batch and f"observation.{TASK}" not in batch and "observation.language" not in batch:
+        if batch.get(TASK) is None:
             msg = f"{TASK} is required."
             raise ValueError(msg)
-        if IMAGES not in batch and not any(str(key).startswith(f"{IMAGES}.") for key in batch):
+        nested_images = batch.get(IMAGES)
+        has_nested_images = (
+            any(value is not None for value in nested_images.values())
+            if isinstance(nested_images, dict)
+            else nested_images is not None
+        )
+        has_flattened_images = any(
+            str(key).startswith(f"{IMAGES}.") and value is not None
+            for key, value in batch.items()
+        )
+        if not has_nested_images and not has_flattened_images:
             msg = f"{IMAGES} are required."
             raise ValueError(msg)
 
@@ -148,11 +158,25 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         """
         if self._joint_transform is None:
             return batch
-        for key in (STATE, f"observation.{STATE}", ACTION, f"action.{ACTION}"):
+        for key in (STATE, ACTION):
             value = batch.get(key)
             if torch.is_tensor(value):
                 batch[key] = self._joint_transform.to_checkpoint(value)
         return batch
+
+    @staticmethod
+    def _action_horizon_mask(batch: dict[str, Any]) -> torch.Tensor | None:
+        """Resolve an action horizon mask from either Observation dictionary form.
+
+        Returns:
+            The optional nested or flattened action horizon mask.
+        """
+        extra = batch.get(EXTRA)
+        if isinstance(extra, dict):
+            mask = extra.get("action_is_pad")
+            return mask if torch.is_tensor(mask) else None
+        mask = batch.get(f"{EXTRA}.action_is_pad")
+        return mask if torch.is_tensor(mask) else None
 
     def _add_action(self, output: dict[str, torch.Tensor], batch: dict[str, Any]) -> None:
         """Attach padded normalized action targets when present."""
@@ -161,7 +185,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             return
         padded, horizon_mask, dimension_mask = self._action_padder(
             action,
-            batch.get(f"{EXTRA}.action_is_pad"),
+            self._action_horizon_mask(batch),
         )
         output[ACTION] = padded
         output["action_horizon_is_pad"] = horizon_mask

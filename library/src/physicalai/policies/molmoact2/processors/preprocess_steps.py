@@ -74,7 +74,7 @@ class StateTaskImageExtractor:
         Raises:
             ValueError: If state, task, or image inputs are invalid.
         """
-        state = batch.get(STATE, batch.get(f"observation.{STATE}"))
+        state = batch.get(STATE)
         if state is None:
             msg = "MolmoAct2 requires a state tensor in the input batch."
             raise ValueError(msg)
@@ -90,7 +90,7 @@ class StateTaskImageExtractor:
 
     @staticmethod
     def _tasks(batch: dict[str, Any], batch_size: int) -> list[str]:
-        source = batch.get(TASK, batch.get(f"observation.{TASK}", batch.get("observation.language")))
+        source = batch.get(TASK)
         if isinstance(source, str):
             tasks = [source] * batch_size
         elif torch.is_tensor(source):
@@ -107,18 +107,29 @@ class StateTaskImageExtractor:
         return [normalize_text(task) for task in tasks]
 
     def _image_keys(self, batch: dict[str, Any]) -> list[str]:
-        explicit = [f"{IMAGES}.{name}" for name in self.image_keys]
-        available = [key for key in explicit if key in batch]
-        if available:
-            return available
-        flat = sorted(str(key) for key in batch if str(key).startswith(f"{IMAGES}.") and "is_pad" not in str(key))
-        if flat:
-            return flat
         images = batch.get(IMAGES)
         if isinstance(images, dict):
-            return [f"{IMAGES}.{name}" for name in images if "is_pad" not in str(name)]
+            configured = [f"{IMAGES}.{name}" for name in self.image_keys if name in images]
+            return configured or [f"{IMAGES}.{name}" for name in images if "is_pad" not in str(name)]
         if images is not None:
             return [IMAGES]
+
+        configured = [f"{IMAGES}.{name}" for name in self.image_keys]
+        available = [key for key in configured if batch.get(key) is not None]
+        if available:
+            return available
+        metadata_keys = batch.get(f"_{IMAGES}_keys")
+        if isinstance(metadata_keys, list):
+            flattened = [key for key in metadata_keys if isinstance(key, str) and batch.get(key) is not None]
+            if flattened:
+                return flattened
+        flattened = sorted(
+            str(key)
+            for key, value in batch.items()
+            if str(key).startswith(f"{IMAGES}.") and "is_pad" not in str(key) and value is not None
+        )
+        if flattened:
+            return flattened
         msg = "MolmoAct2 requires image tensors in BCHW format."
         raise ValueError(msg)
 
@@ -274,7 +285,7 @@ class ActionExtractor:
         Returns:
             The optional float32 action tensor.
         """
-        action = batch.get(ACTION, batch.get(f"action.{ACTION}"))
+        action = batch.get(ACTION)
         return None if action is None else torch.as_tensor(action, dtype=torch.float32)
 
 
