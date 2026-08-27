@@ -395,6 +395,15 @@ class MolmoAct2Model(Model):
         if model.action_expert is not None:
             model.action_expert.gradient_checkpointing = True
 
+    def enable_compile(self) -> None:
+        """Compile model training and inference entrypoints."""
+        torch.set_float32_matmul_precision("high")
+        self.forward = torch.compile(self.forward, mode="default")
+        self.predict_action_chunk = torch.compile(
+            self.predict_action_chunk,
+            mode="default",
+        )
+
     def gradient_checkpointing_disable(self) -> None:
         """Disable activation checkpointing on all component stacks."""
         model = self._unwrapped_backbone.model

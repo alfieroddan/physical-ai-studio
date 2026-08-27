@@ -84,7 +84,6 @@ TOP_LEVEL_CONFIG_MAP = {
     "add_action_expert": "add_action_expert",
     "add_control_tokens": "add_control_tokens",
     "add_setup_tokens": "add_setup_tokens",
-    "compile_model": "compile_model",
     "flow_matching_beta_alpha": "flow_matching_beta_alpha",
     "flow_matching_beta_beta": "flow_matching_beta_beta",
     "flow_matching_cutoff": "flow_matching_cutoff",

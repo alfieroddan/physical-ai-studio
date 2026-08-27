@@ -105,6 +105,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         control_mode: str | None = None,
         adapt_to_so101: bool = False,
         # weight management
+        compile_model: bool = False,
         gradient_checkpointing: bool = False,
         use_random_input_noise: bool = False,
         use_lora: bool = False,
@@ -141,6 +142,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             setup_type: Optional setup identifier used by the model configuration.
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
+            compile_model: Whether to compile model training and inference entrypoints.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_random_input_noise: Whether action generation starts from Gaussian noise.
             use_lora: Whether to enable LoRA adapters on the model.
@@ -189,6 +191,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.setup_type = setup_type
         self.control_mode = control_mode
         self.adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
+        self.compile_model = compile_model
         self.gradient_checkpointing = gradient_checkpointing
         self.use_random_input_noise = use_random_input_noise
         self.use_lora = use_lora
@@ -214,7 +217,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         super().__init__(n_action_steps=self.n_action_steps)
 
         # ignore input and output features, subject to change
-        self.save_hyperparameters(ignore=["input_features", "output_features"])
+        self.save_hyperparameters(ignore=["input_features", "output_features", "compile_model"])
 
         # pre and post processors
         self._preprocessor: MolmoAct2Preprocessor | None = None
@@ -330,6 +333,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         if self.train_action_head_only:
             model.freeze_vlm()
+
+        if self.compile_model:
+            model.enable_compile()
 
     @classmethod
     def _normalization_parameters(

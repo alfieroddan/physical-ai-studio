@@ -140,7 +140,6 @@ class MolmoAct2Config(Config):
 
     # Runtime and export
     checkpoint_path: str | None = None
-    compile_model: bool = False
     model_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
     openvino_compress_to_fp16: bool = False
 
