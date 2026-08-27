@@ -49,9 +49,14 @@ class MolmoAct2AdamW(torch.optim.AdamW):
         if not torch.distributed.is_available() or not torch.distributed.is_initialized():
             return nonfinite
 
-        device = torch.device("cuda", torch.cuda.current_device()) if "nccl" in str(
-            torch.distributed.get_backend()
-        ).lower() else torch.device("cpu")
+        device = (
+            torch.device("cuda", torch.cuda.current_device())
+            if "nccl"
+            in str(
+                torch.distributed.get_backend(),
+            ).lower()
+            else torch.device("cpu")
+        )
         flag = torch.tensor(nonfinite, device=device, dtype=torch.int32)
         torch.distributed.all_reduce(flag, op=torch.distributed.ReduceOp.MAX)
         return bool(flag.item())

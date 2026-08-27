@@ -67,12 +67,18 @@ def _masked_action_mse(
     valid = torch.ones_like(squared_error, dtype=torch.bool)
     if action_horizon_is_pad is not None:
         horizon = (~action_horizon_is_pad.to(squared_error.device, dtype=torch.bool)).view(
-            squared_error.shape[0], *([1] * (squared_error.ndim - 3)), squared_error.shape[-2], 1,
+            squared_error.shape[0],
+            *([1] * (squared_error.ndim - 3)),
+            squared_error.shape[-2],
+            1,
         )
         valid &= horizon
     if action_dim_is_pad is not None:
         dimensions = (~action_dim_is_pad.to(squared_error.device, dtype=torch.bool)).view(
-            squared_error.shape[0], *([1] * (squared_error.ndim - 3)), 1, squared_error.shape[-1],
+            squared_error.shape[0],
+            *([1] * (squared_error.ndim - 3)),
+            1,
+            squared_error.shape[-1],
         )
         valid &= dimensions
     mask = valid.to(squared_error.dtype)
