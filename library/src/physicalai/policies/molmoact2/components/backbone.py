@@ -226,9 +226,8 @@ class MolmoAct2Backbone(nn.Module):
 
         Encodes text+vision, collects per-layer KV, then Euler-integrates the
         action expert's velocity field. Integration starts from zeros by default
-        (deterministic, export-friendly); set ``sample_noise`` (driven by
-        ``config.use_random_input_noise``) to start from a sampled Gaussian
-        vector instead.
+        (deterministic, export-friendly); set ``sample_noise`` to start from a
+        sampled Gaussian vector instead.
 
         Returns:
             Action trajectory ``(batch, action_horizon, max_action_dim)``.

@@ -143,12 +143,8 @@ class MolmoAct2Config(Config):
     compile_model: bool = False
     model_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
     openvino_compress_to_fp16: bool = False
-    train_action_expert_only: bool = False
-    gradient_checkpointing: bool = False
 
-    # LoRA
-    use_lora: bool = False
-    enable_lora_action_expert: bool = False
+    # LoRA parameters
     lora_rank: int = 64
     lora_alpha: int = 16
     lora_dropout: float = 0.05

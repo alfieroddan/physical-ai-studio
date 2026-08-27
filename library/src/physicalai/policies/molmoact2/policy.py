@@ -10,17 +10,21 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal, override
 
+import torch
 from huggingface_hub import snapshot_download
+from torch import Tensor
 
-from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.data.dataset import Dataset
+from physicalai.data.observation import ACTION, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportablePolicyMixin
 from physicalai.policies.base import Policy
+from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
 from .model import MolmoAct2Model
+from .optimizer import MolmoAct2AdamW
 from .pretrained_utils import (
     ACTION_EXPERT_CONFIG_MAP,
     ADAPTER_CONFIG_MAP,
@@ -34,6 +38,11 @@ from .processors import (
     MolmoAct2Preprocessor,
     make_molmoact2_preprocessors,
 )
+
+if TYPE_CHECKING:
+    from lightning.pytorch.utilities.types import OptimizerLRScheduler
+
+    from physicalai.gyms import Gym
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -78,8 +87,26 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         adapt_to_so101: bool = False,
         # weight management
         gradient_checkpointing: bool = False,
+        use_random_input_noise: bool = False,
         use_lora: bool = False,
+        enable_lora_action_expert: bool = False,
+        lora_rank: int = 64,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_bias: Literal["all", "lora_only", "none"] = "none",
         train_action_head_only: bool = False,
+        # optimization
+        optimizer_lr: float = 1e-5,
+        optimizer_vit_lr: float = 5e-6,
+        optimizer_connector_lr: float = 5e-6,
+        optimizer_action_expert_lr: float = 5e-5,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-6,
+        optimizer_weight_decay: float = 0.0,
+        optimizer_grad_clip_norm: float = 1.0,
+        scheduler_warmup_steps: int = 200,
+        scheduler_decay_steps: int = 24_000,
+        scheduler_decay_lr: float = 1e-6,
     ) -> None:
         """Initialize a MolmoAct2 policy instance.
 
@@ -96,26 +123,76 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
+            use_random_input_noise: Whether action generation starts from Gaussian noise.
             use_lora: Whether to enable LoRA adapters on the model.
+            enable_lora_action_expert: Whether LoRA adapters also target the action expert.
+            lora_rank: LoRA rank.
+            lora_alpha: LoRA scaling value.
+            lora_dropout: LoRA dropout probability.
+            lora_bias: LoRA bias training mode.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
+            optimizer_lr: Learning rate for text-model parameters.
+            optimizer_vit_lr: Learning rate for vision-model parameters.
+            optimizer_connector_lr: Learning rate for image connector parameters.
+            optimizer_action_expert_lr: Learning rate for action-expert parameters.
+            optimizer_betas: AdamW beta coefficients.
+            optimizer_eps: AdamW epsilon.
+            optimizer_weight_decay: AdamW weight decay.
+            optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
+            scheduler_warmup_steps: Number of linear warmup steps.
+            scheduler_decay_steps: Number of cosine decay steps.
+            scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
+
+        Raises:
+            ValueError: If LoRA options are inconsistent or invalid.
         """
+        if enable_lora_action_expert and not use_lora:
+            msg = "enable_lora_action_expert requires use_lora=True."
+            raise ValueError(msg)
+        if use_lora and train_action_head_only:
+            msg = "use_lora is incompatible with train_action_head_only."
+            raise ValueError(msg)
+        if lora_rank < 1:
+            msg = "lora_rank must be positive."
+            raise ValueError(msg)
+        if not 0.0 <= lora_dropout < 1.0:
+            msg = "lora_dropout must be in [0, 1)."
+            raise ValueError(msg)
+
         # args
-        self._input_features = input_features
-        self._output_features = output_features
-        self._pretrained_name_or_path = pretrained_name_or_path
-        self._norm_tag = norm_tag
-        self._n_action_steps = n_action_steps
-        self._chunk_size = chunk_size
-        self._n_obs_steps = n_obs_steps
-        self._setup_type = setup_type
-        self._control_mode = control_mode
-        self._adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
+        self.input_features = input_features
+        self.output_features = output_features
+        self.pretrained_name_or_path = pretrained_name_or_path
+        self.norm_tag = norm_tag
+        self.n_action_steps = n_action_steps
+        self.chunk_size = chunk_size
+        self.n_obs_steps = n_obs_steps
+        self.setup_type = setup_type
+        self.control_mode = control_mode
+        self.adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
         self.gradient_checkpointing = gradient_checkpointing
+        self.use_random_input_noise = use_random_input_noise
         self.use_lora = use_lora
+        self.enable_lora_action_expert = enable_lora_action_expert
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_bias: Literal["all", "lora_only", "none"] = lora_bias
         self.train_action_head_only = train_action_head_only
+        self.optimizer_lr = optimizer_lr
+        self.optimizer_vit_lr = optimizer_vit_lr
+        self.optimizer_connector_lr = optimizer_connector_lr
+        self.optimizer_action_expert_lr = optimizer_action_expert_lr
+        self.optimizer_betas = optimizer_betas
+        self.optimizer_eps = optimizer_eps
+        self.optimizer_weight_decay = optimizer_weight_decay
+        self.optimizer_grad_clip_norm = optimizer_grad_clip_norm
+        self.scheduler_warmup_steps = scheduler_warmup_steps
+        self.scheduler_decay_steps = scheduler_decay_steps
+        self.scheduler_decay_lr = scheduler_decay_lr
 
         # initialize super
-        super().__init__(n_action_steps=self._n_action_steps)
+        super().__init__(n_action_steps=self.n_action_steps)
 
         # ignore input and output features, subject to change
         self.save_hyperparameters(ignore=["input_features", "output_features"])
@@ -156,10 +233,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 input or output feature definitions.
         """
         # initialize model from pretrained if available
-        if self._pretrained_name_or_path:
+        if self.pretrained_name_or_path:
             # gather configs and weights from path (hf hub)
             hf_config, norm_stats_config, tokenizer_config, weights_path = self._from_hf(
-                self._pretrained_name_or_path,
+                self.pretrained_name_or_path,
             )
             config = self._convert_config(
                 hf_config,
@@ -168,19 +245,24 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 weights_path.parent,
             )
         else:
-            if self._input_features is None or self._output_features is None:
+            if self.input_features is None or self.output_features is None:
                 msg = "Input and output features are required to initialize MolmoAct2 without pretrained data."
                 raise RuntimeError(msg)
             weights_path = None
             config = MolmoAct2Config(
-                input_features=self._input_features,
-                output_features=self._output_features,
-                n_obs_steps=self._n_obs_steps,
-                chunk_size=self._chunk_size,
-                n_action_steps=self._n_action_steps,
-                setup_type=self._setup_type or "",
-                control_mode=self._control_mode or "",
-                adapt_to_so101=self._adapt_to_so101,
+                input_features=self.input_features,
+                output_features=self.output_features,
+                n_obs_steps=self.n_obs_steps,
+                chunk_size=self.chunk_size,
+                n_action_steps=self.n_action_steps,
+                setup_type=self.setup_type or "",
+                control_mode=self.control_mode or "",
+                adapt_to_so101=self.adapt_to_so101,
+                use_random_input_noise=self.use_random_input_noise,
+                lora_rank=self.lora_rank,
+                lora_alpha=self.lora_alpha,
+                lora_dropout=self.lora_dropout,
+                lora_bias=self.lora_bias,
             )
 
         # resulting config and weights path
@@ -201,14 +283,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             raise RuntimeError(msg)
 
         # update instance attributes from config
-        self._input_features = config.input_features
-        self._output_features = config.output_features
-        self._n_action_steps = config.n_action_steps
-        self._chunk_size = config.chunk_size
-        self._n_obs_steps = config.n_obs_steps
-        self._setup_type = config.setup_type
-        self._control_mode = config.control_mode
-        self._adapt_to_so101 = config.adapt_to_so101
+        self.input_features = config.input_features
+        self.output_features = config.output_features
+        self.n_action_steps = config.n_action_steps
+        self.chunk_size = config.chunk_size
+        self.n_obs_steps = config.n_obs_steps
+        self.setup_type = config.setup_type
+        self.control_mode = config.control_mode
+        self.adapt_to_so101 = config.adapt_to_so101
 
         self._model = MolmoAct2Model.from_config(config)
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
@@ -225,7 +307,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             model.enable_gradient_checkpointing()
 
         if self.use_lora:
-            model.enable_lora()
+            model.enable_lora(enable_action_expert=self.enable_lora_action_expert)
 
         if self.train_action_head_only:
             model.freeze_vlm()
@@ -295,10 +377,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = f"MolmoAct2 normalization stats for {feature_key!r} require a boolean mask."
             raise TypeError(msg)
         if len(mask) != feature_size:
-            msg = (
-                f"MolmoAct2 normalization mask for {feature_key!r} has {len(mask)} values; "
-                f"expected {feature_size}."
-            )
+            msg = f"MolmoAct2 normalization mask for {feature_key!r} has {len(mask)} values; expected {feature_size}."
             raise ValueError(msg)
         return mask
 
@@ -335,8 +414,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         ]
         if any(minimum < -1.0 or maximum > 1.0 for minimum, maximum in passthrough_bounds):
             msg = (
-                f"MolmoAct2 {feature_key} pass-through values are not under [-1, 1]. "
-                "Please set normalize_gripper=True."
+                f"MolmoAct2 {feature_key} pass-through values are not under [-1, 1]. Please set normalize_gripper=True."
             )
             raise ValueError(msg)
 
@@ -374,19 +452,19 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             ValueError: If no normalization tag has been configured for the policy.
             TypeError: If the normalization metadata is missing or malformed.
         """
-        if self._norm_tag is None:
+        if self.norm_tag is None:
             msg = "Normalization tag is required when loading pretrained MolmoAct2 data."
             raise ValueError(msg)
         metadata_by_tag = norm_stats_config.get("metadata_by_tag")
         if not isinstance(metadata_by_tag, dict):
             msg = "MolmoAct2 norm stats are missing metadata_by_tag."
             raise TypeError(msg)
-        tag_metadata = metadata_by_tag.get(self._norm_tag)
+        tag_metadata = metadata_by_tag.get(self.norm_tag)
         if tag_metadata is None:
-            msg = f"Normalization tag {self._norm_tag!r} was not found in MolmoAct2 norm stats."
+            msg = f"Normalization tag {self.norm_tag!r} was not found in MolmoAct2 norm stats."
             raise ValueError(msg)
         if not isinstance(tag_metadata, dict):
-            msg = f"Normalization metadata for tag {self._norm_tag!r} is not a JSON object."
+            msg = f"Normalization metadata for tag {self.norm_tag!r} is not a JSON object."
             raise TypeError(msg)
         return tag_metadata
 
@@ -413,7 +491,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         """
         camera_keys = tag_metadata.get("camera_keys")
         if not isinstance(camera_keys, list) or not all(isinstance(key, str) for key in camera_keys):
-            msg = f"Invalid camera_keys for normalization tag {self._norm_tag!r}."
+            msg = f"Invalid camera_keys for normalization tag {self.norm_tag!r}."
             raise TypeError(msg)
 
         input_features = [
@@ -428,7 +506,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         state_key = tag_metadata.get("state_key")
         state_stats = tag_metadata.get("state_stats")
         if not isinstance(state_key, str) or not isinstance(state_stats, dict):
-            msg = f"Invalid state metadata for normalization tag {self._norm_tag!r}."
+            msg = f"Invalid state metadata for normalization tag {self.norm_tag!r}."
             raise TypeError(msg)
         input_features.append(
             Feature(
@@ -446,7 +524,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         action_key = tag_metadata.get("action_key")
         action_stats = tag_metadata.get("action_stats")
         if not isinstance(action_key, str) or not isinstance(action_stats, dict):
-            msg = f"Invalid action metadata for normalization tag {self._norm_tag!r}."
+            msg = f"Invalid action metadata for normalization tag {self.norm_tag!r}."
             raise TypeError(msg)
         output_features = [
             Feature(
@@ -508,14 +586,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         norm_mode = norm_stats_config.get("norm_mode")
         normalization_mode = normalization_modes.get(str(norm_mode), config.normalization_mode)
 
-        input_features = self._input_features
-        output_features = self._output_features
-        chunk_size = self._chunk_size
+        input_features = self.input_features
+        output_features = self.output_features
+        chunk_size = self.chunk_size
         normalize_gripper = config.normalize_gripper
-        setup_type = self._setup_type or config.setup_type
-        control_mode = self._control_mode or config.control_mode
+        setup_type = self.setup_type or config.setup_type
+        control_mode = self.control_mode or config.control_mode
 
-        if self._norm_tag is not None:
+        if self.norm_tag is not None:
             tag_metadata = self._resolve_norm_tag(norm_stats_config)
             normalize_gripper = bool(tag_metadata.get("normalize_gripper", False))
             input_features, output_features = self._create_features_from_norm_stats(
@@ -525,29 +603,34 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             )
             action_horizon = tag_metadata.get("action_horizon")
             if not isinstance(action_horizon, int):
-                msg = f"Invalid action_horizon for normalization tag {self._norm_tag!r}."
+                msg = f"Invalid action_horizon for normalization tag {self.norm_tag!r}."
                 raise TypeError(msg)
             chunk_size = action_horizon
-            if self._setup_type is None:
+            if self.setup_type is None:
                 setup_type = str(tag_metadata.get("setup_type") or "")
-            if self._control_mode is None:
+            if self.control_mode is None:
                 control_mode = str(tag_metadata.get("control_mode") or "")
 
         return replace(
             config,
             input_features=input_features,
             output_features=output_features,
-            norm_tag=self._norm_tag,
+            norm_tag=self.norm_tag,
             normalize_gripper=normalize_gripper,
             chunk_size=chunk_size,
-            n_action_steps=self._n_action_steps,
-            n_obs_steps=self._n_obs_steps,
+            n_action_steps=self.n_action_steps,
+            n_obs_steps=self.n_obs_steps,
             setup_type=setup_type,
             control_mode=control_mode,
-            adapt_to_so101=self._adapt_to_so101,
+            adapt_to_so101=self.adapt_to_so101,
             normalization_mode=normalization_mode,
             tokenizer_config=tokenizer_config,
             tokenizer_name_or_path=str(snapshot_dir),
+            use_random_input_noise=self.use_random_input_noise,
+            lora_rank=self.lora_rank,
+            lora_alpha=self.lora_alpha,
+            lora_dropout=self.lora_dropout,
+            lora_bias=self.lora_bias,
         )
 
     @staticmethod
@@ -571,7 +654,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         if not path.is_dir():
             path = Path(
-                snapshot_download(
+                snapshot_download(  # nosec B615
                     repo_id=str(pretrained_name_or_path),
                     allow_patterns=[
                         "config.json",
@@ -606,10 +689,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             weights_file = path / "model.safetensors.index.json"
 
         if not weights_file.is_file():
-            msg = (
-                f"MolmoAct2 checkpoint at {path} must contain "
-                "model.safetensors or model.safetensors.index.json."
-            )
+            msg = f"MolmoAct2 checkpoint at {path} must contain model.safetensors or model.safetensors.index.json."
             raise FileNotFoundError(msg)
 
         # Parse config_file.
@@ -657,10 +737,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # if the model is init - we fail or attach features
         if self._model is not None:
             config = self._require_config()
-            if (
-                config.input_features != dataset_input_features
-                or config.output_features != dataset_output_features
-            ):
+            if config.input_features != dataset_input_features or config.output_features != dataset_output_features:
                 msg_0 = (
                     "Eager policy features do not match the training dataset; "
                     "construct the policy lazily to replace pretrained features during setup"
@@ -668,8 +745,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 raise ValueError(msg_0)
             return
 
-        self._input_features = dataset_input_features
-        self._output_features = dataset_output_features
+        self.input_features = dataset_input_features
+        self.output_features = dataset_output_features
         self.initialize_model()
 
     @staticmethod
@@ -679,20 +756,161 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             list(dataset.action_features.values()),
         )
 
-    def forward(self, batch: Any) -> Any:
-        """Run a forward pass for the policy.
+    @override
+    def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute training loss or predict an action chunk.
 
-        The runtime path is intentionally left unimplemented while init wiring is developed.
+        Returns:
+            A loss tuple in training mode or denormalized actions in evaluation mode.
+
+        Raises:
+            RuntimeError: If the model or preprocessor is not initialized.
         """
-        del batch
-        msg = "Forward pass is not implemented."
-        raise NotImplementedError(msg)
+        if not self.training:
+            return self.predict_action_chunk(batch)
+        model = self._require_model()
+        if self._preprocessor is None:
+            msg = "Policy preprocessor is not initialized"
+            raise RuntimeError(msg)
+        return model(self._preprocessor(batch.to_dict()))
 
-    def predict_action_chunk(self, batch: Any) -> Any:
-        """Predict an action chunk for policy inference.
+    @torch.no_grad()
+    @override
+    def predict_action_chunk(self, batch: Observation) -> Tensor:
+        """Predict and denormalize an action chunk.
 
-        The runtime path is intentionally left unimplemented while init wiring is developed.
+        Returns:
+            Action tensor shaped ``(batch, n_action_steps, action_dim)``.
+
+        Raises:
+            RuntimeError: If the model or processors are not initialized.
         """
-        del batch
-        msg = "Action prediction is not implemented."
-        raise NotImplementedError(msg)
+        model = self._require_model()
+        if self._preprocessor is None or self._postprocessor is None:
+            msg = "Policy processors are not initialized"
+            raise RuntimeError(msg)
+        processed = self._preprocessor(batch.to(self.device).to_dict())
+        return self._postprocessor({ACTION: model.predict_action_chunk(processed)})[ACTION]
+
+    def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
+        """Compute and log the training loss.
+
+        Returns:
+            The differentiable training loss.
+        """
+        del batch_idx
+        loss, metrics = self(batch)
+        self.log("train/loss", metrics["loss"], prog_bar=True)
+        self.log("train/action_flow_loss", metrics["action_flow_loss"])
+        return loss
+
+    @override
+    def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute denoised action MSE and flow-matching validation loss.
+
+        Returns:
+            The primary action MSE and detached validation metrics.
+
+        Raises:
+            RuntimeError: If the model or preprocessor is not initialized.
+        """
+        model = self._require_model()
+        if self._preprocessor is None:
+            msg = "Policy preprocessor is not initialized"
+            raise RuntimeError(msg)
+        return model.compute_val_loss(self._preprocessor(batch.to_dict()))
+
+    @override
+    def validation_step(self, batch: Gym | Observation, batch_idx: int) -> dict[str, float] | Tensor:
+        """Evaluate an observation loss batch or a Gym rollout.
+
+        Returns:
+            The validation loss for observations or rollout metrics for Gym batches.
+        """
+        if not isinstance(batch, Observation):
+            return self.evaluate_gym(batch, batch_idx, stage="val")
+        loss, metrics = self.compute_val_loss(batch)
+        for name in ("loss", "action_mse", "action_flow_loss"):
+            self.log(
+                f"val/{name}",
+                metrics[name],
+                prog_bar=name == "loss",
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+            )
+        return loss
+
+    def get_optim_params(self) -> list[dict[str, Any]]:
+        """Group trainable parameters by model component.
+
+        Returns:
+            Non-empty optimizer groups with component-specific learning rates.
+        """
+        grouped: dict[str, list[torch.nn.Parameter]] = {
+            "vlm": [],
+            "vit": [],
+            "connector": [],
+            "action_expert": [],
+        }
+        for name, parameter in self._require_model().named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if "action_expert" in name:
+                grouped["action_expert"].append(parameter)
+            elif any(part in name for part in ("image_pooling_2d", "image_projector", "wte.new_embedding")):
+                grouped["connector"].append(parameter)
+            elif "vision_backbone" in name:
+                grouped["vit"].append(parameter)
+            else:
+                grouped["vlm"].append(parameter)
+
+        learning_rates = {
+            "vlm": self.optimizer_lr,
+            "vit": self.optimizer_vit_lr,
+            "connector": self.optimizer_connector_lr,
+            "action_expert": self.optimizer_action_expert_lr,
+        }
+        return [
+            {"params": parameters, "lr": learning_rates[name], "name": name}
+            for name, parameters in grouped.items()
+            if parameters
+        ]
+
+    def configure_optimizers(self) -> OptimizerLRScheduler:
+        """Build the MolmoAct2 optimizer and step-wise cosine scheduler.
+
+        Returns:
+            Lightning optimizer and scheduler configuration.
+        """
+        optimizer = MolmoAct2AdamW(
+            self.get_optim_params(),
+            lr=self.optimizer_lr,
+            betas=self.optimizer_betas,
+            eps=self.optimizer_eps,
+            weight_decay=self.optimizer_weight_decay,
+            group_grad_clip_norm=self.optimizer_grad_clip_norm,
+        )
+        training_steps = int(self.trainer.estimated_stepping_batches)
+        scheduler = cosine_decay_with_warmup_scheduler(
+            optimizer,
+            peak_lr=self.optimizer_lr,
+            decay_lr=self.scheduler_decay_lr,
+            num_warmup_steps=self.scheduler_warmup_steps,
+            num_decay_steps=self.scheduler_decay_steps,
+            num_training_steps=training_steps,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+        }
+
+    @override
+    def configure_gradient_clipping(
+        self,
+        optimizer: torch.optim.Optimizer,
+        gradient_clip_val: float | None = None,
+        gradient_clip_algorithm: str | None = None,
+    ) -> None:
+        """Leave clipping to :class:`MolmoAct2AdamW` for independent groups."""
+        del optimizer, gradient_clip_val, gradient_clip_algorithm

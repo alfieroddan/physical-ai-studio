@@ -11,8 +11,12 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Self, override
 
+import torch
 from safetensors.torch import load_file as load_safetensors_file
+from torch import Tensor
+from torch.nn import functional
 
+from physicalai.data.observation import ACTION, FeatureType
 from physicalai.policies.base import Model
 
 from .components import (
@@ -24,8 +28,6 @@ from .components import (
 )
 
 if TYPE_CHECKING:
-    from torch import Tensor
-
     from .config import MolmoAct2Config
 
 
@@ -42,6 +44,39 @@ _ACTION_EXPERT_LORA_LINEAR_LEAVES = (
     r"blocks\.\d+\.modulation\.linear|"
     r"final_layer\.(modulation\.linear|linear)"
 )
+
+_MODEL_INPUT_KEYS = (
+    "input_ids",
+    "attention_mask",
+    "token_type_ids",
+    "images",
+    "token_pooling",
+    "action_dim_is_pad",
+)
+
+
+def _masked_action_mse(
+    predicted: Tensor,
+    target: Tensor,
+    *,
+    action_horizon_is_pad: Tensor | None,
+    action_dim_is_pad: Tensor | None,
+) -> Tensor:
+    """Return MSE over non-padded action steps and dimensions."""
+    squared_error = functional.mse_loss(predicted, target, reduction="none")
+    valid = torch.ones_like(squared_error, dtype=torch.bool)
+    if action_horizon_is_pad is not None:
+        horizon = (~action_horizon_is_pad.to(squared_error.device, dtype=torch.bool)).view(
+            squared_error.shape[0], *([1] * (squared_error.ndim - 3)), squared_error.shape[-2], 1,
+        )
+        valid &= horizon
+    if action_dim_is_pad is not None:
+        dimensions = (~action_dim_is_pad.to(squared_error.device, dtype=torch.bool)).view(
+            squared_error.shape[0], *([1] * (squared_error.ndim - 3)), 1, squared_error.shape[-1],
+        )
+        valid &= dimensions
+    mask = valid.to(squared_error.dtype)
+    return (squared_error * mask).sum() / mask.sum().clamp_min(1)
 
 
 def _lora_target_modules(*, enable_action_expert: bool) -> str:
@@ -154,8 +189,11 @@ class MolmoAct2Model(Model):
         flow_matching_time_scale: float = 0.999,
         flow_matching_beta_alpha: float = 1.0,
         flow_matching_beta_beta: float = 1.5,
+        chunk_size: int = 30,
+        n_action_steps: int = 30,
+        action_dim: int | None = None,
+        use_random_input_noise: bool = False,
         # LoRA
-        enable_lora_action_expert: bool = False,
         lora_rank: int = 64,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
@@ -163,11 +201,14 @@ class MolmoAct2Model(Model):
     ) -> None:
         """Construct the text, vision, and action components."""
         super().__init__()
-        self._enable_lora_action_expert = enable_lora_action_expert
         self._lora_rank = lora_rank
         self._lora_alpha = lora_alpha
         self._lora_dropout = lora_dropout
         self._lora_bias: Literal["all", "lora_only", "none"] = lora_bias
+        self._chunk_size = chunk_size
+        self._n_action_steps = n_action_steps
+        self._action_dim = action_dim or max_action_dim
+        self._use_random_input_noise = use_random_input_noise
         self._vlm_frozen = False
 
         transformer = MolmoAct2TextModel(
@@ -306,7 +347,7 @@ class MolmoAct2Model(Model):
             return base_model.model  # type: ignore[no-any-return]
         return self.backbone  # type: ignore[return-value]
 
-    def enable_lora(self) -> None:
+    def enable_lora(self, *, enable_action_expert: bool = False) -> None:
         """Attach PEFT LoRA adapters to configured MolmoAct2 linear layers.
 
         Raises:
@@ -327,11 +368,11 @@ class MolmoAct2Model(Model):
             r=self._lora_rank,
             lora_alpha=self._lora_alpha,
             lora_dropout=self._lora_dropout,
-            target_modules=_lora_target_modules(enable_action_expert=self._enable_lora_action_expert),
+            target_modules=_lora_target_modules(enable_action_expert=enable_action_expert),
             bias=self._lora_bias,
         )
         self.backbone = get_peft_model(self.backbone, lora_config)  # type: ignore[assignment, arg-type]  # pyrefly: ignore[bad-assignment]
-        if not self._enable_lora_action_expert:
+        if not enable_action_expert:
             action_expert = self._unwrapped_backbone.model.action_expert
             if action_expert is None:
                 msg = "LoRA without action-expert adapters requires an action expert to train."
@@ -391,17 +432,93 @@ class MolmoAct2Model(Model):
 
     @override
     def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
-        """Run a model forward pass in a later implementation phase."""
-        del batch
-        msg = "MolmoAct2 forward is not implemented."
-        raise NotImplementedError(msg)
+        """Compute training loss or predict actions according to module mode.
+
+        Returns:
+            A loss tuple in training mode or a normalized action chunk in evaluation mode.
+        """
+        if self.training:
+            return self.compute_loss(batch)
+        return self.predict_action_chunk(batch)
 
     @override
     def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
-        """Compute training loss in a later implementation phase."""
-        del batch
-        msg = "MolmoAct2 training loss is not implemented."
-        raise NotImplementedError(msg)
+        """Compute the masked continuous flow-matching objective.
+
+        Returns:
+            The differentiable loss and detached metrics.
+        """
+        predicted, target = self._unwrapped_backbone.model.predict_flow_velocity(
+            input_ids=batch["input_ids"],
+            attention_mask=batch.get("attention_mask"),
+            token_type_ids=batch.get("token_type_ids"),
+            images=batch.get("images"),
+            token_pooling=batch.get("token_pooling"),
+            actions=batch[ACTION],
+            action_dim_is_pad=batch.get("action_dim_is_pad"),
+            freeze_encoder=self._vlm_frozen,
+        )
+        loss = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=batch.get("action_horizon_is_pad"),
+            action_dim_is_pad=batch.get("action_dim_is_pad")
+            if self._unwrapped_backbone.model.mask_action_dim_padding
+            else None,
+        )
+        metric = loss.detach()
+        return loss, {"action_flow_loss": metric, "loss": metric}
+
+    @torch.no_grad()
+    def predict_action_chunk(
+        self,
+        batch: dict[str, Any],
+        *,
+        sample_noise: bool | None = None,
+        generator: torch.Generator | None = None,
+    ) -> Tensor:
+        """Generate a normalized action chunk with continuous flow matching.
+
+        Returns:
+            Normalized actions trimmed to the configured horizon and action dimension.
+        """
+        model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
+        actions = self._unwrapped_backbone.model.generate_actions_from_inputs(
+            **model_inputs,
+            action_horizon=self._chunk_size,
+            sample_noise=self._use_random_input_noise if sample_noise is None else sample_noise,
+            generator=generator,
+        )
+        return actions[:, : self._n_action_steps, : self._action_dim].float()
+
+    @torch.no_grad()
+    @override
+    def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute denoised action MSE and the flow-matching validation loss.
+
+        Returns:
+            Denoised action MSE and detached action-MSE and flow-loss metrics.
+        """
+        predicted = self.predict_action_chunk(batch, sample_noise=False)
+        target = batch[ACTION][:, : predicted.shape[1], : predicted.shape[2]].to(predicted)
+        horizon_mask = batch.get("action_horizon_is_pad")
+        if horizon_mask is not None:
+            horizon_mask = horizon_mask[:, : predicted.shape[1]]
+        dimension_mask = batch.get("action_dim_is_pad")
+        if dimension_mask is not None:
+            dimension_mask = dimension_mask[:, : predicted.shape[2]]
+        action_mse = _masked_action_mse(
+            predicted,
+            target,
+            action_horizon_is_pad=horizon_mask,
+            action_dim_is_pad=dimension_mask,
+        )
+        flow_loss, _ = self.compute_loss(batch)
+        return action_mse, {
+            "loss": action_mse.detach(),
+            "action_mse": action_mse.detach(),
+            "action_flow_loss": flow_loss.detach(),
+        }
 
     @property
     @override
@@ -411,9 +528,9 @@ class MolmoAct2Model(Model):
 
     @property
     @override
-    def action_delta_indices(self) -> None:
-        """Action deltas will be exposed with the runtime implementation."""
-        return None
+    def action_delta_indices(self) -> list[int]:
+        """Future action indices in the configured chunk."""
+        return list(range(self._chunk_size))
 
     @property
     @override
@@ -422,7 +539,10 @@ class MolmoAct2Model(Model):
         return None
 
     @classmethod
-    def from_config(cls, config: MolmoAct2Config) -> Self:
+    def from_config(
+        cls,
+        config: MolmoAct2Config,
+    ) -> Self:
         """Construct a model from a resolved MolmoAct2 configuration.
 
         Returns:
@@ -437,6 +557,12 @@ class MolmoAct2Model(Model):
         if config.image_patch_id is None:
             msg = "image_patch_id must be resolved before building MolmoAct2Model."
             raise ValueError(msg)
+
+        action_dim = config.max_action_dim
+        for feature in config.output_features or []:
+            if feature.ftype == FeatureType.ACTION and feature.shape:
+                action_dim = int(feature.shape[-1])
+                break
 
         return cls(
             hidden_size=config.hidden_size,
@@ -501,7 +627,10 @@ class MolmoAct2Model(Model):
             flow_matching_time_scale=config.flow_matching_time_scale,
             flow_matching_beta_alpha=config.flow_matching_beta_alpha,
             flow_matching_beta_beta=config.flow_matching_beta_beta,
-            enable_lora_action_expert=config.enable_lora_action_expert,
+            chunk_size=config.chunk_size,
+            n_action_steps=config.n_action_steps,
+            action_dim=action_dim,
+            use_random_input_noise=config.use_random_input_noise,
             lora_rank=config.lora_rank,
             lora_alpha=config.lora_alpha,
             lora_dropout=config.lora_dropout,
