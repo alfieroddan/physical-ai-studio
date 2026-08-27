@@ -124,7 +124,7 @@ def _resolve_weights_path(weights_path: str | Path) -> Path:
 class MolmoAct2Model(Model):
     """Native MolmoAct2 architecture assembled from explicit model arguments."""
 
-    def __init__(  # ruff: ignore[too-many-arguments]
+    def __init__(  # noqa: PLR0913
         self,
         *,
         # Text transformer
@@ -365,7 +365,7 @@ class MolmoAct2Model(Model):
             msg = "MolmoAct2 LoRA adapters are already enabled."
             raise RuntimeError(msg)
         try:
-            from peft import LoraConfig, get_peft_model  # ruff: ignore[import-outside-top-level]
+            from peft import LoraConfig, get_peft_model  # noqa: PLC0415
         except ImportError as error:
             msg = "MolmoAct2 LoRA requires peft. Install with: pip install 'physicalai-train[molmoact2]'"
             raise ImportError(msg) from error
@@ -398,7 +398,7 @@ class MolmoAct2Model(Model):
     def enable_compile(self) -> None:
         """Compile model training and inference entrypoints."""
         torch.set_float32_matmul_precision("high")
-        self.forward = torch.compile(self.forward, mode="default")
+        self.forward = torch.compile(self.forward, mode="default")  # type: ignore[method-assign]
         self.predict_action_chunk = torch.compile(
             self.predict_action_chunk,
             mode="default",

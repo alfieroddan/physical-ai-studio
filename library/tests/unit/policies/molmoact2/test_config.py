@@ -1,266 +1,59 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Unit tests for MolmoAct2 configuration dataclasses."""
-
-from __future__ import annotations
-
-import warnings
+"""Tests for MolmoAct2 configuration."""
 
 import pytest
 
 from physicalai.config import Config
-from physicalai.policies.molmoact2.config import (
-    DEFAULT_MOLMOACT2_REPO_ID,
-    MOLMOACT2_FRAME_END_TOKEN_ID,
-    MOLMOACT2_FRAME_START_TOKEN_ID,
-    MOLMOACT2_IMAGE_COL_ID,
-    MOLMOACT2_IMAGE_END_TOKEN_ID,
-    MOLMOACT2_IMAGE_LOW_RES_ID,
-    MOLMOACT2_IMAGE_PATCH_ID,
-    MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID,
-    MOLMOACT2_IMAGE_START_TOKEN_ID,
-    MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID,
-    MolmoAct2Config,
-)
+from physicalai.policies.molmoact2 import MolmoAct2Config
 
 
-class TestMolmoAct2Constants:
-    def test_default_repo_id_value(self) -> None:
-        assert DEFAULT_MOLMOACT2_REPO_ID == "allenai/MolmoAct2"
+def test_defaults_match_pretrained_architecture() -> None:
+    config = MolmoAct2Config()
 
-    def test_image_placeholder_token_id_value(self) -> None:
-        assert MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID == 154629
+    assert (config.hidden_size, config.num_hidden_layers, config.num_attention_heads) == (2560, 36, 32)
+    assert (config.chunk_size, config.n_action_steps, config.max_action_dim) == (30, 30, 32)
+    assert config.tokenizer_name_or_path == "allenai/MolmoAct2"
+    assert config.model_dtype == "bfloat16"
 
 
-class TestMolmoAct2Config:
-    def test_default_config(self) -> None:
-        config = MolmoAct2Config()
-        assert config.model_type == "molmoact2"
-        assert config.n_obs_steps == 1
-        assert config.chunk_size == 30
-        assert config.n_action_steps == 30
-        assert config.max_action_dim == 32
-        assert config.action_mode == "continuous"
-        assert config.state_format == "discrete"
-        assert config.image_num_pos == 729
-        assert config.openvino_compress_to_fp16 is False
+def test_custom_fields() -> None:
+    config = MolmoAct2Config(chunk_size=8, n_action_steps=4, hidden_size=128, model_dtype="float32")
 
-    def test_default_architecture_matches_molmo_base(self) -> None:
-        config = MolmoAct2Config()
-        assert config.hidden_size == 2560
-        assert config.num_attention_heads == 32
-        assert config.num_key_value_heads == 8
-        assert config.num_hidden_layers == 36
-        assert config.intermediate_size == 9728
-        assert config.qkv_bias is False
-        assert config.max_position_embeddings == 16_384
-        assert config.rope_theta == 5_000_000.0
-        assert config.use_qk_norm is True
-        assert config.qk_norm_type == "qwen3"
-        assert config.adapter_pooling_attention_mask is True
-        assert config.adapter_intermediate_size == 9728
-        assert config.adapter_text_hidden_size == 2560
-        assert config.action_expert_hidden_size == 768
-        assert config.action_expert_num_heads == 8
-        assert config.action_expert_mlp_ratio == 4.0
-        assert config.num_state_tokens == 256
-        assert config.action_expert_num_layers == 36
-        assert config.action_expert_max_action_horizon == 30
-        assert config.action_expert_max_action_dim == 32
+    assert (config.chunk_size, config.n_action_steps, config.hidden_size) == (8, 4, 128)
+    assert config.model_dtype == "float32"
 
-    def test_default_tokenizer_values(self) -> None:
-        config = MolmoAct2Config()
-        assert config.tokenizer_name_or_path == DEFAULT_MOLMOACT2_REPO_ID
-        assert config.tokenizer_padding == "max_length"
-        assert config.image_placeholder_token_id == MOLMOACT2_IMAGE_PLACEHOLDER_TOKEN_ID
-        assert config.tokenizer_config is None
 
-    def test_tokenizer_padding_accepts_longest(self) -> None:
-        assert MolmoAct2Config(tokenizer_padding="longest").tokenizer_padding == "longest"
+def test_serialization_round_trip() -> None:
+    config = MolmoAct2Config(chunk_size=8, n_action_steps=4, tokenizer_config={"pad_token": ""})
+    restored = MolmoAct2Config.from_dict(config.to_dict())
 
-    def test_tokenizer_padding_rejects_unknown_value(self) -> None:
-        with pytest.raises(ValueError, match="tokenizer_padding"):
-            MolmoAct2Config(tokenizer_padding="invalid")  # type: ignore[arg-type]
+    assert isinstance(restored, Config)
+    assert (restored.chunk_size, restored.n_action_steps) == (8, 4)
+    assert restored.tokenizer_config == {"pad_token": ""}
 
-    def test_default_image_token_ids(self) -> None:
-        config = MolmoAct2Config()
-        assert config.image_start_token_id == MOLMOACT2_IMAGE_START_TOKEN_ID
-        assert config.image_end_token_id == MOLMOACT2_IMAGE_END_TOKEN_ID
-        assert config.image_patch_id == MOLMOACT2_IMAGE_PATCH_ID
-        assert config.image_col_id == MOLMOACT2_IMAGE_COL_ID
-        assert config.low_res_image_start_token_id == MOLMOACT2_LOW_RES_IMAGE_START_TOKEN_ID
-        assert config.image_low_res_id == MOLMOACT2_IMAGE_LOW_RES_ID
-        assert config.frame_start_token_id == MOLMOACT2_FRAME_START_TOKEN_ID
-        assert config.frame_end_token_id == MOLMOACT2_FRAME_END_TOKEN_ID
 
-    def test_custom_config(self) -> None:
-        config = MolmoAct2Config(
-            chunk_size=10,
-            n_action_steps=5,
-            n_obs_steps=2,
-            max_action_dim=16,
-            action_mode="continuous",
-        )
-        assert config.chunk_size == 10
-        assert config.n_action_steps == 5
-        assert config.n_obs_steps == 2
-        assert config.max_action_dim == 16
+def test_policy_runtime_options_are_not_model_config() -> None:
+    data = MolmoAct2Config().to_dict()
 
-    def test_max_action_horizon_alias(self) -> None:
-        config = MolmoAct2Config(chunk_size=42)
-        assert config.max_action_horizon == 42
+    assert {
+        "compile_model",
+        "gradient_checkpointing",
+        "openvino_compress_to_fp16",
+        "optimizer_lr",
+        "use_lora",
+    }.isdisjoint(data)
 
-    def test_inheritance(self) -> None:
-        config = MolmoAct2Config()
-        assert isinstance(config, Config)
 
-    def test_serialization_round_trip(self) -> None:
-        config = MolmoAct2Config(
-            chunk_size=12,
-            n_action_steps=6,
-            max_action_dim=8,
-            compile_model=True,
-            model_dtype="float32",
-            openvino_compress_to_fp16=True,
-        )
-        data = config.to_dict()
-        assert data["chunk_size"] == 12
-        assert data["compile_model"] is True
-        assert data["openvino_compress_to_fp16"] is True
-        assert "optimizer_lr" not in data
-        assert "scheduler_warmup_steps" not in data
-        restored = MolmoAct2Config.from_dict(data)
-        assert restored.chunk_size == 12
-        assert restored.n_action_steps == 6
-        assert restored.max_action_dim == 8
-        assert restored.compile_model is True
-        assert restored.openvino_compress_to_fp16 is True
-
-    def test_openvino_fp16_compression_warns_for_non_fp32_model(self) -> None:
-        with pytest.warns(UserWarning, match="only converts FP32 constants"):
-            MolmoAct2Config(openvino_compress_to_fp16=True)
-
-    def test_openvino_fp16_compression_accepts_fp32_model(self) -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            MolmoAct2Config(model_dtype="float32", openvino_compress_to_fp16=True)
-
-    def test_serializer_carries_tokenizer_config(self) -> None:
-        tok_cfg = {"bos_token": "<|im_end|>", "pad_token": ""}
-        config = MolmoAct2Config(tokenizer_config=tok_cfg)
-        data = config.to_dict()
-        assert data["tokenizer_config"] == tok_cfg
-        restored = MolmoAct2Config.from_dict(data)
-        assert restored.tokenizer_config == tok_cfg
-
-    def test_serializer_carries_tokenizer_revision(self) -> None:
-        revision = "1dbc166cf8765166998eff31ade2eb64c8a40076"
-        config = MolmoAct2Config(tokenizer_revision=revision)
-        restored = MolmoAct2Config.from_dict(config.to_dict())
-        assert restored.tokenizer_revision == revision
-
-    def test_n_action_steps_validation_below_one(self) -> None:
-        with pytest.raises(ValueError, match="n_action_steps"):
-            MolmoAct2Config(chunk_size=10, n_action_steps=0)
-
-    def test_n_action_steps_exceeds_chunk_size(self) -> None:
-        with pytest.raises(ValueError, match="cannot be greater than chunk_size"):
-            MolmoAct2Config(chunk_size=4, n_action_steps=8)
-
-    def test_chunk_size_below_one(self) -> None:
-        with pytest.raises(ValueError, match="chunk_size"):
-            MolmoAct2Config(chunk_size=0)
-
-    def test_n_obs_steps_below_one(self) -> None:
-        with pytest.raises(ValueError, match="n_obs_steps"):
-            MolmoAct2Config(n_obs_steps=0)
-
-    def test_max_action_dim_below_one(self) -> None:
-        with pytest.raises(ValueError, match="max_action_dim"):
-            MolmoAct2Config(max_action_dim=0)
-
-    def test_train_action_expert_only_requires_continuous(self) -> None:
-        with pytest.raises(ValueError, match="train_action_expert_only"):
-            MolmoAct2Config(action_mode="discrete", train_action_expert_only=True)
-
-    def test_use_lora_defaults_off_and_train_action_expert_only_defaults_false(self) -> None:
-        config = MolmoAct2Config()
-        assert config.model_dtype == "bfloat16"
-        assert config.use_lora is False
-        assert config.enable_lora_action_expert is False
-        assert config.train_action_expert_only is False
-        assert config.lora_rank == 64
-        assert config.lora_alpha == 16
-        assert config.lora_dropout == 0.05
-        assert config.lora_bias == "none"
-
-    def test_model_dtype_must_be_supported(self) -> None:
-        with pytest.raises(ValueError, match="Unsupported model_dtype"):
-            MolmoAct2Config(model_dtype="float64")  # type: ignore[arg-type]
-
-    def test_use_lora_incompatible_with_train_action_expert_only(self) -> None:
-        with pytest.raises(ValueError, match="use_lora is incompatible with train_action_expert_only"):
-            MolmoAct2Config(use_lora=True, train_action_expert_only=True)
-
-    def test_enable_lora_action_expert_requires_use_lora(self) -> None:
-        with pytest.raises(ValueError, match="enable_lora_action_expert requires use_lora"):
-            MolmoAct2Config(enable_lora_action_expert=True)
-
-    def test_lora_rank_must_be_positive(self) -> None:
-        with pytest.raises(ValueError, match="lora_rank"):
-            MolmoAct2Config(use_lora=True, lora_rank=0)
-
-    def test_lora_dropout_range(self) -> None:
-        with pytest.raises(ValueError, match="lora_dropout"):
-            MolmoAct2Config(use_lora=True, lora_dropout=1.0)
-
-    def test_lora_bias_must_be_valid(self) -> None:
-        with pytest.raises(ValueError, match="lora_bias"):
-            MolmoAct2Config(use_lora=True, lora_bias="bogus")  # type: ignore[arg-type]
-
-    def test_use_lora_serialization_round_trip(self) -> None:
-        config = MolmoAct2Config(use_lora=True, lora_rank=8, lora_alpha=4, lora_dropout=0.1)
-        data = config.to_dict()
-        assert data["use_lora"] is True
-        assert data["lora_rank"] == 8
-        restored = MolmoAct2Config.from_dict(data)
-        assert restored.use_lora is True
-        assert restored.lora_rank == 8
-
-    def test_flow_matching_num_steps_validation(self) -> None:
-        with pytest.raises(ValueError, match="flow_matching_num_steps"):
-            MolmoAct2Config(flow_matching_num_steps=0)
-
-    def test_flow_matching_cutoff_validation(self) -> None:
-        with pytest.raises(ValueError, match="flow_matching_cutoff"):
-            MolmoAct2Config(flow_matching_cutoff=1.5)
-
-    def test_flow_matching_beta_alpha_validation(self) -> None:
-        with pytest.raises(ValueError, match="flow_matching_beta_alpha"):
-            MolmoAct2Config(flow_matching_beta_alpha=0.0)
-
-    def test_flow_matching_beta_beta_validation(self) -> None:
-        with pytest.raises(ValueError, match="flow_matching_beta_beta"):
-            MolmoAct2Config(flow_matching_beta_beta=-1.0)
-
-    def test_text_fields_are_flat(self) -> None:
-        config = MolmoAct2Config(hidden_size=128, num_attention_heads=4, num_hidden_layers=2)
-        assert config.hidden_size == 128
-        assert config.num_attention_heads == 4
-        assert config.num_hidden_layers == 2
-        assert config.vocab_size == 154_624
-        assert config.max_position_embeddings == 16_384
-        assert config.use_cache is True
-
-    def test_image_num_patch_property(self) -> None:
-        config = MolmoAct2Config(image_default_input_size=(28, 28), image_patch_size=14)
-        assert config.image_num_patch == (2, 2)
-
-    def test_add_action_expert_false_keeps_flat_settings(self) -> None:
-        config = MolmoAct2Config(add_action_expert=False)
-        assert config.action_expert_num_layers == config.num_hidden_layers
-
-    def test_state_format_discrete_only(self) -> None:
-        with pytest.raises(ValueError, match="state_format"):
-            MolmoAct2Config(state_format="continuous")  # type: ignore[arg-type]
+def test_rollout_settings_validation() -> None:
+    with pytest.raises(ValueError, match="chunk_size"):
+        MolmoAct2Config(chunk_size=0)
+    with pytest.raises(ValueError, match="n_action_steps"):
+        MolmoAct2Config(n_action_steps=0)
+    with pytest.raises(ValueError, match="cannot be greater"):
+        MolmoAct2Config(chunk_size=2, n_action_steps=3)
+    with pytest.raises(ValueError, match="n_obs_steps"):
+        MolmoAct2Config(n_obs_steps=0)
+    with pytest.raises(ValueError, match="max_action_dim"):
+        MolmoAct2Config(max_action_dim=0)

@@ -6,14 +6,12 @@ model:
   class_path: physicalai.policies.MolmoAct2
   init_args:
     # Pretrained checkpoint
-    repo_id: allenai/MolmoAct2
-    load_weights: true
+    pretrained_name_or_path: allenai/MolmoAct2
 
     # Observation / action configuration
     n_obs_steps: 1
     chunk_size: 10
     n_action_steps: 10
-    action_mode: continuous
 
     # Noise
     use_random_input_noise: true
@@ -37,9 +35,13 @@ model:
     optimizer_lr: 5e-5
     optimizer_vit_lr: 5e-5
     optimizer_connector_lr: 5e-5
+    optimizer_action_expert_lr: 5e-5
+    optimizer_grad_clip_norm: 1.0
 
     # Scheduler
+    scheduler_warmup_steps: 200
     scheduler_decay_steps: 15000
+    scheduler_decay_lr: 1e-6
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule

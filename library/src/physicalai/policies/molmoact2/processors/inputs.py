@@ -88,9 +88,7 @@ def _image_token_ids_for_grid(layout: MolmoAct2InputLayout, grid: torch.Tensor) 
         return row * row_count
 
     single_col = (
-        layout.image_use_col_tokens
-        if layout.use_single_crop_col_tokens is None
-        else layout.use_single_crop_col_tokens
+        layout.image_use_col_tokens if layout.use_single_crop_col_tokens is None else layout.use_single_crop_col_tokens
     )
     if height == 0 or width == 0:
         return [

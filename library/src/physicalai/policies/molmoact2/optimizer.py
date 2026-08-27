@@ -22,7 +22,7 @@ class MolmoAct2AdamW(torch.optim.AdamW):
         params: Iterable[Tensor] | Iterable[dict[str, Any]],
         *,
         group_grad_clip_norm: float,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize the optimizer.
 
@@ -73,7 +73,7 @@ class MolmoAct2AdamW(torch.optim.AdamW):
             for group, parameters in zip(self.param_groups, original_groups, strict=True):
                 group["params"] = parameters
 
-    def _step_bfloat16(self) -> None:
+    def _step_bfloat16(self) -> None:  # noqa: PLR0914
         for group in self.param_groups:
             bf16_group = dict(group)
             bf16_group["params"] = [parameter for parameter in group["params"] if parameter.dtype == torch.bfloat16]

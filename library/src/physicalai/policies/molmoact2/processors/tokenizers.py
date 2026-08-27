@@ -94,7 +94,9 @@ class MolmoAct2Tokenizers:
                 local_files_only=True,
                 **self.tokenizer_config,
             )
-        assert self._tokenizer is not None
+        if self._tokenizer is None:
+            msg = "Tokenizer initialization failed"
+            raise RuntimeError(msg)
         return self._tokenizer
 
     @property
@@ -124,10 +126,11 @@ class MolmoAct2Tokenizers:
         out_ids = np.full((batch_size, seq_len + 1), pad_token_id, dtype=input_ids.dtype)
         out_mask = np.zeros((batch_size, seq_len + 1), dtype=attention_mask.dtype)
         for batch_idx, row_ids in enumerate(valid_rows):
-            if row_ids.size == 0 or int(row_ids[0]) != bos_token_id:
-                row_ids = np.concatenate((np.asarray([bos_token_id], dtype=input_ids.dtype), row_ids))
-            out_ids[batch_idx, : row_ids.size] = row_ids
-            out_mask[batch_idx, : row_ids.size] = 1
+            row_tokens = row_ids
+            if row_tokens.size == 0 or int(row_tokens[0]) != bos_token_id:
+                row_tokens = np.concatenate((np.asarray([bos_token_id], dtype=input_ids.dtype), row_tokens))
+            out_ids[batch_idx, : row_tokens.size] = row_tokens
+            out_mask[batch_idx, : row_tokens.size] = 1
         return (out_ids[0], out_mask[0]) if squeeze else (out_ids, out_mask)
 
     def tokenize_prompts(

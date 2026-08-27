@@ -94,7 +94,7 @@ class StateTaskImageExtractor:
         if isinstance(source, str):
             tasks = [source] * batch_size
         elif torch.is_tensor(source):
-            tasks = [str(value) for value in source.detach().cpu().reshape(-1).tolist()]
+            tasks = [str(value) for value in source.detach().cpu().reshape(-1).tolist()]  # type: ignore[union-attr]
         elif isinstance(source, (list, tuple)):
             tasks = [str(value) for value in source]
         else:
@@ -139,8 +139,8 @@ class StateTaskImageExtractor:
         if value is None and key.startswith(f"{IMAGES}.") and isinstance(batch.get(IMAGES), dict):
             value = batch[IMAGES].get(key.removeprefix(f"{IMAGES}."))
         tensor = value if torch.is_tensor(value) else torch.as_tensor(value)
-        if tensor.ndim != _BCHW_DIMENSIONS or int(tensor.shape[1]) != _RGB_CHANNELS:
-            msg = f"Expected BCHW image tensor at {key}, got shape {tuple(tensor.shape)}"
+        if tensor.ndim != _BCHW_DIMENSIONS or int(tensor.shape[1]) != _RGB_CHANNELS:  # type: ignore[union-attr]
+            msg = f"Expected BCHW image tensor at {key}, got shape {tuple(tensor.shape)}"  # type: ignore[union-attr]
             raise ValueError(msg)
         return tensor
 
@@ -149,10 +149,7 @@ class StateTaskImageExtractor:
         for key in self._image_keys(batch):
             images = self._image(batch, key)
             if int(images.shape[0]) != batch_size:
-                msg = (
-                    f"Image batch size mismatch at {key}: "
-                    f"expected {batch_size}, got {int(images.shape[0])}"
-                )
+                msg = f"Image batch size mismatch at {key}: expected {batch_size}, got {int(images.shape[0])}"
                 raise ValueError(msg)
             for index in range(batch_size):
                 output[index].append(images[index])

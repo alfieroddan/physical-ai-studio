@@ -8,9 +8,11 @@
 from __future__ import annotations
 
 import json
+import warnings
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, override
+from typing import IO, TYPE_CHECKING, Any, Literal, override
 
 import torch
 from huggingface_hub import snapshot_download
@@ -79,6 +81,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         setup_type: Optional setup identifier used by the model configuration.
         control_mode: Optional control mode used by the model configuration.
         adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
+        openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
 
     Returns:
         None: The policy is created and, when possible, initializes its model lazily.
@@ -88,7 +91,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             features.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0915
         self,
         # Input and output features
         input_features: list[Feature] | None = None,
@@ -106,6 +109,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         adapt_to_so101: bool = False,
         # weight management
         compile_model: bool = False,
+        openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
         use_random_input_noise: bool = False,
         use_lora: bool = False,
@@ -143,6 +147,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
             compile_model: Whether to compile model training and inference entrypoints.
+            openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_random_input_noise: Whether action generation starts from Gaussian noise.
             use_lora: Whether to enable LoRA adapters on the model.
@@ -192,6 +197,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.control_mode = control_mode
         self.adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
         self.compile_model = compile_model
+        self.openvino_compress_to_fp16 = openvino_compress_to_fp16
         self.gradient_checkpointing = gradient_checkpointing
         self.use_random_input_noise = use_random_input_noise
         self.use_lora = use_lora
@@ -220,11 +226,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.save_hyperparameters(ignore=["input_features", "output_features", "compile_model"])
 
         # pre and post processors
-        self._preprocessor: MolmoAct2Preprocessor | None = None
-        self._postprocessor: MolmoAct2Postprocessor | None = None
+        self.preprocessor: MolmoAct2Preprocessor | None = None
+        self.postprocessor: MolmoAct2Postprocessor | None = None
 
         # underlying model
-        self.model: MolmoAct2Model | None = None
+        self.model: MolmoAct2Model | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
 
         # only init if features are resolved, lazy otherwise
         user_eager = input_features is not None and output_features is not None
@@ -233,11 +239,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self.initialize_model()
 
     @classmethod
-    def from_config(  # ruff: ignore[too-many-arguments]
+    def from_config(  # noqa: PLR0913
         cls,
         config: MolmoAct2Config,
         *,
         compile_model: bool = False,
+        openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
         use_lora: bool = False,
         enable_lora_action_expert: bool = False,
@@ -259,6 +266,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Args:
             config: Resolved MolmoAct2 model and processor configuration.
             compile_model: Whether to compile model training and inference entrypoints.
+            openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_lora: Whether to enable LoRA adapters on the model.
             enable_lora_action_expert: Whether LoRA adapters also target the action expert.
@@ -288,6 +296,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             control_mode=config.control_mode,
             adapt_to_so101=config.adapt_to_so101,
             compile_model=compile_model,
+            openvino_compress_to_fp16=openvino_compress_to_fp16,
             gradient_checkpointing=gradient_checkpointing,
             use_random_input_noise=config.use_random_input_noise,
             use_lora=use_lora,
@@ -311,6 +320,62 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         )
         policy._initialize_from_config(config)
         return policy
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str | Path | IO[bytes],
+        map_location: torch.device | str | int | Callable | dict | None = None,
+        hparams_file: str | Path | None = None,
+        strict: bool | None = None,  # noqa: FBT001
+        weights_only: bool | None = None,  # noqa: FBT001
+        **kwargs: Any,  # noqa: ANN401
+    ) -> MolmoAct2:
+        """Load a trained policy without resolving pretrained model weights.
+
+        The checkpoint config rebuilds the model before Lightning restores its state dict.
+        Tokenizer assets referenced by the config must remain available locally.
+
+        Returns:
+            The restored policy in the checkpoint's saved training mode.
+        """
+        kwargs["pretrained_name_or_path"] = None
+        return super().load_from_checkpoint(
+            checkpoint_path,
+            map_location=map_location,
+            hparams_file=hparams_file,
+            strict=strict,
+            weights_only=weights_only,
+            **kwargs,
+        )
+
+    def _policy_config_for_checkpoint(self) -> dict[str, object]:
+        return self._require_config().to_dict()
+
+    def _restore_policy_config(self, config_data: Mapping[str, object]) -> None:
+        config = MolmoAct2Config.from_dict(config_data)
+        if self.model is not None:
+            if self._require_config() != config:
+                msg = "Checkpoint policy config does not match the initialized policy"
+                raise ValueError(msg)
+            return
+        self._initialize_from_config(config)
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Save the resolved policy config alongside Lightning's state dict."""
+        checkpoint["policy_config"] = self._policy_config_for_checkpoint()
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Rebuild the policy from its resolved checkpoint config.
+
+        Raises:
+            TypeError: If the checkpoint does not contain a valid policy config.
+        """
+        config_data = checkpoint.get("policy_config")
+        if not isinstance(config_data, Mapping):
+            msg = "MolmoAct2 checkpoint is missing a valid policy_config"
+            raise TypeError(msg)
+        self._restore_policy_config(config_data)
 
     def _require_model(self) -> MolmoAct2Model:
         if not isinstance(self.model, MolmoAct2Model):
@@ -380,6 +445,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = "Policy model is already initialized"
             raise RuntimeError(msg)
 
+        self._validate_export_settings(config)
         self.config = config
         self._weights_path = weights_path
 
@@ -394,12 +460,21 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.adapt_to_so101 = config.adapt_to_so101
 
         self.model = MolmoAct2Model.from_config(config)
-        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
+        self.preprocessor, self.postprocessor = make_molmoact2_preprocessors(config)
 
         if weights_path is not None:
             self.model.load_weights(weights_path)
 
         self._apply_model_modifications()
+
+    def _validate_export_settings(self, config: MolmoAct2Config) -> None:
+        if self.openvino_compress_to_fp16 and config.model_dtype != "float32":
+            warnings.warn(
+                "OpenVINO FP16 compression only converts FP32 constants; "
+                "set model_dtype='float32' to produce an FP16 OpenVINO model.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _apply_model_modifications(self) -> None:
         model = self._require_model()
@@ -873,10 +948,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if not self.training:
             return self.predict_action_chunk(batch)
         model = self._require_model()
-        if self._preprocessor is None:
+        if self.preprocessor is None:
             msg = "Policy preprocessor is not initialized"
             raise RuntimeError(msg)
-        return model(self._preprocessor(batch.to_dict()))
+        return model(self.preprocessor(batch.to_dict()))
 
     @torch.no_grad()
     @override
@@ -890,11 +965,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             RuntimeError: If the model or processors are not initialized.
         """
         model = self._require_model()
-        if self._preprocessor is None or self._postprocessor is None:
+        if self.preprocessor is None or self.postprocessor is None:
             msg = "Policy processors are not initialized"
             raise RuntimeError(msg)
-        processed = self._preprocessor(batch.to(self.device).to_dict())
-        return self._postprocessor({ACTION: model.predict_action_chunk(processed)})[ACTION]
+        processed = self.preprocessor(batch.to(self.device).to_dict())
+        return self.postprocessor({ACTION: model.predict_action_chunk(processed)})[ACTION]
 
     def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
         """Compute and log the training loss.
@@ -919,10 +994,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             RuntimeError: If the model or preprocessor is not initialized.
         """
         model = self._require_model()
-        if self._preprocessor is None:
+        if self.preprocessor is None:
             msg = "Policy preprocessor is not initialized"
             raise RuntimeError(msg)
-        return model.compute_val_loss(self._preprocessor(batch.to_dict()))
+        return model.compute_val_loss(self.preprocessor(batch.to_dict()))
 
     @override
     def validation_step(self, batch: Gym | Observation, batch_idx: int) -> dict[str, float] | Tensor:
@@ -1095,11 +1170,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if missing:
             msg = f"MolmoAct2 OpenVINO export requires token IDs: {', '.join(missing)}"
             raise ValueError(msg)
-        if self._preprocessor is None:
+        if self.preprocessor is None:
             msg = "MolmoAct2 preprocessor must be initialized before export."
             raise ValueError(msg)
 
-        tokenizer = self._preprocessor.tokenizer
+        tokenizer = self.preprocessor.tokenizer
         bos_token_id = tokenizer.bos_token_id
         if not isinstance(bos_token_id, int):
             bos_token_id = tokenizer.eos_token_id
@@ -1152,51 +1227,50 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             "joint_offsets": list(SO101_JOINT_OFFSETS),
         }
         preprocessors = [
-            ComponentSpec.model_validate(
-                {
-                    "type": "molmoact2",
-                    "image_keys": [
-                        str(feature.name)
-                        for feature in self.input_features
-                        if feature.ftype == FeatureType.VISUAL and feature.name
-                    ],
-                    "state_stats": _normalization_stats(state_feature),
-                    "normalization_mode": config.normalization_mode,
-                    "image_size": image_size,
-                    "num_state_tokens": config.num_state_tokens,
-                    "setup_type": config.setup_type,
-                    "control_mode": config.control_mode,
-                    "add_setup_tokens": config.add_setup_tokens,
-                    "add_control_tokens": config.add_control_tokens,
-                    "adapt_to_so101": config.adapt_to_so101,
-                    **joint_params,
-                },
+            ComponentSpec(
+                type="molmoact2",
+                image_keys=[
+                    str(feature.name)
+                    for feature in self.input_features
+                    if feature.ftype == FeatureType.VISUAL and feature.name
+                ],
+                state_stats=_normalization_stats(state_feature),
+                normalization_mode=config.normalization_mode,
+                image_size=image_size,
+                num_state_tokens=config.num_state_tokens,
+                setup_type=config.setup_type,
+                control_mode=config.control_mode,
+                add_setup_tokens=config.add_setup_tokens,
+                add_control_tokens=config.add_control_tokens,
+                adapt_to_so101=config.adapt_to_so101,
+                **joint_params,
             ),
-            ComponentSpec.model_validate({"type": "ov_tokenizer", "artifact": "tokenizer.xml"}),
-            ComponentSpec.model_validate(
-                {
-                    "type": "molmoact2_inputs",
-                    "max_action_dim": config.max_action_dim,
-                    "action_dim": int(action_feature.shape[-1]),
-                    "bos_token_id": bos_token_id,
-                    "pad_token_id": pad_token_id,
-                    "image_placeholder_token_id": config.image_placeholder_token_id,
-                    "image_start_token_id": config.image_start_token_id,
-                    "image_end_token_id": config.image_end_token_id,
-                    "image_patch_id": config.image_patch_id,
-                    "image_col_id": config.image_col_id,
-                    "low_res_image_start_token_id": config.low_res_image_start_token_id,
-                    "image_size": image_size,
-                    "patch_size": config.image_processor_patch_size,
-                    "pooling_size": tuple(config.image_processor_pooling_size),
-                    "image_mean": config.image_processor_mean,
-                    "image_std": config.image_processor_std,
-                    "image_crop_mode": config.image_processor_crop_mode,
-                    "image_use_col_tokens": config.image_use_col_tokens,
-                    "use_single_crop_col_tokens": config.use_single_crop_col_tokens,
-                    "use_single_crop_start_token": config.use_single_crop_start_token,
-                    "image_token_ids": image_token_ids,
-                },
+            ComponentSpec(
+                type="ov_tokenizer",
+                artifact="tokenizer.xml",
+            ),
+            ComponentSpec(
+                type="molmoact2_inputs",
+                max_action_dim=config.max_action_dim,
+                action_dim=int(action_feature.shape[-1]),
+                bos_token_id=bos_token_id,
+                pad_token_id=pad_token_id,
+                image_placeholder_token_id=config.image_placeholder_token_id,
+                image_start_token_id=config.image_start_token_id,
+                image_end_token_id=config.image_end_token_id,
+                image_patch_id=config.image_patch_id,
+                image_col_id=config.image_col_id,
+                low_res_image_start_token_id=config.low_res_image_start_token_id,
+                image_size=image_size,
+                patch_size=config.image_processor_patch_size,
+                pooling_size=tuple(config.image_processor_pooling_size),
+                image_mean=config.image_processor_mean,
+                image_std=config.image_processor_std,
+                image_crop_mode=config.image_processor_crop_mode,
+                image_use_col_tokens=config.image_use_col_tokens,
+                use_single_crop_col_tokens=config.use_single_crop_col_tokens,
+                use_single_crop_start_token=config.use_single_crop_start_token,
+                image_token_ids=image_token_ids,
             ),
         ]
         return {
@@ -1206,18 +1280,16 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             ExportBackend.OPENVINO: OpenVINOExportParameters(
                 outputs=[feature.name for feature in (self.outputs_schema or [])],
                 export_tokenizer=True,
-                compress_to_fp16=config.openvino_compress_to_fp16,
+                compress_to_fp16=self.openvino_compress_to_fp16,
                 via_onnx=False,
                 preprocessors_specs=preprocessors,
                 postprocessors_specs=[
-                    ComponentSpec.model_validate(
-                        {
-                            "type": "molmoact2_postprocess",
-                            "action_stats": _normalization_stats(action_feature),
-                            "normalization_mode": config.normalization_mode,
-                            "adapt_to_so101": config.adapt_to_so101,
-                            **joint_params,
-                        },
+                    ComponentSpec(
+                        type="molmoact2_postprocess",
+                        action_stats=_normalization_stats(action_feature),
+                        normalization_mode=config.normalization_mode,
+                        adapt_to_so101=config.adapt_to_so101,
+                        **joint_params,
                     ),
                 ],
             ),

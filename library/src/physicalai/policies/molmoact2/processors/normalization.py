@@ -39,11 +39,7 @@ class MolmoAct2NormalizeTransform(FeatureNormalizeTransform):
             normalization_mode: Statistical normalization mode for state and action.
             inverse: Whether to apply inverse normalization.
         """
-        features = {
-            feature.name: feature
-            for feature in input_features + output_features
-            if feature.name is not None
-        }
+        features = {feature.name: feature for feature in input_features + output_features if feature.name is not None}
         mode = NormalizationType(normalization_mode)
         state_feature = next(
             (feature for feature in input_features if feature.ftype == FeatureType.STATE),

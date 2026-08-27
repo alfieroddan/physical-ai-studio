@@ -19,12 +19,11 @@ Example (API):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 from physicalai.config import Config
 
-if TYPE_CHECKING:
-    from physicalai.data import Feature
+from physicalai.data import Feature  # noqa: TC001
 
 
 @dataclass
@@ -138,10 +137,9 @@ class MolmoAct2Config(Config):
     frame_start_token_id: int | None = 154631
     frame_end_token_id: int | None = 154632
 
-    # Runtime and export
+    # Runtime
     checkpoint_path: str | None = None
     model_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
-    openvino_compress_to_fp16: bool = False
 
     # LoRA parameters
     lora_rank: int = 64
@@ -170,3 +168,36 @@ class MolmoAct2Config(Config):
     # Normalization and feature processing
     normalization_mode: str = "QUANTILES"
     normalize_gripper: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters after initialization."""
+        self._validate_rollout_settings()
+
+    def _validate_rollout_settings(self) -> None:
+        if self.chunk_size < 1:
+            msg = f"chunk_size must be >= 1, got {self.chunk_size}"
+            raise ValueError(msg)
+        if self.n_action_steps < 1:
+            msg = f"n_action_steps must be >= 1, got {self.n_action_steps}"
+            raise ValueError(msg)
+        if self.n_action_steps > self.chunk_size:
+            msg = f"n_action_steps ({self.n_action_steps}) cannot be greater than chunk_size ({self.chunk_size})"
+            raise ValueError(msg)
+        if self.n_obs_steps < 1:
+            msg = f"n_obs_steps must be >= 1, got {self.n_obs_steps}"
+            raise ValueError(msg)
+        if self.max_action_dim < 1:
+            msg = f"max_action_dim must be >= 1, got {self.max_action_dim}"
+            raise ValueError(msg)
+        if self.model_dtype not in {"float32", "bfloat16", "float16"}:
+            msg = f"Unsupported model_dtype={self.model_dtype!r}. Expected 'float32', 'bfloat16', or 'float16'."
+            raise ValueError(msg)
+        if self.lora_rank < 1:
+            msg = f"MolmoAct2 lora_rank must be >= 1, got {self.lora_rank}."
+            raise ValueError(msg)
+        if not 0.0 <= self.lora_dropout < 1.0:
+            msg = f"MolmoAct2 lora_dropout must be in [0.0, 1.0), got {self.lora_dropout}."
+            raise ValueError(msg)
+        if self.lora_bias not in {"none", "all", "lora_only"}:
+            msg = f"MolmoAct2 lora_bias must be one of 'none', 'all', 'lora_only', got {self.lora_bias!r}."
+            raise ValueError(msg)

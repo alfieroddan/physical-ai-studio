@@ -143,8 +143,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             else nested_images is not None
         )
         has_flattened_images = any(
-            str(key).startswith(f"{IMAGES}.") and value is not None
-            for key, value in batch.items()
+            str(key).startswith(f"{IMAGES}.") and value is not None for key, value in batch.items()
         )
         if not has_nested_images and not has_flattened_images:
             msg = f"{IMAGES} are required."
