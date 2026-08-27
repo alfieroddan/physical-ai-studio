@@ -24,26 +24,22 @@ def test_registration_and_lazy_initialization() -> None:
     assert policy.model is None
     assert policy.preprocessor is None
     assert policy.postprocessor is None
-    assert policy._preprocessor is policy.preprocessor
-    assert policy._postprocessor is policy.postprocessor
     assert policy.inputs_schema is None
     assert policy.outputs_schema is None
 
 
-def test_private_processor_aliases_redirect_module_assignment() -> None:
+def test_public_processor_attributes_register_modules() -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)
     preprocessor = torch.nn.Identity()
     postprocessor = torch.nn.Identity()
 
-    policy._preprocessor = preprocessor  # type: ignore[assignment]
-    policy._postprocessor = postprocessor  # type: ignore[attr-defined]
+    policy.preprocessor = preprocessor  # type: ignore[assignment]
+    policy.postprocessor = postprocessor  # type: ignore[assignment]
 
     assert policy.preprocessor is preprocessor
     assert policy.postprocessor is postprocessor
     assert "preprocessor" in policy._modules
     assert "postprocessor" in policy._modules
-    assert "_preprocessor" not in policy._modules
-    assert "_postprocessor" not in policy._modules
 
 
 @pytest.mark.parametrize("method", ["forward", "predict_action_chunk", "compute_val_loss"])
