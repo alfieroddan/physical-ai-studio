@@ -94,6 +94,8 @@ class MolmoAct2NormalizeTransform(FeatureNormalizeTransform):
             for batch_key, value in batch.items():
                 if batch_key != feature_name and not batch_key.endswith(f".{feature_name}"):
                     continue
+                if not torch.is_tensor(value):
+                    continue
                 tensor_mask = torch.tensor(mask, device=value.device, dtype=torch.bool)
                 if tensor_mask.ndim != 1 or value.shape[-1] != tensor_mask.shape[0]:
                     continue
