@@ -232,6 +232,86 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if user_eager or pretrained_eager:
             self.initialize_model()
 
+    @classmethod
+    def from_config(  # ruff: ignore[too-many-arguments]
+        cls,
+        config: MolmoAct2Config,
+        *,
+        compile_model: bool = False,
+        gradient_checkpointing: bool = False,
+        use_lora: bool = False,
+        enable_lora_action_expert: bool = False,
+        train_action_head_only: bool = False,
+        optimizer_lr: float = 1e-5,
+        optimizer_vit_lr: float = 5e-6,
+        optimizer_connector_lr: float = 5e-6,
+        optimizer_action_expert_lr: float = 5e-5,
+        optimizer_betas: tuple[float, float] = (0.9, 0.95),
+        optimizer_eps: float = 1e-6,
+        optimizer_weight_decay: float = 0.0,
+        optimizer_grad_clip_norm: float = 1.0,
+        scheduler_warmup_steps: int = 200,
+        scheduler_decay_steps: int = 24_000,
+        scheduler_decay_lr: float = 1e-6,
+    ) -> MolmoAct2:
+        """Create a policy directly from a resolved model configuration.
+
+        Args:
+            config: Resolved MolmoAct2 model and processor configuration.
+            compile_model: Whether to compile model training and inference entrypoints.
+            gradient_checkpointing: Whether to enable gradient checkpointing on the model.
+            use_lora: Whether to enable LoRA adapters on the model.
+            enable_lora_action_expert: Whether LoRA adapters also target the action expert.
+            train_action_head_only: Whether to freeze the VLM and train only the action head.
+            optimizer_lr: Learning rate for text-model parameters.
+            optimizer_vit_lr: Learning rate for vision-model parameters.
+            optimizer_connector_lr: Learning rate for image connector parameters.
+            optimizer_action_expert_lr: Learning rate for action-expert parameters.
+            optimizer_betas: AdamW beta coefficients.
+            optimizer_eps: AdamW epsilon.
+            optimizer_weight_decay: AdamW weight decay.
+            optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
+            scheduler_warmup_steps: Number of linear warmup steps.
+            scheduler_decay_steps: Number of cosine decay steps.
+            scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
+
+        Returns:
+            An initialized MolmoAct2 policy using ``config`` without pretrained resolution.
+        """
+        policy = cls(
+            pretrained_name_or_path=None,
+            norm_tag=config.norm_tag,
+            n_action_steps=config.n_action_steps,
+            chunk_size=config.chunk_size,
+            n_obs_steps=config.n_obs_steps,
+            setup_type=config.setup_type,
+            control_mode=config.control_mode,
+            adapt_to_so101=config.adapt_to_so101,
+            compile_model=compile_model,
+            gradient_checkpointing=gradient_checkpointing,
+            use_random_input_noise=config.use_random_input_noise,
+            use_lora=use_lora,
+            enable_lora_action_expert=enable_lora_action_expert,
+            lora_rank=config.lora_rank,
+            lora_alpha=config.lora_alpha,
+            lora_dropout=config.lora_dropout,
+            lora_bias=config.lora_bias,
+            train_action_head_only=train_action_head_only,
+            optimizer_lr=optimizer_lr,
+            optimizer_vit_lr=optimizer_vit_lr,
+            optimizer_connector_lr=optimizer_connector_lr,
+            optimizer_action_expert_lr=optimizer_action_expert_lr,
+            optimizer_betas=optimizer_betas,
+            optimizer_eps=optimizer_eps,
+            optimizer_weight_decay=optimizer_weight_decay,
+            optimizer_grad_clip_norm=optimizer_grad_clip_norm,
+            scheduler_warmup_steps=scheduler_warmup_steps,
+            scheduler_decay_steps=scheduler_decay_steps,
+            scheduler_decay_lr=scheduler_decay_lr,
+        )
+        policy._initialize_from_config(config)
+        return policy
+
     def _require_model(self) -> MolmoAct2Model:
         if not isinstance(self.model, MolmoAct2Model):
             msg = "Policy model is not initialized"
@@ -287,10 +367,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 lora_bias=self.lora_bias,
             )
 
-        # resulting config and weights path
-        self.config = config
-        self._weights_path = weights_path
-
         # init model
         self._initialize_from_config(config, weights_path=weights_path)
 
@@ -303,6 +379,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.model is not None:
             msg = "Policy model is already initialized"
             raise RuntimeError(msg)
+
+        self.config = config
+        self._weights_path = weights_path
 
         # update instance attributes from config
         self.input_features = config.input_features
