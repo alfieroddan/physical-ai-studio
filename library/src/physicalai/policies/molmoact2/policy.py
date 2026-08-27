@@ -15,6 +15,7 @@ from typing import Any
 from huggingface_hub import snapshot_download
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+from physicalai.data.dataset import Dataset
 from physicalai.export import ExportablePolicyMixin
 from physicalai.policies.base import Policy
 
@@ -137,6 +138,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = "Policy model is not initialized"
             raise TypeError(msg)
         return self._model
+
+    def _require_config(self) -> MolmoAct2Config:
+        if self.config is None:
+            msg = "Policy config is not initialized"
+            raise RuntimeError(msg)
+        return self.config
 
     def initialize_model(self) -> None:
         """Initialize the policy model and configuration from pretrained assets or local inputs.
@@ -627,7 +634,52 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         return hf_config, norm_stats_config, tokenizer_config, weights_file
 
-    def forward(self, batch: Any) -> Any:  # ruff: ignore[ANN401]
+    def setup(self, stage: str) -> None:
+        """Setup the policy for a given stage.
+
+        Raises:
+            TypeError: If the training dataset is not a PhysicalAI Dataset.
+            ValueError: If eager policy features do not match the training dataset.
+        """
+        # we should only set up the policy for the "fit" stage.
+        if stage != "fit":
+            return
+
+        # retrieve train dataset
+        train_dataset = self.trainer.datamodule.train_dataset  # type: ignore[attr-defined]
+        if not isinstance(train_dataset, Dataset):
+            msg = "Train dataset is not a PhysicalAI Dataset."
+            raise TypeError(msg)
+
+        # gather input and output features
+        dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
+
+        # if the model is init - we fail or attach features
+        if self._model is not None:
+            config = self._require_config()
+            if (
+                config.input_features != dataset_input_features
+                or config.output_features != dataset_output_features
+            ):
+                msg_0 = (
+                    "Eager policy features do not match the training dataset; "
+                    "construct the policy lazily to replace pretrained features during setup"
+                )
+                raise ValueError(msg_0)
+            return
+
+        self._input_features = dataset_input_features
+        self._output_features = dataset_output_features
+        self.initialize_model()
+
+    @staticmethod
+    def _dataset_features(dataset: Dataset) -> tuple[list[Feature], list[Feature]]:
+        return (
+            list(dataset.observation_features.values()),
+            list(dataset.action_features.values()),
+        )
+
+    def forward(self, batch: Any) -> Any:
         """Run a forward pass for the policy.
 
         The runtime path is intentionally left unimplemented while init wiring is developed.
@@ -636,7 +688,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         msg = "Forward pass is not implemented."
         raise NotImplementedError(msg)
 
-    def predict_action_chunk(self, batch: Any) -> Any:  # ruff: ignore[ANN401]
+    def predict_action_chunk(self, batch: Any) -> Any:
         """Predict an action chunk for policy inference.
 
         The runtime path is intentionally left unimplemented while init wiring is developed.
