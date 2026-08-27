@@ -226,8 +226,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.save_hyperparameters(ignore=["input_features", "output_features", "compile_model"])
 
         # pre and post processors
-        self.preprocessor: MolmoAct2Preprocessor | None = None
-        self.postprocessor: MolmoAct2Postprocessor | None = None
+        self._preprocessor: MolmoAct2Preprocessor | None = None  # type: ignore[assignment]
+        self._postprocessor: MolmoAct2Postprocessor | None = None
 
         # underlying model
         self.model: MolmoAct2Model | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
@@ -460,7 +460,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         self.adapt_to_so101 = config.adapt_to_so101
 
         self.model = MolmoAct2Model.from_config(config)
-        self.preprocessor, self.postprocessor = make_molmoact2_preprocessors(config)
+        self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
 
         if weights_path is not None:
             self.model.load_weights(weights_path)
@@ -948,10 +948,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if not self.training:
             return self.predict_action_chunk(batch)
         model = self._require_model()
-        if self.preprocessor is None:
+        if self._preprocessor is None:
             msg = "Policy preprocessor is not initialized"
             raise RuntimeError(msg)
-        return model(self.preprocessor(batch.to_dict()))
+        return model(self._preprocessor(batch.to_dict()))
 
     @torch.no_grad()
     @override
@@ -965,11 +965,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             RuntimeError: If the model or processors are not initialized.
         """
         model = self._require_model()
-        if self.preprocessor is None or self.postprocessor is None:
+        if self._preprocessor is None or self._postprocessor is None:
             msg = "Policy processors are not initialized"
             raise RuntimeError(msg)
-        processed = self.preprocessor(batch.to(self.device).to_dict())
-        return self.postprocessor({ACTION: model.predict_action_chunk(processed)})[ACTION]
+        processed = self._preprocessor(batch.to(self.device).to_dict())
+        return self._postprocessor({ACTION: model.predict_action_chunk(processed)})[ACTION]
 
     def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
         """Compute and log the training loss.
@@ -994,10 +994,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             RuntimeError: If the model or preprocessor is not initialized.
         """
         model = self._require_model()
-        if self.preprocessor is None:
+        if self._preprocessor is None:
             msg = "Policy preprocessor is not initialized"
             raise RuntimeError(msg)
-        return model.compute_val_loss(self.preprocessor(batch.to_dict()))
+        return model.compute_val_loss(self._preprocessor(batch.to_dict()))
 
     @override
     def validation_step(self, batch: Gym | Observation, batch_idx: int) -> dict[str, float] | Tensor:
@@ -1170,11 +1170,11 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if missing:
             msg = f"MolmoAct2 OpenVINO export requires token IDs: {', '.join(missing)}"
             raise ValueError(msg)
-        if self.preprocessor is None:
+        if self._preprocessor is None:
             msg = "MolmoAct2 preprocessor must be initialized before export."
             raise ValueError(msg)
 
-        tokenizer = self.preprocessor.tokenizer
+        tokenizer = self._preprocessor.tokenizer
         bos_token_id = tokenizer.bos_token_id
         if not isinstance(bos_token_id, int):
             bos_token_id = tokenizer.eos_token_id

@@ -22,24 +22,24 @@ def test_registration_and_lazy_initialization() -> None:
 
     assert isinstance(policy, MolmoAct2)
     assert policy.model is None
-    assert policy.preprocessor is None
-    assert policy.postprocessor is None
+    assert policy._preprocessor is None
+    assert policy._postprocessor is None
     assert policy.inputs_schema is None
     assert policy.outputs_schema is None
 
 
-def test_public_processor_attributes_register_modules() -> None:
+def test_private_processor_attributes_register_modules() -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)
     preprocessor = torch.nn.Identity()
     postprocessor = torch.nn.Identity()
 
-    policy.preprocessor = preprocessor  # type: ignore[assignment]
-    policy.postprocessor = postprocessor  # type: ignore[assignment]
+    policy._preprocessor = preprocessor  # type: ignore[assignment]
+    policy._postprocessor = postprocessor  # type: ignore[assignment]
 
-    assert policy.preprocessor is preprocessor
-    assert policy.postprocessor is postprocessor
-    assert "preprocessor" in policy._modules
-    assert "postprocessor" in policy._modules
+    assert policy._preprocessor is preprocessor
+    assert policy._postprocessor is postprocessor
+    assert "_preprocessor" in policy._modules
+    assert "_postprocessor" in policy._modules
 
 
 @pytest.mark.parametrize("method", ["forward", "predict_action_chunk", "compute_val_loss"])
@@ -156,9 +156,9 @@ def test_openvino_compression_is_used_by_export(
     policy.input_features = tiny_molmoact2_config.input_features
     policy.output_features = tiny_molmoact2_config.output_features
     policy.model = Mock()
-    policy.preprocessor = Mock()
-    policy.preprocessor.tokenizer.bos_token_id = 1
-    policy.preprocessor.tokenizer.pad_token_id = 0
+    policy._preprocessor = Mock()
+    policy._preprocessor.tokenizer.bos_token_id = 1
+    policy._preprocessor.tokenizer.pad_token_id = 0
 
     export_args = policy.extra_export_args[ExportBackend.OPENVINO]
 
