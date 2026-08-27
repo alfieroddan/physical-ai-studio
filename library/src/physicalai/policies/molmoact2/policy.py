@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import json
-import warnings
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -64,6 +63,16 @@ def _normalization_stats(feature: Feature | None) -> dict[str, float | list[floa
     if normalization.mask is not None:
         stats["mask"] = normalization.mask
     return stats
+
+
+def _inherit_normalization(features: list[Feature], defaults: list[Feature]) -> list[Feature]:
+    default_by_type = {feature.ftype: feature.normalization_data for feature in defaults}
+    return [
+        replace(feature, normalization_data=default_by_type.get(feature.ftype))
+        if feature.normalization_data is None and default_by_type.get(feature.ftype) is not None
+        else feature
+        for feature in features
+    ]
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):
@@ -445,7 +454,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             msg = "Policy model is already initialized"
             raise RuntimeError(msg)
 
-        self._validate_export_settings(config)
         self.config = config
         self._weights_path = weights_path
 
@@ -466,15 +474,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
             self.model.load_weights(weights_path)
 
         self._apply_model_modifications()
-
-    def _validate_export_settings(self, config: MolmoAct2Config) -> None:
-        if self.openvino_compress_to_fp16 and config.model_dtype != "float32":
-            warnings.warn(
-                "OpenVINO FP16 compression only converts FP32 constants; "
-                "set model_dtype='float32' to produce an FP16 OpenVINO model.",
-                UserWarning,
-                stacklevel=2,
-            )
 
     def _apply_model_modifications(self) -> None:
         model = self._require_model()
@@ -775,10 +774,20 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         if self.norm_tag is not None:
             tag_metadata = self._resolve_norm_tag(norm_stats_config)
             normalize_gripper = bool(tag_metadata.get("normalize_gripper", False))
-            input_features, output_features = self._create_features_from_norm_stats(
+            tag_input_features, tag_output_features = self._create_features_from_norm_stats(
                 tag_metadata,
                 config.image_default_input_size,
                 normalize_gripper=normalize_gripper,
+            )
+            input_features = (
+                _inherit_normalization(self.input_features, tag_input_features)
+                if self.input_features is not None
+                else tag_input_features
+            )
+            output_features = (
+                _inherit_normalization(self.output_features, tag_output_features)
+                if self.output_features is not None
+                else tag_output_features
             )
             action_horizon = tag_metadata.get("action_horizon")
             if not isinstance(action_horizon, int):

@@ -137,9 +137,8 @@ class MolmoAct2Config(Config):
     frame_start_token_id: int | None = 154631
     frame_end_token_id: int | None = 154632
 
-    # Runtime
+    # Checkpoint
     checkpoint_path: str | None = None
-    model_dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
 
     # LoRA parameters
     lora_rank: int = 64
@@ -188,9 +187,6 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
         if self.max_action_dim < 1:
             msg = f"max_action_dim must be >= 1, got {self.max_action_dim}"
-            raise ValueError(msg)
-        if self.model_dtype not in {"float32", "bfloat16", "float16"}:
-            msg = f"Unsupported model_dtype={self.model_dtype!r}. Expected 'float32', 'bfloat16', or 'float16'."
             raise ValueError(msg)
         if self.lora_rank < 1:
             msg = f"MolmoAct2 lora_rank must be >= 1, got {self.lora_rank}."

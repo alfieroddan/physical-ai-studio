@@ -11,7 +11,7 @@ import lightning
 import pytest
 import torch
 
-from physicalai.data import Observation
+from physicalai.data import Feature, FeatureType, Observation
 from physicalai.export import ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
@@ -74,6 +74,44 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert (policy.n_action_steps, policy.chunk_size) == (3, 5)
     assert policy.compile_model is True
     assert policy.optimizer_lr == 2e-5
+
+
+def test_explicit_features_inherit_norm_tag_statistics(tmp_path: Path) -> None:
+    input_features = [
+        Feature(name="overview", ftype=FeatureType.VISUAL, shape=(3, 600, 800)),
+        Feature(name="state", ftype=FeatureType.STATE, shape=(4,)),
+    ]
+    output_features = [Feature(name="action", ftype=FeatureType.ACTION, shape=(4,))]
+    policy = MolmoAct2(pretrained_name_or_path=None, norm_tag="test")
+    policy.input_features = input_features
+    policy.output_features = output_features
+    norm_stats = {
+        "metadata_by_tag": {
+            "test": {
+                "camera_keys": [],
+                "state_key": "observation.state",
+                "state_stats": {"q01": [-1.0] * 4, "q99": [1.0] * 4},
+                "action_key": "action",
+                "action_stats": {"q01": [-1.0] * 4, "q99": [1.0] * 4},
+                "action_horizon": 30,
+                "normalize_gripper": True,
+            },
+        },
+    }
+
+    config = policy._convert_config({}, norm_stats, {}, tmp_path)
+
+    assert config.input_features is not None
+    assert config.output_features is not None
+    assert config.input_features[0] == input_features[0]
+    assert config.input_features[1].name == "state"
+    assert config.input_features[1].shape == (4,)
+    assert config.input_features[1].normalization_data is not None
+    assert config.input_features[1].normalization_data.q01 == [-1.0] * 4
+    assert config.output_features[0].name == "action"
+    assert config.output_features[0].shape == (4,)
+    assert config.output_features[0].normalization_data is not None
+    assert config.output_features[0].normalization_data.q99 == [1.0] * 4
 
 
 def test_load_from_checkpoint_restores_config_and_weights(
@@ -139,13 +177,6 @@ def test_runtime_options_are_policy_owned() -> None:
     assert policy.gradient_checkpointing is True
     assert policy.optimizer_lr == 2e-5
     assert "compile_model" not in policy.hparams
-
-
-def test_openvino_compression_warns_for_non_float32_config() -> None:
-    policy = MolmoAct2(pretrained_name_or_path=None, openvino_compress_to_fp16=True)
-
-    with pytest.warns(UserWarning, match="only converts FP32 constants"):
-        policy._validate_export_settings(MolmoAct2Config(model_dtype="bfloat16"))
 
 
 def test_openvino_compression_is_used_by_export(

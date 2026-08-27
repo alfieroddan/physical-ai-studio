@@ -15,14 +15,12 @@ def test_defaults_match_pretrained_architecture() -> None:
     assert (config.hidden_size, config.num_hidden_layers, config.num_attention_heads) == (2560, 36, 32)
     assert (config.chunk_size, config.n_action_steps, config.max_action_dim) == (30, 30, 32)
     assert config.tokenizer_name_or_path == "allenai/MolmoAct2"
-    assert config.model_dtype == "bfloat16"
 
 
 def test_custom_fields() -> None:
-    config = MolmoAct2Config(chunk_size=8, n_action_steps=4, hidden_size=128, model_dtype="float32")
+    config = MolmoAct2Config(chunk_size=8, n_action_steps=4, hidden_size=128)
 
     assert (config.chunk_size, config.n_action_steps, config.hidden_size) == (8, 4, 128)
-    assert config.model_dtype == "float32"
 
 
 def test_serialization_round_trip() -> None:

@@ -70,6 +70,5 @@ def tiny_molmoact2_config(
         max_action_dim=4,
         chunk_size=4,
         n_action_steps=2,
-        model_dtype="float32",
         tokenizer_name_or_path=str(tokenizer_dir),
     )
