@@ -11,7 +11,7 @@ import lightning
 import pytest
 import torch
 
-from physicalai.data import Feature, FeatureType, Observation
+from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.export import ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
@@ -76,7 +76,7 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert policy.optimizer_lr == 2e-5
 
 
-def test_explicit_features_inherit_norm_tag_statistics(tmp_path: Path) -> None:
+def test_explicit_features_override_norm_tag_features_without_inheriting_statistics(tmp_path: Path) -> None:
     input_features = [
         Feature(name="overview", ftype=FeatureType.VISUAL, shape=(3, 600, 800)),
         Feature(name="state", ftype=FeatureType.STATE, shape=(4,)),
@@ -106,12 +106,134 @@ def test_explicit_features_inherit_norm_tag_statistics(tmp_path: Path) -> None:
     assert config.input_features[0] == input_features[0]
     assert config.input_features[1].name == "state"
     assert config.input_features[1].shape == (4,)
-    assert config.input_features[1].normalization_data is not None
-    assert config.input_features[1].normalization_data.q01 == [-1.0] * 4
+    assert config.input_features[1].normalization_data is None
     assert config.output_features[0].name == "action"
     assert config.output_features[0].shape == (4,)
-    assert config.output_features[0].normalization_data is not None
-    assert config.output_features[0].normalization_data.q99 == [1.0] * 4
+    assert config.output_features[0].normalization_data is None
+
+
+def test_set_features_copies_only_requested_state_normalization(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    state_feature = tiny_molmoact2_config.input_features[-1]
+    config_without_images = replace(tiny_molmoact2_config, input_features=[state_feature])
+    policy = MolmoAct2.from_config(config_without_images).eval()
+    model = policy.model
+    preprocessor = policy._preprocessor
+    postprocessor = policy._postprocessor
+    replacement_state_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    replacement_action_stats = NormalizationParameters(q01=[-3.0] * 4, q99=[3.0] * 4)
+    input_features = [
+        Feature(name="overview", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        Feature(name="left_wrist", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        Feature(name="right_wrist", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        Feature(
+            name="robot_state",
+            ftype=FeatureType.STATE,
+            shape=(4,),
+            normalization_data=replacement_state_stats,
+        ),
+    ]
+    output_features = [
+        Feature(
+            name="robot_action",
+            ftype=FeatureType.ACTION,
+            shape=(4,),
+            normalization_data=replacement_action_stats,
+        ),
+    ]
+
+    policy.set_features(
+        input_features,
+        output_features,
+        copy_state_normalization=True,
+    )
+
+    assert policy.model is model
+    assert policy._preprocessor is not preprocessor
+    assert policy._postprocessor is not postprocessor
+    assert policy._preprocessor is not None and not policy._preprocessor.training
+    assert policy._postprocessor is not None and not policy._postprocessor.training
+    assert policy.config is not None
+    assert policy.config.input_features == policy.input_features
+    assert policy.config.output_features == policy.output_features
+    assert [feature.name for feature in policy.input_features or []] == [
+        "overview",
+        "left_wrist",
+        "right_wrist",
+        "robot_state",
+    ]
+    assert policy.input_features is not None
+    assert policy.output_features is not None
+    assert policy.input_features[-1].normalization_data == state_feature.normalization_data
+    assert policy.output_features[0].normalization_data is replacement_action_stats
+
+
+def test_set_features_copies_only_requested_action_normalization(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    replacement_state_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    replacement_action_stats = NormalizationParameters(q01=[-3.0] * 4, q99=[3.0] * 4)
+    input_features = [
+        Feature(name="image", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        Feature(
+            name="robot_state",
+            ftype=FeatureType.STATE,
+            shape=(4,),
+            normalization_data=replacement_state_stats,
+        ),
+    ]
+    output_features = [
+        Feature(
+            name="robot_action",
+            ftype=FeatureType.ACTION,
+            shape=(4,),
+            normalization_data=replacement_action_stats,
+        ),
+    ]
+
+    policy.set_features(
+        input_features,
+        output_features,
+        copy_action_normalization=True,
+    )
+
+    assert policy.input_features is not None
+    assert policy.output_features is not None
+    assert policy.input_features[-1].normalization_data is replacement_state_stats
+    assert policy.output_features[0].normalization_data == tiny_molmoact2_config.output_features[0].normalization_data
+
+
+def test_set_features_rejects_incompatible_normalization_shape_atomically(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    config = policy.config
+    input_features = policy.input_features
+    preprocessor = policy._preprocessor
+    replacement_inputs = [
+        Feature(name="image", ftype=FeatureType.VISUAL, shape=(3, 28, 28)),
+        Feature(name="state", ftype=FeatureType.STATE, shape=(5,)),
+    ]
+
+    with pytest.raises(ValueError, match="Cannot copy STATE normalization"):
+        policy.set_features(
+            replacement_inputs,
+            list(policy.output_features or []),
+            copy_state_normalization=True,
+        )
+
+    assert policy.config is config
+    assert policy.input_features is input_features
+    assert policy._preprocessor is preprocessor
+
+
+def test_set_features_requires_initialized_policy() -> None:
+    policy = MolmoAct2(pretrained_name_or_path=None)
+
+    with pytest.raises(TypeError, match="not initialized"):
+        policy.set_features([], [])
 
 
 def test_load_from_checkpoint_restores_config_and_weights(

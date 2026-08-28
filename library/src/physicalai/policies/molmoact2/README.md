@@ -219,12 +219,25 @@ from physicalai.policies import MolmoAct2
 policy = MolmoAct2(
     pretrained_name_or_path="allenai/MolmoAct2-SO100_101",
     norm_tag="so100_so101_molmoact2",
-    adapt_to_so101=True,
-    use_random_input_noise=True,
 )
+
+policy.set_features(
+  input_features=input_features,
+  output_features=output_features,
+  copy_state_normalization=True,
+  copy_action_normalization=True,
+)
+
 policy = policy.to(dtype=torch.bfloat16).eval()
 policy.export("exports/molmoact2-so101-torch", backend="torch")
 ```
+
+`set_features` replaces the checkpoint feature definitions without reloading
+its weights. Visual features are always taken directly from `input_features`,
+so the replacement can add, remove, or rename cameras. The two normalization
+flags independently copy the checkpoint's state and action normalization onto
+replacement features with matching shapes. Copied normalization overwrites any
+normalization already present on that replacement feature.
 
 Start the SO-101 from an extended pose near the task workspace. Starting from a
 rest pose can cause the policy to remain there.
@@ -264,6 +277,11 @@ policy = MolmoAct2(
 For a custom dataset, omit `norm_tag` and construct the policy lazily. The
 attached PhysicalAI dataset supplies features and normalization statistics at
 training setup.
+
+Constructor-provided features override features resolved from `norm_tag`
+without inheriting their normalization. For zero-shot use, initialize from the
+tag first and call `set_features` with the specific normalization maps that
+should be copied.
 
 ## Notes
 

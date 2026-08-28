@@ -65,13 +65,24 @@ def _normalization_stats(feature: Feature | None) -> dict[str, float | list[floa
     return stats
 
 
-def _inherit_normalization(features: list[Feature], defaults: list[Feature]) -> list[Feature]:
-    default_by_type = {feature.ftype: feature.normalization_data for feature in defaults}
+def _copy_feature_normalization(
+    features: list[Feature],
+    source: Feature | None,
+    feature_type: FeatureType,
+) -> list[Feature]:
+    feature = get_feature_by_type(features, feature_type)
+    if feature is None:
+        msg = f"Cannot copy {feature_type.value} normalization without a replacement feature."
+        raise ValueError(msg)
+    if source is None or source.normalization_data is None:
+        msg = f"Cannot copy {feature_type.value} normalization because the initialized policy has none."
+        raise ValueError(msg)
+    if feature.shape is None or feature.shape != source.shape:
+        msg = f"Cannot copy {feature_type.value} normalization from shape {source.shape} to shape {feature.shape}."
+        raise ValueError(msg)
     return [
-        replace(feature, normalization_data=default_by_type.get(feature.ftype))
-        if feature.normalization_data is None and default_by_type.get(feature.ftype) is not None
-        else feature
-        for feature in features
+        replace(candidate, normalization_data=source.normalization_data) if candidate is feature else candidate
+        for candidate in features
     ]
 
 
@@ -475,6 +486,61 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         self._apply_model_modifications()
 
+    def set_features(
+        self,
+        input_features: list[Feature],
+        output_features: list[Feature],
+        *,
+        copy_state_normalization: bool = False,
+        copy_action_normalization: bool = False,
+    ) -> None:
+        """Replace policy features without reloading the initialized model.
+
+        Args:
+            input_features: Replacement input feature definitions.
+            output_features: Replacement output feature definitions.
+            copy_state_normalization: Whether to overwrite replacement state normalization with
+                normalization resolved during policy initialization.
+            copy_action_normalization: Whether to overwrite replacement action normalization with
+                normalization resolved during policy initialization.
+        """
+        model = self._require_model()
+        config = self._require_config()
+        training = self.training
+
+        resolved_input_features = list(input_features)
+        resolved_output_features = list(output_features)
+        if copy_state_normalization:
+            resolved_input_features = _copy_feature_normalization(
+                resolved_input_features,
+                get_feature_by_type(list(config.input_features or []), FeatureType.STATE),
+                FeatureType.STATE,
+            )
+        if copy_action_normalization:
+            resolved_output_features = _copy_feature_normalization(
+                resolved_output_features,
+                get_feature_by_type(list(config.output_features or []), FeatureType.ACTION),
+                FeatureType.ACTION,
+            )
+
+        replacement_config = replace(
+            config,
+            input_features=resolved_input_features,
+            output_features=resolved_output_features,
+        )
+        preprocessor, postprocessor = make_molmoact2_preprocessors(replacement_config)
+        parameter = next(model.parameters())
+        preprocessor.to(device=parameter.device, dtype=parameter.dtype)
+        postprocessor.to(device=parameter.device, dtype=parameter.dtype)
+
+        self.input_features = resolved_input_features
+        self.output_features = resolved_output_features
+        self.config = replacement_config
+        self._preprocessor = preprocessor
+        self._postprocessor = postprocessor
+        self.train(training)
+        self.reset()
+
     def _apply_model_modifications(self) -> None:
         model = self._require_model()
 
@@ -718,7 +784,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         ]
         return input_features, output_features
 
-    def _convert_config(
+    def _convert_config(  # noqa: PLR0914
         self,
         hf_config: dict[str, Any],
         norm_stats_config: dict[str, Any],
@@ -779,16 +845,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
                 config.image_default_input_size,
                 normalize_gripper=normalize_gripper,
             )
-            input_features = (
-                _inherit_normalization(self.input_features, tag_input_features)
-                if self.input_features is not None
-                else tag_input_features
-            )
-            output_features = (
-                _inherit_normalization(self.output_features, tag_output_features)
-                if self.output_features is not None
-                else tag_output_features
-            )
+            input_features = self.input_features if self.input_features is not None else tag_input_features
+            output_features = self.output_features if self.output_features is not None else tag_output_features
             action_horizon = tag_metadata.get("action_horizon")
             if not isinstance(action_horizon, int):
                 msg = f"Invalid action_horizon for normalization tag {self.norm_tag!r}."
