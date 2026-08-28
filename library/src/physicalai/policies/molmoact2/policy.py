@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -49,6 +50,8 @@ if TYPE_CHECKING:
     from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
     from physicalai.gyms import Gym
+
+logger = logging.getLogger(__name__)
 
 
 def _normalization_stats(feature: Feature | None) -> dict[str, float | list[float] | list[bool] | None]:
@@ -499,10 +502,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         Args:
             input_features: Replacement input feature definitions.
             output_features: Replacement output feature definitions.
-            copy_state_normalization: Whether to overwrite replacement state normalization with
-                normalization resolved during policy initialization.
-            copy_action_normalization: Whether to overwrite replacement action normalization with
-                normalization resolved during policy initialization.
+            copy_state_normalization: Whether to fill missing replacement state normalization
+                with normalization resolved during policy initialization.
+            copy_action_normalization: Whether to fill missing replacement action normalization
+                with normalization resolved during policy initialization.
         """
         model = self._require_model()
         config = self._require_config()
@@ -965,7 +968,6 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
 
         Raises:
             TypeError: If the training dataset is not a PhysicalAI Dataset.
-            ValueError: If eager policy features do not match the training dataset.
         """
         # we should only set up the policy for the "fit" stage.
         if stage != "fit":
@@ -980,15 +982,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
         # gather input and output features
         dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
 
-        # if the model is init - we fail or attach features
+        # Replace eager features with the training dataset contract without reloading weights.
         if self.model is not None:
             config = self._require_config()
             if config.input_features != dataset_input_features or config.output_features != dataset_output_features:
-                msg_0 = (
-                    "Eager policy features do not match the training dataset; "
-                    "construct the policy lazily to replace pretrained features during setup"
+                logger.warning(
+                    "Eager MolmoAct2 features differ from the training dataset; "
+                    "replacing them with the dataset features and normalization statistics.",
                 )
-                raise ValueError(msg_0)
+                self.set_features(dataset_input_features, dataset_output_features)
             return
 
         self.input_features = dataset_input_features

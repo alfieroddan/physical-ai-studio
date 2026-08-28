@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.dataset import Dataset
 from physicalai.export import ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
@@ -234,6 +235,70 @@ def test_set_features_requires_initialized_policy() -> None:
 
     with pytest.raises(TypeError, match="not initialized"):
         policy.set_features([], [])
+
+
+def test_setup_replaces_eager_normalization_with_dataset_normalization(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    model = policy.model
+    dataset_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    dataset_inputs = [
+        replace(feature, normalization_data=dataset_stats)
+        for feature in tiny_molmoact2_config.input_features
+    ]
+    dataset_outputs = [
+        replace(feature, normalization_data=dataset_stats)
+        for feature in tiny_molmoact2_config.output_features
+    ]
+    train_dataset = Mock(spec=Dataset)
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    policy._trainer = trainer
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+
+    with caplog.at_level("WARNING"):
+        policy.setup("fit")
+
+    assert "replacing them with the dataset features" in caplog.text
+    assert policy.model is model
+    assert policy.input_features == dataset_inputs
+    assert policy.output_features == dataset_outputs
+    assert policy.config is not None
+    assert policy.config.input_features == dataset_inputs
+    assert policy.config.output_features == dataset_outputs
+
+
+def test_setup_replaces_eager_feature_contract_with_dataset_contract(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    model = policy.model
+    dataset_inputs = [
+        replace(tiny_molmoact2_config.input_features[0], name="other_camera"),
+        *tiny_molmoact2_config.input_features[1:],
+    ]
+    train_dataset = Mock(spec=Dataset)
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    policy._trainer = trainer
+    monkeypatch.setattr(
+        policy,
+        "_dataset_features",
+        lambda _dataset: (dataset_inputs, tiny_molmoact2_config.output_features),
+    )
+
+    with caplog.at_level("WARNING"):
+        policy.setup("fit")
+
+    assert "replacing them with the dataset features" in caplog.text
+    assert policy.model is model
+    assert policy.input_features == dataset_inputs
+    assert policy.output_features == tiny_molmoact2_config.output_features
 
 
 def test_load_from_checkpoint_restores_config_and_weights(
