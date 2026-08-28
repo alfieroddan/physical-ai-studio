@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from physicalai.benchmark.gyms import Benchmark, BenchmarkResults, LiberoBenchmark, PushTBenchmark, TaskResult
+from physicalai.benchmark.gyms.robocasa.robocasa import RoboCasaBenchmark
 
 
 @pytest.fixture
@@ -122,6 +123,57 @@ class TestPushTBenchmark:
             device="cpu",
             camera_name_mapping={"top": "image"},
         )
+
+
+class TestRoboCasaBenchmark:
+    @pytest.fixture(autouse=True)
+    def _require_robocasa(self) -> None:
+        pytest.importorskip("robocasa")
+        pytest.importorskip("robosuite")
+
+    def test_robocasa_benchmark_default_construction(self):
+        b = RoboCasaBenchmark()
+        assert b.task == "atomic_seen"
+        assert b.num_episodes == 20
+        assert len(b.gyms) == 18
+        assert b.max_steps is None
+
+    def test_robocasa_benchmark_empty_task_raises(self):
+        with pytest.raises(ValueError, match="at least one RoboCasa task name"):
+            RoboCasaBenchmark(task="")
+
+    def test_robocasa_benchmark_max_steps_defaults_to_none(self):
+        """Benchmark-level max_steps stays None; each gym resolves its own task horizon."""
+        for group in (
+            "atomic_seen",
+            "composite_seen",
+            "composite_unseen",
+            "pretrain50",
+            "pretrain100",
+            "pretrain200",
+            "pretrain300",
+        ):
+            b = RoboCasaBenchmark(task=group)
+            assert b.max_steps is None, f"group={group}"
+
+    def test_robocasa_benchmark_gyms_resolve_per_task_horizon(self):
+        """Atomic tasks have varying registry horizons, not a single flat cap."""
+        b = RoboCasaBenchmark(task="atomic_seen")
+        horizons = {gym.get_max_episode_steps() for gym in b.gyms}
+        assert len(horizons) > 1
+
+    def test_robocasa_benchmark_repr_includes_task(self):
+        b = RoboCasaBenchmark()
+        r = repr(b)
+        assert r.startswith("RoboCasaBenchmark(")
+        assert "task='atomic_seen'" in r
+        assert "max_steps=None" in r
+
+    def test_robocasa_benchmark_sets_task_id_on_gyms(self):
+        b = RoboCasaBenchmark()
+        gym = b.gyms[0]
+        assert gym.task_id == gym.task
+        assert gym.task_suite_name == "atomic_seen"
 
 
 class TestWrapPolicy:
