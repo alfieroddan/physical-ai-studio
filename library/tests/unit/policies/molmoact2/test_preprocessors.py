@@ -17,6 +17,7 @@ from physicalai.policies.molmoact2.processors.image import MolmoAct2ImageProcess
 from physicalai.policies.molmoact2.processors.inputs import (
     MolmoAct2InputLayout,
     _build_batched_images,
+    _default_action_dim_is_pad,
     _expand_image_placeholders,
 )
 from physicalai.policies.molmoact2.processors.normalization import MolmoAct2NormalizeTransform
@@ -40,6 +41,22 @@ def test_factory_requires_resolved_features(tiny_molmoact2_config: MolmoAct2Conf
     tiny_molmoact2_config.input_features = None
 
     with pytest.raises(ValueError, match="features must be set"):
+        make_molmoact2_preprocessors(tiny_molmoact2_config)
+
+
+def test_factory_uses_action_feature_dimension_for_default_mask(tiny_molmoact2_config: MolmoAct2Config) -> None:
+    tiny_molmoact2_config.output_features = [Feature(name=ACTION, ftype=FeatureType.ACTION, shape=(2,))]
+
+    preprocessor, _ = make_molmoact2_preprocessors(tiny_molmoact2_config)
+    mask = _default_action_dim_is_pad(preprocessor._input_layout, batch_size=1, device=torch.device("cpu"))
+
+    assert mask.tolist() == [[False, False, True, True]]
+
+
+def test_factory_requires_resolved_action_feature(tiny_molmoact2_config: MolmoAct2Config) -> None:
+    tiny_molmoact2_config.output_features = []
+
+    with pytest.raises(ValueError, match="action output feature"):
         make_molmoact2_preprocessors(tiny_molmoact2_config)
 
 

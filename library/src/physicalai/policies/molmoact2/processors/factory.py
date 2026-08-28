@@ -43,6 +43,12 @@ def _check_missing_state_feature(state_feature: Feature | None) -> None:
         raise ValueError(msg)
 
 
+def _check_missing_action_feature(action_feature: Feature | None) -> None:
+    if action_feature is None or action_feature.shape is None:
+        msg = "MolmoAct2 requires an action output feature with a resolved shape."
+        raise ValueError(msg)
+
+
 def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
     """Build matched MolmoAct2 normalization processors.
 
@@ -63,9 +69,11 @@ def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Prep
     input_features = list(config.input_features)
     output_features = list(config.output_features)
 
-    # check required state feature and tokens
+    # check required state/action features and tokens
     state_feature = get_feature_by_type(input_features, FeatureType.STATE)
+    action_feature = get_feature_by_type(output_features, FeatureType.ACTION)
     _check_missing_state_feature(state_feature)
+    _check_missing_action_feature(action_feature)
     _check_missing_tokens(
         {
             "image_start_token_id": config.image_start_token_id,
@@ -127,7 +135,7 @@ def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Prep
 
     # Describe action dimensions and special-token layout for model input assembly.
     input_layout = MolmoAct2InputLayout(
-        env_action_dim=int(cast("tuple[int, ...]", cast("Feature", state_feature).shape)[-1]),
+        env_action_dim=int(cast("tuple[int, ...]", cast("Feature", action_feature).shape)[-1]),
         max_action_dim=config.max_action_dim,
         image_placeholder_token_id=config.image_placeholder_token_id,
         image_patch_id=cast("int", config.image_patch_id),
