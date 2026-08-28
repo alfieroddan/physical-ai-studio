@@ -13,7 +13,7 @@ import torch
 
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.data.dataset import Dataset
-from physicalai.export import ExportBackend
+from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
 
@@ -365,6 +365,40 @@ def test_runtime_options_are_policy_owned() -> None:
     assert policy.gradient_checkpointing is True
     assert policy.optimizer_lr == 2e-5
     assert "compile_model" not in policy.hparams
+
+
+def test_sample_input_zeros_only_state_with_passthrough_dimensions(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generic_sample = {
+        "image": torch.full((1, 3, 28, 28), 0.5),
+        "state": torch.full((1, 4), 2.0),
+        "task": "Example prompt string",
+    }
+    monkeypatch.setattr(ExportablePolicyMixin, "sample_input", property(lambda _self: dict(generic_sample)))
+    state_feature = tiny_molmoact2_config.input_features[-1]
+    masked_state = replace(
+        state_feature,
+        normalization_data=replace(
+            state_feature.normalization_data,
+            mask=[True, True, True, False],
+        ),
+    )
+    masked_config = replace(
+        tiny_molmoact2_config,
+        input_features=[*tiny_molmoact2_config.input_features[:-1], masked_state],
+    )
+
+    masked_sample = MolmoAct2.from_config(masked_config).sample_input
+    normalized_sample = MolmoAct2.from_config(tiny_molmoact2_config).sample_input
+
+    assert masked_sample is not None
+    assert normalized_sample is not None
+    torch.testing.assert_close(masked_sample["state"], torch.zeros(1, 4))
+    torch.testing.assert_close(normalized_sample["state"], generic_sample["state"])
+    torch.testing.assert_close(masked_sample["image"], generic_sample["image"])
+    assert masked_sample["task"] == generic_sample["task"]
 
 
 def test_openvino_compression_is_used_by_export(

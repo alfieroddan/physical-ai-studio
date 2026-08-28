@@ -89,7 +89,7 @@ def _copy_feature_normalization(
     ]
 
 
-class MolmoAct2(ExportablePolicyMixin, Policy):
+class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
     """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs.
 
     Args:
@@ -1162,6 +1162,28 @@ class MolmoAct2(ExportablePolicyMixin, Policy):
     ) -> None:
         """Leave clipping to :class:`MolmoAct2AdamW` for independent groups."""
         del optimizer, gradient_clip_val, gradient_clip_algorithm
+
+    @property
+    @override
+    def sample_input(self) -> dict[str, torch.Tensor | str] | None:
+        """A deterministic export sample valid for pass-through state dimensions.
+
+        The synthetic state is zeroed only when its mask contains pass-through dimensions.
+        """
+        sample = super().sample_input
+        state_feature = get_feature_by_type(self.input_features or [], FeatureType.STATE)
+        normalization = state_feature.normalization_data if state_feature is not None else None
+        if (
+            sample is not None
+            and state_feature is not None
+            and normalization is not None
+            and normalization.mask
+            and not all(normalization.mask)
+        ):
+            state = sample.get(str(state_feature.name))
+            if torch.is_tensor(state):
+                sample[str(state_feature.name)] = torch.zeros_like(state)
+        return sample
 
     @property
     def inputs_schema(self) -> list[InferenceFeature] | None:

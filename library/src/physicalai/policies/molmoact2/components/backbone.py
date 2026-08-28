@@ -49,6 +49,24 @@ def _sample_beta_timesteps(
     return time_offset + scale * samples
 
 
+def _merge_image_features(
+    embeddings: torch.Tensor,
+    image_features: torch.Tensor,
+    is_image_patch: torch.Tensor,
+) -> torch.Tensor:
+    """Add dense per-example image features to their ordered token positions.
+
+    Returns:
+        Embeddings with image features added at image-patch positions.
+    """
+    feature_indices = is_image_patch.to(dtype=torch.int64).cumsum(1) - 1
+    feature_indices = feature_indices.clamp_min(0)
+    gather_indices = feature_indices[..., None].expand(-1, -1, image_features.shape[-1])
+    aligned_features = torch.gather(image_features, 1, gather_indices)
+    image_delta = torch.where(is_image_patch[..., None], aligned_features, torch.zeros_like(aligned_features))
+    return embeddings + image_delta
+
+
 class MolmoAct2Backbone(nn.Module):
     """Text + vision + action expert. Checkpoint prefix: ``model.*``."""
 
@@ -118,10 +136,8 @@ class MolmoAct2Backbone(nn.Module):
         # Keep the dtype conversion off the input boundary so OpenVINO retains the semantic ``images`` input name.
         images = images.reshape(images.shape)
         image_features = self.vision_backbone(images.to(self.vision_backbone.dtype), token_pooling).to(embeddings.dtype)
-        is_image_patch = (token_ids == self.image_patch_id).reshape(-1)
-        flat = embeddings.reshape(-1, embeddings.shape[-1]).clone()
-        flat[is_image_patch] += image_features
-        return flat.reshape_as(embeddings)
+        is_image_patch = token_ids == self.image_patch_id
+        return _merge_image_features(embeddings, image_features, is_image_patch)
 
     @staticmethod
     def _build_attention_bias(

@@ -403,7 +403,7 @@ class MolmoAct2VisionBackbone(nn.Module):
                 negative entries mark padding.
 
         Returns:
-            Projected features ``(num_valid_tokens, text_hidden_size)``.
+            Projected features ``(batch, num_tokens, text_hidden_size)`` with padded rows zeroed.
         """
         batch_size = images.shape[0]
         image_features = self.image_feature_dropout(self.encode_image(images))
@@ -429,4 +429,4 @@ class MolmoAct2VisionBackbone(nn.Module):
         pooled = self.image_pooling_2d(query, to_pool, attn_mask=attn_mask)
         pooled = pooled.reshape(batch_size, -1, pooled.shape[-1])
         pooled = self.image_projector(pooled)
-        return pooled.view(-1, pooled.shape[-1])[valid_token.flatten()]
+        return torch.where(valid_token[..., None], pooled, torch.zeros_like(pooled))
