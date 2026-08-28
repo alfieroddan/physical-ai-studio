@@ -314,6 +314,7 @@ def test_load_from_checkpoint_restores_config_and_weights(
     }
     policy.on_save_checkpoint(checkpoint)
     checkpoint_path = tmp_path / "molmoact2.ckpt"
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only trusted data.
     torch.save(checkpoint, checkpoint_path)
 
     def fail_pretrained_resolution(*_args: object, **_kwargs: object) -> None:
