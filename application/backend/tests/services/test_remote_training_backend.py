@@ -202,16 +202,22 @@ class _FakeClient:
 def _settings() -> MagicMock:
     settings = MagicMock()
     settings.trainer_url = "https://trainer.test"
-    settings.trainer_request_timeout_s = 5.0
-    settings.trainer_download_read_timeout_s = 120.0
-    settings.trainer_stream_reconnect_max_s = 900.0
-    settings.trainer_stream_reconnect_backoff_max_s = 30.0
+    settings.trainer.request_timeout_s = 5.0
+    settings.trainer.download_read_timeout_s = 120.0
+    settings.trainer.stream_reconnect_max_s = 900.0
+    settings.trainer.stream_reconnect_backoff_max_s = 30.0
     settings.data_import_max_uncompressed_bytes = 10 * 1024 * 1024
     settings.data_import_min_free_bytes = 0
     return settings
 
 
-def _context(tmp_path: Path, *, should_stop: bool = False, remote_job_id: UUID | None = None) -> TrainingContext:
+def _context(
+    tmp_path: Path,
+    *,
+    should_stop: bool = False,
+    remote_job_id: UUID | None = None,
+    should_cancel_job: bool = False,
+) -> TrainingContext:
     snap = tmp_path / "snap"
     snap.mkdir()
     # A file in the snapshot dir gives the ZIP archive real bytes to stream.
@@ -241,6 +247,7 @@ def _context(tmp_path: Path, *, should_stop: bool = False, remote_job_id: UUID |
         progress=MagicMock(),
         should_stop=lambda: should_stop,
         remote_job_id=remote_job_id,
+        should_cancel_job=lambda: should_cancel_job,
     )
 
 
@@ -307,6 +314,12 @@ class TestRemoteTrainingBackend:
         assert SNAPSHOT_UPLOAD_PROGRESS + round(50 * span / 100) in reported
         # Progress reached 100% before the worker marks completion.
         assert max(reported) == 100
+
+    @pytest.mark.anyio
+    async def test_submit_excludes_local_run_options_from_trainer_payload(self, tmp_path):
+        body = await _submitted_body(_settings(), _context(tmp_path))
+
+        assert "run_options" not in body["spec"]
 
     @pytest.mark.anyio
     async def test_completion_deletes_remote_job_artifacts(self, tmp_path):
@@ -467,8 +480,8 @@ class TestRemoteTrainingBackend:
         """Persistent unreachability past the reconnect budget aborts the job."""
         settings = _settings()
         # Zero budget: the first failed reconnect+poll cycle exhausts it.
-        settings.trainer_stream_reconnect_max_s = 0.0
-        settings.trainer_stream_reconnect_backoff_max_s = 0.0
+        settings.trainer.stream_reconnect_max_s = 0.0
+        settings.trainer.stream_reconnect_backoff_max_s = 0.0
         context = _context(tmp_path)
         controller = _Controller(states=[])
         controller.raise_connection_error = True
@@ -648,7 +661,7 @@ class TestHttpDatasetTransfer:
 
         body = await _submitted_body(settings, context)
 
-        assert body["spec"] == build_spec(context).model_dump(mode="json") | {
+        assert body["spec"] == build_spec(context).model_dump(mode="json", exclude={"run_options"}) | {
             "device_type": None,
             "device_index": None,
         }
@@ -888,8 +901,38 @@ class TestModelDownloadCancellation:
 
         assert controller.cancelled is False
 
+    @pytest.mark.anyio
+    async def test_user_cancel_racing_shutdown_still_cancels_remote_job(self, tmp_path):
+        """A user cancel that overlaps a concurrent app shutdown must still cancel, not suspend.
 
-class TestSnapshotUploadHeartbeat:
+        Regression guard: stopping a job and then stopping the backend "soon
+        after" can make ``should_suspend`` true (app shutting down) at the same
+        moment the user's own interrupt made ``should_stop`` true. Suspend must
+        not win here, or the "canceled" job is left running on the trainer and
+        gets silently reattached to on the next startup.
+        """
+        from services.training_backends.base import TrainingCanceledError
+
+        settings = _settings()
+        context = _context(tmp_path, should_stop=True, should_cancel_job=True)
+        # A shutdown is *also* in flight at the same moment, but the user's own
+        # cancel of this specific job must take priority.
+        context.should_suspend = lambda: True
+        controller = _Controller(states=[])
+        controller.artifact_chunks = [b"a" * 500, b"b" * 500]
+        controller.artifact_headers = {"content-length": "1000"}
+        stream_timeout = httpx.Timeout(5.0)
+
+        with (
+            patch(f"{REMOTE}.get_settings", return_value=settings),
+            patch(f"{REMOTE}.httpx.AsyncClient", lambda **kw: _FakeClient(controller, **kw)),
+        ):
+            backend = _backend(settings)
+            with pytest.raises(TrainingCanceledError):
+                await backend._stream_archive(context, controller.remote_job_id, tmp_path / "model.zip", stream_timeout)
+
+        assert controller.cancelled is True
+
     """The HTTP upload loop emits throttled byte heartbeats for large snapshots."""
 
     @pytest.mark.anyio
