@@ -7,12 +7,11 @@ for training, Lightning checkpoints, benchmarking, and export.
 
 - [Blog post](https://allenai.org/blog/molmoact2)
 - [Paper](https://arxiv.org/abs/2605.02881)
-- [LeRobot documentation](https://huggingface.co/docs/lerobot/en/molmoact2)
 
 ## Installation
 
 ```bash
-pip install "physicalai-train[molmoact2]"
+uv sync --extra molmoact2
 ```
 
 ## Loading Policies
@@ -124,37 +123,64 @@ action-head-only training are mutually exclusive.
 ## Benchmarking LIBERO
 
 ```python
+import random
+
+import numpy as np
 import torch
 
 from physicalai.benchmark.gyms import LiberoBenchmark
-from physicalai.devices.utils import get_device
 from physicalai.policies import MolmoAct2
 
-DEVICE = get_device()
+DEVICE = "cuda"
 
-policy = MolmoAct2(
-    pretrained_name_or_path="allenai/MolmoAct2-LIBERO",
-    norm_tag="libero",
-    n_action_steps=10,
-    use_random_input_noise=True,
-)
-policy = policy.to(device=DEVICE, dtype=torch.bfloat16).eval()
+SEED = 0
 
-benchmark = LiberoBenchmark(
-    task_suite="libero_10",
-    num_episodes=20,
-    seed=0,
-    camera_name_mapping={"image2": "wrist_image"},
-    observation_height=378,
-    observation_width=378,
-)
+TASK_SUITES = ["libero_spatial", "libero_object", "libero_goal", "libero_10"]
 
-try:
-    results = benchmark.evaluate(policy)
-    print(results.summary())
-finally:
-    for gym in benchmark.gyms:
-        gym.close()
+
+def set_seed(seed: int) -> None:
+    """Seed all global RNGs for reproducible benchmark + model sampling."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+if __name__ == "__main__":
+    set_seed(SEED)
+
+    policy = MolmoAct2(
+        pretrained_name_or_path="allenai/MolmoAct2-LIBERO",
+        norm_tag="libero",
+        n_action_steps=10,
+        use_random_input_noise=True,
+        compile_model=True,
+    )
+    policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
+
+    for task_suite in TASK_SUITES:
+        benchmark = LiberoBenchmark(
+            task_suite=task_suite,
+            num_episodes=1,
+            seed=SEED,
+            camera_name_mapping={"image2": "wrist_image"},
+            observation_height=378,
+            observation_width=378,
+            record_mode="all",
+            video_dir="./videos/",
+        )
+
+        try:
+            results = benchmark.evaluate(policy)
+            summary = results.summary()
+
+            block_header = f"\n{'=' * 28} {task_suite} {'=' * 28}\n"
+            print(block_header, end="")
+            print(summary)
+        finally:
+            for gym in benchmark.gyms:
+                gym.close()
 ```
 
 ### Reported Results
@@ -163,25 +189,15 @@ The following measurements are retained from the original integration report.
 Performance depends on hardware, precision, runtime versions, and benchmark
 configuration.
 
-NVIDIA A100, FP16:
+NVIDIA A100, BF16:
 
-| Suite          |  Tasks | Avg. success rate (%) | Avg. reward | Avg. episode length |  Avg. FPS |
-| -------------- | -----: | --------------------: | ----------: | ------------------: | --------: |
-| libero_spatial |     10 |                 100.0 |        1.00 |               106.4 |     10.56 |
-| libero_object  |     10 |                 100.0 |        1.00 |               132.7 |     11.82 |
-| libero_goal    |     10 |                  90.0 |        0.90 |               134.2 |     11.51 |
-| libero_10      |     10 |                 100.0 |        1.00 |               241.4 |     12.61 |
-| **Average**    | **40** |              **97.5** |    **0.98** |           **153.7** | **11.63** |
-
-OpenVINO GPU, FP16:
-
-| Suite          |  Tasks | Avg. success rate (%) | Avg. reward | Avg. episode length | Avg. FPS |
-| -------------- | -----: | --------------------: | ----------: | ------------------: | -------: |
-| libero_spatial |     10 |                 100.0 |        1.00 |               122.0 |     14.6 |
-| libero_object  |     10 |                 100.0 |        1.00 |               145.3 |     16.2 |
-| libero_goal    |     10 |                  80.0 |        0.80 |               159.5 |     16.1 |
-| libero_10      |     10 |                  80.0 |        0.80 |               300.2 |     16.7 |
-| **Average**    | **40** |              **90.0** |    **0.90** |           **181.8** | **15.9** |
+| Suite          | Tasks  | Avg. success rate (%) | Avg. reward | Avg. episode length | Avg. FPS  |
+| -------------- | ------ | --------------------- | ----------- | ------------------- | --------- |
+| libero_spatial | 10     | 100.0                 | 1.00        | 107.2               | 14.70     |
+| libero_object  | 10     | 100.0                 | 1.00        | 137.0               | 20.30     |
+| libero_goal    | 10     | 90.0                  | 0.90        | 134.7               | 20.50     |
+| libero_10      | 10     | 90.0                  | 0.90        | 278.6               | 20.70     |
+| **Average**    | **40** | **95.0**              | **0.95**    | **164.4**           | **19.05** |
 
 ## Export
 
