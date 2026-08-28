@@ -14,6 +14,11 @@ from physicalai.policies.molmoact2.processors import (
     make_molmoact2_preprocessors,
 )
 from physicalai.policies.molmoact2.processors.image import MolmoAct2ImageProcessor
+from physicalai.policies.molmoact2.processors.inputs import (
+    MolmoAct2InputLayout,
+    _build_batched_images,
+    _expand_image_placeholders,
+)
 from physicalai.policies.molmoact2.processors.normalization import MolmoAct2NormalizeTransform
 from physicalai.policies.molmoact2.processors.preprocess_steps import (
     ActionPadder,
@@ -66,6 +71,22 @@ def test_extractor_accepts_flattened_observations() -> None:
     assert bundle.images_by_example[0][0].shape == (3, 8, 8)
 
 
+def test_extractor_sorts_nested_fallback_but_preserves_explicit_order() -> None:
+    images = {
+        "wrist": torch.ones(1, 3, 8, 8),
+        "top": torch.zeros(1, 3, 8, 8),
+    }
+    batch = {STATE: torch.zeros(1, 4), TASK: "Pick block.", IMAGES: images}
+
+    fallback = StateTaskImageExtractor(image_keys=[]).extract(batch).images_by_example[0]
+    explicit = StateTaskImageExtractor(image_keys=["wrist", "top"]).extract(batch).images_by_example[0]
+
+    assert torch.equal(fallback[0], images["top"][0])
+    assert torch.equal(fallback[1], images["wrist"][0])
+    assert torch.equal(explicit[0], images["wrist"][0])
+    assert torch.equal(explicit[1], images["top"][0])
+
+
 def test_prompt_encoder_includes_state_and_image_tokens() -> None:
     encoder = RobotPromptEncoder(
         num_state_tokens=16,
@@ -103,6 +124,51 @@ def test_image_processing_and_packing_shapes() -> None:
     assert packed.shape == (1, 2, 3, 28, 28)
     assert mask.tolist() == [[True, True]]
     assert processed["pixel_values"].shape == (2, 4, 14 * 14 * 3)
+
+
+def test_placeholder_expansion_uses_configured_padding() -> None:
+    layout = MolmoAct2InputLayout(
+        env_action_dim=2,
+        max_action_dim=4,
+        image_placeholder_token_id=99,
+        image_patch_id=11,
+        image_start_token_id=10,
+        image_end_token_id=12,
+    )
+
+    input_ids, attention_mask, _ = _expand_image_placeholders(
+        layout=layout,
+        pad_token_id=7,
+        input_ids=torch.tensor([[99, 5], [99, 99]]),
+        attention_mask=torch.ones((2, 2), dtype=torch.long),
+        image_grids=torch.tensor([[1, 1, 0, 0]] * 3),
+    )
+
+    assert input_ids[0].tolist() == [10, 11, 12, 5, 7, 7]
+    assert attention_mask[0].tolist() == [1, 1, 1, 1, 0, 0]
+
+
+def test_build_batched_images_supports_multi_crop_grids() -> None:
+    layout = MolmoAct2InputLayout(
+        env_action_dim=2,
+        max_action_dim=4,
+        image_placeholder_token_id=99,
+        image_patch_id=11,
+        image_start_token_id=10,
+        image_end_token_id=12,
+    )
+
+    images, pooling = _build_batched_images(
+        layout,
+        input_ids=torch.tensor([[10, 11, 12, 10, 11, 12], [10, 11, 12, 10, 11, 12]]),
+        pixel_values=torch.arange(8, dtype=torch.float32).reshape(2, 4, 1),
+        image_token_pooling=torch.arange(10, dtype=torch.long).reshape(10, 1) % 4,
+        image_grids=torch.tensor([[1, 1, 2, 2], [1, 1, 2, 2]]),
+        image_num_crops=torch.ones(2, dtype=torch.long),
+    )
+
+    assert images.shape == (2, 1, 4, 1)
+    assert pooling.shape == (2, 5, 1)
 
 
 def test_action_padder_returns_values_and_masks() -> None:

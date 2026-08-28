@@ -105,6 +105,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
             packed,
             layout=self._input_layout,
             image_processor=self._image_processor,
+            pad_token_id=self._tokenizers.pad_token_id,
         )
         self._add_action(output, normalized)
         return output

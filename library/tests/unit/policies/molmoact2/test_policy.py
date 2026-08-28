@@ -384,6 +384,33 @@ def test_openvino_compression_is_used_by_export(
     assert export_args.compress_to_fp16 is True
 
 
+def test_openvino_export_forwards_runtime_input_config(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    config = replace(
+        tiny_molmoact2_config,
+        frame_start_token_id=21,
+        frame_end_token_id=22,
+        image_low_res_id=23,
+    )
+    policy = MolmoAct2(pretrained_name_or_path=None)
+    policy.config = config
+    policy.input_features = config.input_features
+    policy.output_features = config.output_features
+    policy.model = Mock()
+    policy._preprocessor = Mock()
+    policy._preprocessor.tokenizer.bos_token_id = 1
+    policy._preprocessor.tokenizer.pad_token_id = 7
+
+    export_args = policy.extra_export_args[ExportBackend.OPENVINO]
+    model_inputs = next(spec for spec in export_args.preprocessors_specs if spec.type == "molmoact2_inputs")
+
+    assert model_inputs.pad_token_id == 7
+    assert model_inputs.frame_start_token_id == 21
+    assert model_inputs.frame_end_token_id == 22
+    assert model_inputs.image_low_res_id == 23
+
+
 def test_model_modifications_are_applied_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = MolmoAct2(
         pretrained_name_or_path=None,

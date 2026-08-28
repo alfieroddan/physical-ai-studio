@@ -110,7 +110,8 @@ class StateTaskImageExtractor:
         images = batch.get(IMAGES)
         if isinstance(images, dict):
             configured = [f"{IMAGES}.{name}" for name in self.image_keys if name in images]
-            return configured or [f"{IMAGES}.{name}" for name in images if "is_pad" not in str(name)]
+            fallback = sorted(f"{IMAGES}.{name}" for name in images if "is_pad" not in str(name))
+            return configured or fallback
         if images is not None:
             return [IMAGES]
 

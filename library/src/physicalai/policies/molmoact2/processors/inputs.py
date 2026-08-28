@@ -114,6 +114,7 @@ def _image_token_ids_for_grid(layout: MolmoAct2InputLayout, grid: torch.Tensor) 
 def _expand_image_placeholders(
     *,
     layout: MolmoAct2InputLayout,
+    pad_token_id: int,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     image_grids: torch.Tensor,
@@ -126,8 +127,6 @@ def _expand_image_placeholders(
     Raises:
         ValueError: If there are not enough image grids to expand all image placeholders.
     """
-    pad_values = input_ids[attention_mask == 0]
-    pad_token_id = int(pad_values[0]) if pad_values.numel() else 0
     rows: list[list[int]] = []
     widths: list[int] = []
     grid_index = 0
@@ -175,7 +174,7 @@ def _rebase_pooling_block(
     return block
 
 
-def _build_batched_images(
+def _build_batched_images(  # noqa: PLR0914
     layout: MolmoAct2InputLayout,
     input_ids: torch.Tensor,
     pixel_values: torch.Tensor,
@@ -189,13 +188,24 @@ def _build_batched_images(
         tuple[torch.Tensor, torch.Tensor]: A tuple containing the regrouped images and pooling tensors.
 
     Raises:
-        ValueError: If the number of image-end tokens does not match the number of image grids.
+        ValueError: If image counts cannot be inferred from image-end tokens.
     """
-    counts = (input_ids == layout.image_end_token_id).sum(1)
-    if int(counts.sum()) != int(image_grids.shape[0]):
-        msg = "Image-end token count does not match image-grid count."
+    raw_counts = (input_ids == layout.image_end_token_id).sum(1)
+    total_images = int(image_grids.shape[0])
+    total_end_tokens = int(raw_counts.sum())
+    if total_images == 0:
+        counts = torch.zeros_like(raw_counts)
+    elif total_end_tokens == total_images:
+        counts = raw_counts
+    elif total_end_tokens == 2 * total_images:
+        counts = raw_counts // 2
+    else:
+        msg = (
+            "Could not infer image counts from image-end tokens: "
+            f"end_tokens={total_end_tokens}, image_grids={total_images}."
+        )
         raise ValueError(msg)
-    pooled_per_image = image_grids[:, :2].prod(1).to(image_num_crops.dtype)
+    pooled_per_image = (image_grids[:, :2].prod(1) + image_grids[:, 2:].prod(1)).to(image_num_crops.dtype)
     example_for_image = torch.arange(counts.shape[0], device=input_ids.device).repeat_interleave(counts)
     crops_per_example = torch.zeros(counts.shape[0], dtype=image_num_crops.dtype, device=input_ids.device)
     crops_per_example.index_add_(0, example_for_image, image_num_crops)
@@ -236,6 +246,7 @@ def build_model_inputs(
     *,
     layout: MolmoAct2InputLayout,
     image_processor: MolmoAct2ImageProcessor,
+    pad_token_id: int,
 ) -> dict[str, torch.Tensor]:
     """Assemble backbone-ready tensors from packed preprocessing outputs.
 
@@ -256,6 +267,7 @@ def build_model_inputs(
     image_output = image_processor(flat_images)
     input_ids, attention_mask, token_type_ids = _expand_image_placeholders(
         layout=layout,
+        pad_token_id=pad_token_id,
         input_ids=input_ids,
         attention_mask=attention_mask,
         image_grids=image_output["image_grids"].to(input_ids.device),

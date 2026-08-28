@@ -106,6 +106,19 @@ class MolmoAct2Tokenizers:
             self._openvino_tokenizer = _drop_output_only_added_tokens(self._qwen_tokenizer())
         return self._openvino_tokenizer
 
+    @property
+    def pad_token_id(self) -> int:
+        """The configured tokenizer padding token ID.
+
+        Raises:
+            TypeError: If the tokenizer does not define a pad token ID.
+        """
+        pad_token_id = self._qwen_tokenizer().pad_token_id
+        if not isinstance(pad_token_id, int):
+            msg = "Tokenizer must define a pad token ID."
+            raise TypeError(msg)
+        return pad_token_id
+
     @staticmethod
     def _insert_bos(
         input_ids: np.ndarray,
