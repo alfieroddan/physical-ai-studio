@@ -33,6 +33,16 @@ class TestLocalTarget:
         payload = LocalTrainJobPayload(**_base_kwargs())
         assert payload.training_target is TrainingTarget.LOCAL
 
+    def test_molmoact2_training_parameters_are_flat_payload_fields(self) -> None:
+        payload = LocalTrainJobPayload(
+            **(_base_kwargs() | {"policy": "molmoact2"}),
+            use_lora=True,
+            gradient_checkpointing=True,
+            adapt_to_so101=True,
+        )
+
+        assert (payload.use_lora, payload.gradient_checkpointing, payload.adapt_to_so101) == (True, True, True)
+
     @pytest.mark.parametrize(
         "extra",
         [

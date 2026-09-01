@@ -23,6 +23,12 @@ def test_spec_defaults_come_from_the_library() -> None:
     assert request.spec == TrainingJobSpec(policy="act")
 
 
+def test_molmoact2_policy_is_supported() -> None:
+    request = SubmitJobRequest(spec=TrainingJobSpec(policy="molmoact2", use_lora=True))
+
+    assert request.spec.policy == "molmoact2"
+
+
 @pytest.mark.parametrize("policy", ["unknown", "gpt", ""])
 def test_unsupported_policy_rejected(policy: str) -> None:
     with pytest.raises(ValidationError):

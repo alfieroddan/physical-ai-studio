@@ -151,6 +151,21 @@ async def test_import_model_directory_success(tmp_path, project_id, dataset_id, 
 
 
 @pytest.mark.anyio
+async def test_import_model_directory_accepts_molmoact2(tmp_path, project_id, dataset_id, settings, dataset, job):
+    source_dir = _create_model_directory(tmp_path, _base_files(policy="molmoact2", artifact="molmoact2.pt"))
+
+    with _mock_services(settings, dataset, job) as service:
+        model = await service.import_model_directory(
+            source_dir=source_dir,
+            project_id=project_id,
+            dataset_id=dataset_id,
+            model_name="imported",
+        )
+
+    assert model.policy == "molmoact2"
+
+
+@pytest.mark.anyio
 async def test_import_model_directory_move_removes_source(tmp_path, project_id, dataset_id, settings, dataset, job):
     source_dir = _create_model_directory(tmp_path, _base_files())
 

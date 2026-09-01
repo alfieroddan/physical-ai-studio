@@ -76,6 +76,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [autoScaleBatchSize, setAutoScaleBatchSize] = useState<boolean>(bestDevice?.type === 'cuda');
     const [precision, setPrecision] = useState<Key | null>(bestDevice?.type === 'cuda' ? 'bf16-mixed' : '32-true');
     const [compileModel, setCompileModel] = useState<boolean>(false);
+    const [useLora, setUseLora] = useState<boolean>(true);
+    const [gradientCheckpointing, setGradientCheckpointing] = useState<boolean>(true);
+    const [adaptToSo101, setAdaptToSo101] = useState<boolean>(false);
     const [remoteTrainerId, setRemoteTrainerId] = useState<Key | null>('local');
     const isRemoteTarget = remoteTrainerId !== null && remoteTrainerId !== 'local';
     const {
@@ -150,6 +153,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             auto_scale_batch_size: autoScaleBatchSize,
             precision: (precision?.toString() ?? 'bf16-mixed') as SchemaJob['payload']['precision'],
             compile_model: compileModel,
+            use_lora: selectedPolicy === 'molmoact2' ? useLora : false,
+            gradient_checkpointing: selectedPolicy === 'molmoact2' ? gradientCheckpointing : false,
+            adapt_to_so101: selectedPolicy === 'molmoact2' ? adaptToSo101 : false,
             val_split: 0.1,
             ...extraPayload,
         } as const;
@@ -244,6 +250,14 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onPrecisionChange={setPrecision}
                                 compileModel={compileModel}
                                 onCompileModelChange={setCompileModel}
+                                useLora={useLora}
+                                onUseLoraChange={setUseLora}
+                                gradientCheckpointing={gradientCheckpointing}
+                                onGradientCheckpointingChange={setGradientCheckpointing}
+                                adaptToSo101={adaptToSo101}
+                                onAdaptToSo101Change={setAdaptToSo101}
+                                showMolmoAct2Parameters={selectedPolicy === 'molmoact2'}
+                                arePolicyParametersDisabled={baseModel !== undefined}
                                 isAutoScaleBatchDisabled={activeDevice?.type !== 'cuda'}
                                 deviceType={activeDevice?.type}
                             />

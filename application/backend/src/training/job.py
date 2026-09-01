@@ -54,6 +54,7 @@ _DATASET_REPO_ID = "snapshot"
 """Placeholder repo id: datasets are always loaded from a local root here."""
 
 PRETRAINED_BASE_CHECKPOINTS: dict[str, str] = {
+    "molmoact2": "allenai/MolmoAct2",
     "pi05": "lerobot/pi05_base",
     "smolvla": "lerobot/smolvla_base",
 }
@@ -111,6 +112,12 @@ class TrainingJobSpec(BaseModel):
         ge=0,
         description="Zero-based index of the accelerator to train on. None lets Lightning pick one.",
     )
+    use_lora: bool = Field(default=False, description="Whether to enable LoRA adapters for supported policies.")
+    gradient_checkpointing: bool = Field(
+        default=False,
+        description="Whether to trade compute for lower training memory use on supported policies.",
+    )
+    adapt_to_so101: bool = Field(default=False, description="Whether MolmoAct2 adapts data to the SO-101 frame.")
     run_options: RunOptions = Field(default_factory=RunOptions)
 
 
@@ -136,6 +143,12 @@ def build_policy(spec: TrainingJobSpec, *, resume_from: Path | str | None = None
         pretrained = PRETRAINED_BASE_CHECKPOINTS.get(spec.policy.lower())
         if pretrained is not None:
             kwargs["pretrained_name_or_path"] = pretrained
+    if spec.policy.lower() == "molmoact2":
+        kwargs.update(
+            use_lora=spec.use_lora,
+            gradient_checkpointing=spec.gradient_checkpointing,
+            adapt_to_so101=spec.adapt_to_so101,
+        )
     return get_policy(spec.policy, source=spec.policy_source, **kwargs)
 
 

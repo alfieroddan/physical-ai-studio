@@ -165,6 +165,40 @@ describe('TrainModelDialog', () => {
         expect(screen.queryByText(/gated base model/i)).not.toBeInTheDocument();
     });
 
+    it('submits MolmoAct2 training parameters', async () => {
+        const user = userEvent.setup();
+        let submittedPayload: Record<string, unknown> | undefined;
+        mockProjectWithRemoteTrainer();
+        server.use(
+            http.post('/api/jobs:train', async ({ request }) => {
+                submittedPayload = (await request.json()) as Record<string, unknown>;
+                return HttpResponse.json({}, { status: 201 });
+            })
+        );
+
+        renderDialog();
+        await user.click(await screen.findByRole('button', { name: /select…/i }));
+        await user.click(await screen.findByRole('option', { name: 'Test dataset' }));
+        await user.click(screen.getByLabelText('Select MolmoAct2 policy'));
+
+        expect(await screen.findByRole('checkbox', { name: 'Use LoRA' })).toBeChecked();
+        expect(screen.getByRole('checkbox', { name: 'Gradient checkpointing' })).toBeChecked();
+        expect(screen.getByRole('checkbox', { name: 'Adapt to SO-101' })).not.toBeChecked();
+
+        await user.click(screen.getByRole('button', { name: 'Train' }));
+
+        await waitFor(() =>
+            expect(submittedPayload).toEqual(
+                expect.objectContaining({
+                    policy: 'molmoact2',
+                    use_lora: true,
+                    gradient_checkpointing: true,
+                    adapt_to_so101: false,
+                })
+            )
+        );
+    });
+
     it('blocks Pi0.5 training without a Hugging Face token', async () => {
         const user = userEvent.setup();
         mockProjectWithRemoteTrainer();

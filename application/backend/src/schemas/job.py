@@ -140,6 +140,12 @@ class TrainJobPayloadBase(BaseModel):
         description="Training precision ('32-true', 'bf16-mixed')",
     )
     compile_model: bool = Field(default=False, description="Enable torch.compile for supported policies")
+    use_lora: bool | None = Field(default=None, description="Enable LoRA adapters for supported policies")
+    gradient_checkpointing: bool | None = Field(
+        default=None,
+        description="Trade compute for lower training memory use on supported policies",
+    )
+    adapt_to_so101: bool | None = Field(default=None, description="Adapt MolmoAct2 data to the SO-101 frame")
 
     # Set by the worker for every target (not just remote ones): a snapshot is
     # taken up front so a job's model has stable provenance, and a remote/SSH

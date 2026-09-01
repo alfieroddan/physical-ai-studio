@@ -23,6 +23,14 @@ interface TrainingParametersProps {
     onPrecisionChange: (value: Key | null) => void;
     compileModel: boolean;
     onCompileModelChange: (value: boolean) => void;
+    useLora: boolean;
+    onUseLoraChange: (value: boolean) => void;
+    gradientCheckpointing: boolean;
+    onGradientCheckpointingChange: (value: boolean) => void;
+    adaptToSo101: boolean;
+    onAdaptToSo101Change: (value: boolean) => void;
+    showMolmoAct2Parameters: boolean;
+    arePolicyParametersDisabled: boolean;
     isAutoScaleBatchDisabled: boolean;
     deviceType: string | undefined;
 }
@@ -40,6 +48,14 @@ export const TrainingParameters = ({
     onPrecisionChange,
     compileModel,
     onCompileModelChange,
+    useLora,
+    onUseLoraChange,
+    gradientCheckpointing,
+    onGradientCheckpointingChange,
+    adaptToSo101,
+    onAdaptToSo101Change,
+    showMolmoAct2Parameters,
+    arePolicyParametersDisabled,
     isAutoScaleBatchDisabled,
     deviceType,
 }: TrainingParametersProps) => (
@@ -170,5 +186,33 @@ export const TrainingParameters = ({
                 </Flex>
             </Flex>
         </Flex>
+        {showMolmoAct2Parameters && (
+            <Flex direction='row' gap='size-300' width='100%' alignItems='center'>
+                <Checkbox
+                    isEmphasized
+                    isSelected={useLora}
+                    onChange={onUseLoraChange}
+                    isDisabled={arePolicyParametersDisabled}
+                >
+                    Use LoRA
+                </Checkbox>
+                <Checkbox
+                    isEmphasized
+                    isSelected={gradientCheckpointing}
+                    onChange={onGradientCheckpointingChange}
+                    isDisabled={arePolicyParametersDisabled}
+                >
+                    Gradient checkpointing
+                </Checkbox>
+                <Checkbox
+                    isEmphasized
+                    isSelected={adaptToSo101}
+                    onChange={onAdaptToSo101Change}
+                    isDisabled={arePolicyParametersDisabled}
+                >
+                    Adapt to SO-101
+                </Checkbox>
+            </Flex>
+        )}
     </Flex>
 );

@@ -65,6 +65,20 @@ class TestTrainingJobSpec:
 
         assert TrainingJobSpec.model_validate_json(spec.model_dump_json()) == spec
 
+    def test_molmoact2_spec_round_trips_through_json(self) -> None:
+        spec = TrainingJobSpec(
+            policy="molmoact2",
+            max_epochs=5,
+            num_workers=4,
+            device_type="xpu",
+            device_index=1,
+            use_lora=True,
+            gradient_checkpointing=True,
+            adapt_to_so101=True,
+        )
+
+        assert TrainingJobSpec.model_validate_json(spec.model_dump_json()) == spec
+
 
 class TestBuildPolicy:
     def test_fresh_policy_is_built_from_the_spec(self) -> None:
@@ -73,6 +87,27 @@ class TestBuildPolicy:
 
         assert policy is get_policy.return_value
         get_policy.assert_called_once_with("act", source="physicalai", compile_model=True)
+
+    def test_fresh_molmoact2_policy_receives_studio_options(self) -> None:
+        with patch("physicalai.policies.get_policy") as get_policy:
+            build_policy(
+                TrainingJobSpec(
+                    policy="molmoact2",
+                    use_lora=True,
+                    gradient_checkpointing=True,
+                    adapt_to_so101=True,
+                )
+            )
+
+        get_policy.assert_called_once_with(
+            "molmoact2",
+            source="physicalai",
+            compile_model=False,
+            pretrained_name_or_path="allenai/MolmoAct2",
+            use_lora=True,
+            gradient_checkpointing=True,
+            adapt_to_so101=True,
+        )
 
     @pytest.mark.parametrize("policy_name", sorted(PRETRAINED_BASE_CHECKPOINTS))
     def test_finetune_only_policies_start_from_pretrained_weights(self, policy_name: str) -> None:

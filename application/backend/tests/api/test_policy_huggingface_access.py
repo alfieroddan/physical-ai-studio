@@ -30,6 +30,24 @@ def test_huggingface_access_reports_missing_token(monkeypatch, tmp_path: Path) -
     }
 
 
+def test_molmoact2_reports_its_public_huggingface_dependency(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "settings.json"))
+
+    with TestClient(app) as client:
+        response = client.get("/api/policies/molmoact2/huggingface-access")
+
+    assert response.json() == {
+        "requirements": [
+            {
+                "repository": "allenai/MolmoAct2",
+                "status": "missing_token",
+                "access_url": "https://huggingface.co/allenai/MolmoAct2",
+                "required": False,
+            }
+        ],
+    }
+
+
 def test_huggingface_access_reports_gated_access_denied(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "settings.json"))
     write_user_settings({"huggingface": {"hf_token": "hf-secret"}})

@@ -109,6 +109,9 @@ def build_spec(context: TrainingContext) -> TrainingJobSpec:
         precision=str(payload.precision),
         compile_model=payload.compile_model,
         auto_scale_batch_size=payload.auto_scale_batch_size,
+        use_lora=payload.use_lora or False,
+        gradient_checkpointing=payload.gradient_checkpointing or False,
+        adapt_to_so101=payload.adapt_to_so101 or False,
         device_type=str(device.type) if device else None,
         device_index=device.index if device else None,
     )

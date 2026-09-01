@@ -121,6 +121,20 @@ class TestBuildSpec:
 
         assert (spec.device_type, spec.device_index) == (None, None)
 
+    def test_molmoact2_parameters_are_forwarded(self, tmp_path):
+        payload = _payload(
+            policy="molmoact2",
+            use_lora=True,
+            gradient_checkpointing=True,
+            adapt_to_so101=True,
+        )
+
+        context = _context(tmp_path, payload)
+        context.model.policy = "molmoact2"
+        spec = build_spec(context)
+
+        assert (spec.use_lora, spec.gradient_checkpointing, spec.adapt_to_so101) == (True, True, True)
+
     def test_resumed_run_trains_the_base_model_policy(self, tmp_path):
         """A resumed run's architecture comes from the checkpoint, not the request."""
         base_model = _model(tmp_path / "base", policy="pi0")
