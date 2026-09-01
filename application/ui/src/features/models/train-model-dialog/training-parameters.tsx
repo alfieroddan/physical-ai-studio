@@ -57,6 +57,12 @@ interface TrainingParametersProps {
     onCompileModelChange: (value: boolean) => void;
     augmentImages: boolean;
     onAugmentImagesChange: (value: boolean) => void;
+    gradientCheckpointing: boolean;
+    onGradientCheckpointingChange: (value: boolean) => void;
+    adaptToSo101: boolean;
+    onAdaptToSo101Change: (value: boolean) => void;
+    showMolmoAct2Parameters: boolean;
+    arePolicyParametersDisabled: boolean;
     isAutoScaleBatchDisabled: boolean;
     deviceType: string | undefined;
     /** False for policies without a LoRA/DoRA mixin; hides the LoRA controls entirely. */
@@ -94,6 +100,12 @@ export const TrainingParameters = ({
     onCompileModelChange,
     augmentImages,
     onAugmentImagesChange,
+    gradientCheckpointing,
+    onGradientCheckpointingChange,
+    adaptToSo101,
+    onAdaptToSo101Change,
+    showMolmoAct2Parameters,
+    arePolicyParametersDisabled,
     isAutoScaleBatchDisabled,
     deviceType,
     isLoraSupported,
@@ -414,6 +426,26 @@ export const TrainingParameters = ({
                         </ContextualHelp>
                     }
                 />
+            </Flex>
+        )}
+        {showMolmoAct2Parameters && (
+            <Flex direction='row' gap='size-300' width='100%' alignItems='center'>
+                <Checkbox
+                    isEmphasized
+                    isSelected={gradientCheckpointing}
+                    onChange={onGradientCheckpointingChange}
+                    isDisabled={arePolicyParametersDisabled}
+                >
+                    Gradient checkpointing
+                </Checkbox>
+                <Checkbox
+                    isEmphasized
+                    isSelected={adaptToSo101}
+                    onChange={onAdaptToSo101Change}
+                    isDisabled={arePolicyParametersDisabled}
+                >
+                    Adapt to SO-101
+                </Checkbox>
             </Flex>
         )}
     </Flex>

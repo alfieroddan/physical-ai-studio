@@ -77,6 +77,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
     const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [augmentImages, setAugmentImages] = useState<boolean>(false);
+    const [gradientCheckpointing, setGradientCheckpointing] = useState<boolean>(true);
+    const [adaptToSo101, setAdaptToSo101] = useState<boolean>(false);
     const [remoteTrainerId, setRemoteTrainerId] = useState<Key | null>('local');
     const isLoraSupported = supportsLora(selectedPolicy);
     const isLoraRequested = isLoraSupported && loraEnabled;
@@ -230,6 +232,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             snapflow_enabled: isSnapflowRequested,
             snapflow_distill_epochs: snapflowDistillEpochs,
             augment_images: augmentImages,
+            gradient_checkpointing: selectedPolicy === 'molmoact2' ? gradientCheckpointing : false,
+            adapt_to_so101: selectedPolicy === 'molmoact2' ? adaptToSo101 : false,
             val_split: 0.1,
             ...extraPayload,
         } as const;
@@ -310,6 +314,12 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onCompileModelChange={setCompileModel}
                                 augmentImages={augmentImages}
                                 onAugmentImagesChange={setAugmentImages}
+                                gradientCheckpointing={gradientCheckpointing}
+                                onGradientCheckpointingChange={setGradientCheckpointing}
+                                adaptToSo101={adaptToSo101}
+                                onAdaptToSo101Change={setAdaptToSo101}
+                                showMolmoAct2Parameters={selectedPolicy === 'molmoact2'}
+                                arePolicyParametersDisabled={baseModel !== undefined}
                                 isAutoScaleBatchDisabled={activeDevice?.type !== 'cuda'}
                                 deviceType={activeDevice?.type}
                                 isLoraSupported={isLoraSupported}
