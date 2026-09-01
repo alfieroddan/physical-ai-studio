@@ -54,11 +54,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _normalization_stats(feature: Feature | None) -> dict[str, float | list[float] | list[bool] | None]:
+def _normalization_stats(
+    feature: Feature | None,
+) -> dict[str, float | list[float] | list[list[float]] | list[list[list[float]]] | list[bool] | None]:
     if feature is None or feature.normalization_data is None:
         return {}
     normalization = feature.normalization_data
-    stats: dict[str, float | list[float] | list[bool] | None] = {
+    stats: dict[
+        str,
+        float | list[float] | list[list[float]] | list[list[list[float]]] | list[bool] | None,
+    ] = {
         name: value
         for name in ("mean", "std", "min", "max", "q01", "q99")
         if (value := getattr(normalization, name)) is not None

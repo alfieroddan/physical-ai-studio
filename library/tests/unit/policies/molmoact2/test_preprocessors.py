@@ -108,6 +108,13 @@ def test_joint_transform_rejects_mismatched_statistic_length() -> None:
         JointFrameTransform().normalization_to_checkpoint(normalization, dimension=6)
 
 
+def test_joint_transform_rejects_nested_statistics() -> None:
+    normalization = NormalizationParameters(q01=[[[-1.0]]], q99=[[[1.0]]])
+
+    with pytest.raises(ValueError, match="scalar or one-dimensional"):
+        JointFrameTransform().normalization_to_checkpoint(normalization, dimension=1)
+
+
 def test_joint_transform_rejects_mismatched_mask_length() -> None:
     normalization = NormalizationParameters(q01=-1.0, q99=1.0, mask=[True])
 

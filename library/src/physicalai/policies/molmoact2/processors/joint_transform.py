@@ -22,6 +22,7 @@ SO-101 the defaults flip ``shoulder_lift`` and shift ``shoulder_lift`` /
 from __future__ import annotations
 
 from itertools import starmap
+from typing import cast
 
 import torch
 
@@ -95,8 +96,8 @@ class JointFrameTransform:
 
     def _transform_bounds(
         self,
-        lower: list[float] | float | None,
-        upper: list[float] | float | None,
+        lower: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        upper: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
         dimension: int,
     ) -> tuple[list[float] | None, list[float] | None]:
         if lower is None or upper is None:
@@ -117,7 +118,7 @@ class JointFrameTransform:
 
     def _transform_stat(
         self,
-        statistic: list[float] | float | None,
+        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
         dimension: int,
         *,
         include_offset: bool = False,
@@ -125,7 +126,13 @@ class JointFrameTransform:
     ) -> list[float] | None:
         if statistic is None:
             return None
-        values = [float(statistic)] * dimension if isinstance(statistic, int | float) else list(statistic)
+        if isinstance(statistic, int | float):
+            values = [float(statistic)] * dimension
+        else:
+            if any(isinstance(value, list) for value in statistic):
+                msg = "Joint normalization statistics must be scalar or one-dimensional."
+                raise ValueError(msg)
+            values = list(cast("list[float]", statistic))
         if len(values) != dimension:
             msg = f"Normalization statistic length {len(values)} does not match feature dimension {dimension}."
             raise ValueError(msg)

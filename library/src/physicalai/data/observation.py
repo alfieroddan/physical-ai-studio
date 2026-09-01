@@ -480,17 +480,17 @@ class NormalizationParameters:
     """
 
     #: Arithmetic mean used by mean/std normalization.
-    mean: list[float] | float | None = None
+    mean: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: Standard deviation used by mean/std normalization.
-    std: list[float] | float | None = None
+    std: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: Lower bound used by min/max normalization.
-    min: list[float] | float | None = None
+    min: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: Upper bound used by min/max normalization.
-    max: list[float] | float | None = None
+    max: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: First-percentile bound used by quantile normalization.
-    q01: list[float] | float | None = None
+    q01: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: Ninety-ninth-percentile bound used by quantile normalization.
-    q99: list[float] | float | None = None
+    q99: list[float] | list[list[float]] | list[list[list[float]]] | float | None = None
     #: Optional per-dimension selector: ``True`` dimensions are normalized and
     #: ``False`` dimensions pass through unchanged for all statistical modes.
     mask: list[bool] | None = None

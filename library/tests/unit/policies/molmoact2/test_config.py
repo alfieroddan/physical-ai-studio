@@ -6,6 +6,7 @@
 import pytest
 
 from physicalai.config import Config
+from physicalai.data import Feature, FeatureType, NormalizationParameters
 from physicalai.policies.molmoact2 import MolmoAct2Config
 
 
@@ -30,6 +31,24 @@ def test_serialization_round_trip() -> None:
     assert isinstance(restored, Config)
     assert (restored.chunk_size, restored.n_action_steps) == (8, 4)
     assert restored.tokenizer_config == {"pad_token": ""}
+
+
+def test_nested_normalization_serialization_round_trip() -> None:
+    normalization = NormalizationParameters(
+        mean=[[0.1], [0.2], [0.3]],
+        std=[[[0.4]], [[0.5]], [[0.6]]],
+    )
+    feature = Feature(
+        name="camera",
+        ftype=FeatureType.VISUAL,
+        shape=(3, 8, 8),
+        normalization_data=normalization,
+    )
+    config = MolmoAct2Config(input_features=[feature])
+
+    restored = MolmoAct2Config.from_dict(config.to_dict())
+
+    assert restored == config
 
 
 def test_policy_runtime_options_are_not_model_config() -> None:
