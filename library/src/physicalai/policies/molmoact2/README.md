@@ -116,6 +116,29 @@ trainer.fit(policy, datamodule=datamodule)
 When the policy is constructed lazily, the training dataset supplies its input
 and output feature contract during `setup("fit")`.
 
+### SO-101 Fine-Tuning Frames
+
+SO-101 datasets are expected to contain samples and normalization statistics in
+the current robot frame. There are two supported fine-tuning modes:
+
+- `adapt_to_so101=True` converts both dataset samples and their state/action
+  statistics to the released checkpoint's legacy frame. Use this when
+  fine-tuning `allenai/MolmoAct2-SO100_101` to preserve its learned joint
+  representation and generally converge faster.
+- `adapt_to_so101=False` keeps samples and statistics in the current SO-101
+  frame. This is internally consistent but requires the model to adapt its
+  learned joint representation during fine-tuning.
+
+With `norm_tag="so100_so101_molmoact2"`, omitting `adapt_to_so101` selects the
+legacy-frame mode automatically. Pass `adapt_to_so101=False` explicitly to
+select native-frame training. The resolved mode and frame-aligned statistics
+are saved in Lightning checkpoints and OpenVINO manifests.
+
+Checkpoints trained with older versions that transformed samples without also
+transforming dataset statistics should be retrained. Their normalized action
+targets may have been clamped, so changing only the exported manifest cannot
+recover the lost training signal.
+
 For full fine-tuning, leave both `use_lora` and `train_action_head_only` false.
 For action-head-only training, use `train_action_head_only=True`. LoRA and
 action-head-only training are mutually exclusive.

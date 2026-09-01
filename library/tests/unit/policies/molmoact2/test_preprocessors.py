@@ -20,6 +20,7 @@ from physicalai.policies.molmoact2.processors.inputs import (
     _default_action_dim_is_pad,
     _expand_image_placeholders,
 )
+from physicalai.policies.molmoact2.processors.joint_transform import JointFrameTransform
 from physicalai.policies.molmoact2.processors.normalization import MolmoAct2NormalizeTransform
 from physicalai.policies.molmoact2.processors.preprocess_steps import (
     ActionPadder,
@@ -75,6 +76,43 @@ def test_normalization_round_trip() -> None:
     restored = denormalizer({ACTION: normalized})[ACTION]
 
     torch.testing.assert_close(restored, action)
+
+
+def test_joint_transform_maps_normalization_to_checkpoint_frame() -> None:
+    normalization = NormalizationParameters(
+        mean=[1.0, -40.0, 50.0, 4.0, 5.0, 6.0, 7.0],
+        std=[2.0] * 7,
+        min=[-10.0, -100.0, 10.0, -4.0, -5.0, 0.0, -7.0],
+        max=[10.0, 20.0, 90.0, 4.0, 5.0, 30.0, 7.0],
+        q01=[-8.0, -90.0, 20.0, -3.0, -4.0, 1.0, -6.0],
+        q99=[8.0, 10.0, 80.0, 3.0, 4.0, 20.0, 6.0],
+        mask=[True, True, True, True, True, True, False],
+    )
+
+    transformed = JointFrameTransform().normalization_to_checkpoint(normalization, dimension=7)
+
+    assert transformed.mean == [1.0, 130.0, 140.0, 4.0, 5.0, 6.0, 7.0]
+    assert transformed.std == [2.0] * 7
+    assert transformed.min == [-10.0, 70.0, 100.0, -4.0, -5.0, 0.0, -7.0]
+    assert transformed.max == [10.0, 190.0, 180.0, 4.0, 5.0, 30.0, 7.0]
+    assert transformed.q01 == [-8.0, 80.0, 110.0, -3.0, -4.0, 1.0, -6.0]
+    assert transformed.q99 == [8.0, 180.0, 170.0, 3.0, 4.0, 20.0, 6.0]
+    assert transformed.mask == normalization.mask
+    assert transformed is not normalization
+
+
+def test_joint_transform_rejects_mismatched_statistic_length() -> None:
+    normalization = NormalizationParameters(q01=[-1.0], q99=[1.0])
+
+    with pytest.raises(ValueError, match="does not match feature dimension"):
+        JointFrameTransform().normalization_to_checkpoint(normalization, dimension=6)
+
+
+def test_joint_transform_rejects_mismatched_mask_length() -> None:
+    normalization = NormalizationParameters(q01=-1.0, q99=1.0, mask=[True])
+
+    with pytest.raises(ValueError, match="mask length"):
+        JointFrameTransform().normalization_to_checkpoint(normalization, dimension=6)
 
 
 def test_extractor_accepts_flattened_observations() -> None:

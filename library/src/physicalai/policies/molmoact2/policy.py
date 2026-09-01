@@ -44,7 +44,7 @@ from .processors import (
     MolmoAct2Preprocessor,
     make_molmoact2_preprocessors,
 )
-from .processors.joint_transform import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
+from .processors.joint_transform import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS, JointFrameTransform
 
 if TYPE_CHECKING:
     from lightning.pytorch.utilities.types import OptimizerLRScheduler
@@ -89,6 +89,23 @@ def _copy_feature_normalization(
     ]
 
 
+def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureType) -> list[Feature]:
+    feature = get_feature_by_type(features, feature_type)
+    if feature is None or feature.normalization_data is None:
+        return list(features)
+    if not feature.shape:
+        msg = f"Cannot adapt {feature_type.value} normalization without a concrete feature shape."
+        raise ValueError(msg)
+    normalization = JointFrameTransform().normalization_to_checkpoint(
+        feature.normalization_data,
+        dimension=feature.shape[-1],
+    )
+    return [
+        replace(candidate, normalization_data=normalization) if candidate is feature else candidate
+        for candidate in features
+    ]
+
+
 class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
     """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs.
 
@@ -129,7 +146,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         n_obs_steps: int = 1,
         setup_type: str | None = None,
         control_mode: str | None = None,
-        adapt_to_so101: bool = False,
+        adapt_to_so101: bool | None = None,
         # weight management
         compile_model: bool = False,
         openvino_compress_to_fp16: bool = False,
@@ -168,7 +185,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             n_obs_steps: Number of observation steps included in the input history.
             setup_type: Optional setup identifier used by the model configuration.
             control_mode: Optional control mode used by the model configuration.
-            adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
+            adapt_to_so101: Whether to train in the legacy SO-101 checkpoint frame.
+                When omitted, the SO-100/101 normalization tag enables it automatically.
             compile_model: Whether to compile model training and inference entrypoints.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
@@ -218,7 +236,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         self.n_obs_steps = n_obs_steps
         self.setup_type = setup_type
         self.control_mode = control_mode
-        self.adapt_to_so101 = adapt_to_so101 or norm_tag == "so100_so101_molmoact2"
+        self.adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
         self.compile_model = compile_model
         self.openvino_compress_to_fp16 = openvino_compress_to_fp16
         self.gradient_checkpointing = gradient_checkpointing
@@ -513,6 +531,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
 
         resolved_input_features = list(input_features)
         resolved_output_features = list(output_features)
+        if config.adapt_to_so101:
+            resolved_input_features = _normalization_to_checkpoint(resolved_input_features, FeatureType.STATE)
+            resolved_output_features = _normalization_to_checkpoint(resolved_output_features, FeatureType.ACTION)
         if copy_state_normalization:
             resolved_input_features = _copy_feature_normalization(
                 resolved_input_features,
@@ -993,6 +1014,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 self.set_features(dataset_input_features, dataset_output_features)
             return
 
+        if self.adapt_to_so101:
+            dataset_input_features = _normalization_to_checkpoint(dataset_input_features, FeatureType.STATE)
+            dataset_output_features = _normalization_to_checkpoint(dataset_output_features, FeatureType.ACTION)
         self.input_features = dataset_input_features
         self.output_features = dataset_output_features
         self.initialize_model()

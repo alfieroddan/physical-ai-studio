@@ -58,6 +58,23 @@ def test_invalid_lora_options() -> None:
         MolmoAct2(pretrained_name_or_path=None, use_lora=True, train_action_head_only=True)
 
 
+@pytest.mark.parametrize(
+    ("adapt_to_so101", "expected"),
+    [(None, True), (True, True), (False, False)],
+)
+def test_so101_norm_tag_respects_explicit_adaptation_mode(
+    adapt_to_so101: bool | None,
+    expected: bool,
+) -> None:
+    policy = MolmoAct2(
+        pretrained_name_or_path=None,
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=adapt_to_so101,
+    )
+
+    assert policy.adapt_to_so101 is expected
+
+
 def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> None:
     config = MolmoAct2Config(n_action_steps=3, chunk_size=5, use_random_input_noise=True)
     initialized: list[MolmoAct2Config] = []
@@ -206,6 +223,60 @@ def test_set_features_copies_only_requested_action_normalization(
     assert policy.output_features[0].normalization_data == tiny_molmoact2_config.output_features[0].normalization_data
 
 
+def test_set_features_transforms_dataset_normalization_in_adapted_mode(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    policy = MolmoAct2.from_config(config)
+    state_stats = NormalizationParameters(
+        q01=[-2.0, -3.0, -4.0, -5.0],
+        q99=[2.0, 3.0, 4.0, 5.0],
+    )
+    action_stats = NormalizationParameters(
+        q01=[-12.0, -13.0, -14.0, -15.0],
+        q99=[12.0, 13.0, 14.0, 15.0],
+    )
+    input_features = [
+        replace(feature, normalization_data=state_stats) if feature.ftype == FeatureType.STATE else feature
+        for feature in config.input_features
+    ]
+    output_features = [replace(config.output_features[0], normalization_data=action_stats)]
+
+    policy.set_features(input_features, output_features)
+
+    resolved_state = policy.input_features[-1].normalization_data
+    resolved_action = policy.output_features[0].normalization_data
+    assert resolved_state is not None
+    assert resolved_action is not None
+    assert resolved_state.q01 == [-2.0, 87.0, 86.0, -5.0]
+    assert resolved_state.q99 == [2.0, 93.0, 94.0, 5.0]
+    assert resolved_action.q01 == [-12.0, 77.0, 76.0, -15.0]
+    assert resolved_action.q99 == [12.0, 103.0, 104.0, 15.0]
+    assert input_features[-1].normalization_data is state_stats
+    assert output_features[0].normalization_data is action_stats
+
+
+def test_set_features_does_not_transform_copied_policy_normalization_twice(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    policy = MolmoAct2.from_config(config)
+    replacement_inputs = [
+        replace(feature, normalization_data=None) if feature.ftype == FeatureType.STATE else feature
+        for feature in config.input_features
+    ]
+
+    policy.set_features(
+        replacement_inputs,
+        list(config.output_features),
+        copy_state_normalization=True,
+        copy_action_normalization=True,
+    )
+
+    assert policy.input_features[-1].normalization_data == config.input_features[-1].normalization_data
+    assert policy.output_features[0].normalization_data == config.output_features[0].normalization_data
+
+
 def test_set_features_rejects_incompatible_normalization_shape_atomically(
     tiny_molmoact2_config: MolmoAct2Config,
 ) -> None:
@@ -269,6 +340,36 @@ def test_setup_replaces_eager_normalization_with_dataset_normalization(
     assert policy.config is not None
     assert policy.config.input_features == dataset_inputs
     assert policy.config.output_features == dataset_outputs
+
+
+def test_setup_transforms_dataset_normalization_in_adapted_mode(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    policy = MolmoAct2.from_config(config)
+    dataset_stats = NormalizationParameters(
+        q01=[-2.0, -3.0, -4.0, -5.0],
+        q99=[2.0, 3.0, 4.0, 5.0],
+    )
+    dataset_inputs = [
+        replace(feature, normalization_data=dataset_stats)
+        if feature.ftype == FeatureType.STATE
+        else feature
+        for feature in config.input_features
+    ]
+    dataset_outputs = [replace(config.output_features[0], normalization_data=dataset_stats)]
+    trainer = Mock()
+    trainer.datamodule.train_dataset = Mock(spec=Dataset)
+    policy._trainer = trainer
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+
+    policy.setup("fit")
+
+    state_stats = policy.input_features[-1].normalization_data
+    action_stats = policy.output_features[0].normalization_data
+    assert state_stats is not None and state_stats.q01 == [-2.0, 87.0, 86.0, -5.0]
+    assert action_stats is not None and action_stats.q99 == [2.0, 93.0, 94.0, 5.0]
 
 
 def test_setup_replaces_eager_feature_contract_with_dataset_contract(
@@ -443,6 +544,40 @@ def test_openvino_export_forwards_runtime_input_config(
     assert model_inputs.frame_start_token_id == 21
     assert model_inputs.frame_end_token_id == 22
     assert model_inputs.image_low_res_id == 23
+
+
+@pytest.mark.parametrize("adapt_to_so101", [True, False])
+def test_openvino_export_preserves_resolved_so101_mode_and_statistics(
+    tiny_molmoact2_config: MolmoAct2Config,
+    adapt_to_so101: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(tiny_molmoact2_config, adapt_to_so101=adapt_to_so101)
+    policy = MolmoAct2.from_config(config)
+    raw_stats = NormalizationParameters(
+        q01=[-2.0, -3.0, -4.0, -5.0],
+        q99=[2.0, 3.0, 4.0, 5.0],
+    )
+    input_features = [
+        replace(feature, normalization_data=raw_stats) if feature.ftype == FeatureType.STATE else feature
+        for feature in config.input_features
+    ]
+    output_features = [replace(config.output_features[0], normalization_data=raw_stats)]
+    policy.set_features(input_features, output_features)
+    monkeypatch.setattr(policy, "_openvino_token_ids", lambda: (1, 0, [10, 11, 12]))
+
+    export_args = policy.extra_export_args[ExportBackend.OPENVINO]
+    preprocessor = next(spec for spec in export_args.preprocessors_specs if spec.type == "molmoact2")
+    postprocessor = next(spec for spec in export_args.postprocessors_specs if spec.type == "molmoact2_postprocess")
+    expected_q01 = [-2.0, 87.0, 86.0, -5.0] if adapt_to_so101 else raw_stats.q01
+    expected_q99 = [2.0, 93.0, 94.0, 5.0] if adapt_to_so101 else raw_stats.q99
+
+    assert preprocessor.adapt_to_so101 is adapt_to_so101
+    assert postprocessor.adapt_to_so101 is adapt_to_so101
+    assert preprocessor.state_stats["q01"] == expected_q01
+    assert preprocessor.state_stats["q99"] == expected_q99
+    assert postprocessor.action_stats["q01"] == expected_q01
+    assert postprocessor.action_stats["q99"] == expected_q99
 
 
 def test_model_modifications_are_applied_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
