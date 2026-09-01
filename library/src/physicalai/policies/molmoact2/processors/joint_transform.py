@@ -111,7 +111,6 @@ class JointFrameTransform:
             msg = "Transformed bounds resulted in None values."
             raise ValueError(msg)
         return (
-            
             list(starmap(min, zip(transformed_lower, transformed_upper, strict=True))),
             list(starmap(max, zip(transformed_lower, transformed_upper, strict=True))),
         )
