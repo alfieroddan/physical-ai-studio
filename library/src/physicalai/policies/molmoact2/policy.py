@@ -112,29 +112,7 @@ def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureT
 
 
 class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
-    """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs.
-
-    Args:
-        input_features: Input feature definitions used when initializing a local model.
-        output_features: Output feature definitions used when initializing a local model.
-        pretrained_name_or_path: Local path or Hugging Face repository ID for the pretrained
-            checkpoint.
-        norm_tag: Normalization tag identifying the dataset-specific normalization metadata.
-        n_action_steps: Number of action steps predicted by the policy.
-        chunk_size: Number of actions included in each action chunk.
-        n_obs_steps: Number of observation steps included in the input history.
-        setup_type: Optional setup identifier used by the model configuration.
-        control_mode: Optional control mode used by the model configuration.
-        adapt_to_so101: Whether to enable SO101-specific adaptation behavior.
-        openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
-
-    Returns:
-        None: The policy is created and, when possible, initializes its model lazily.
-
-    Raises:
-        RuntimeError: If local initialization is requested without both input and output
-            features.
-    """
+    """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs."""
 
     def __init__(  # noqa: PLR0913, PLR0915
         self,
