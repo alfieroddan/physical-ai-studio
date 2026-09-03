@@ -85,11 +85,17 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(MolmoAct2, "_initialize_from_config", initialize)
 
-    policy = MolmoAct2.from_config(config, compile_model=True, optimizer_lr=2e-5)
+    policy = MolmoAct2.from_config(
+        config,
+        preserve_pretrained_normalization=True,
+        compile_model=True,
+        optimizer_lr=2e-5,
+    )
 
     assert initialized == [config]
     assert policy.pretrained_name_or_path is None
     assert (policy.n_action_steps, policy.chunk_size) == (3, 5)
+    assert policy.preserve_pretrained_normalization is True
     assert policy.compile_model is True
     assert policy.optimizer_lr == 2e-5
 
@@ -342,6 +348,86 @@ def test_setup_replaces_eager_normalization_with_dataset_normalization(
     assert policy.config.output_features == dataset_outputs
 
 
+def test_setup_preserves_pretrained_normalization_with_dataset_feature_contract(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = MolmoAct2.from_config(
+        tiny_molmoact2_config,
+        preserve_pretrained_normalization=True,
+    )
+    pretrained_state_stats = tiny_molmoact2_config.input_features[-1].normalization_data
+    pretrained_action_stats = tiny_molmoact2_config.output_features[0].normalization_data
+    dataset_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    dataset_inputs = [
+        replace(tiny_molmoact2_config.input_features[0], name="dataset_camera"),
+        replace(tiny_molmoact2_config.input_features[-1], normalization_data=dataset_stats),
+    ]
+    dataset_outputs = [replace(tiny_molmoact2_config.output_features[0], normalization_data=dataset_stats)]
+    trainer = Mock()
+    trainer.datamodule.train_dataset = Mock(spec=Dataset)
+    policy._trainer = trainer
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+
+    policy.setup("fit")
+
+    assert policy.input_features[0].name == "dataset_camera"
+    assert policy.input_features[-1].normalization_data == pretrained_state_stats
+    assert policy.output_features[0].normalization_data == pretrained_action_stats
+
+
+def test_setup_preserves_checkpoint_frame_normalization_without_transforming_twice(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    policy = MolmoAct2.from_config(config, preserve_pretrained_normalization=True)
+    dataset_stats = NormalizationParameters(
+        q01=[-2.0, -3.0, -4.0, -5.0],
+        q99=[2.0, 3.0, 4.0, 5.0],
+    )
+    dataset_inputs = [
+        replace(feature, normalization_data=dataset_stats)
+        if feature.ftype == FeatureType.STATE
+        else feature
+        for feature in config.input_features
+    ]
+    dataset_outputs = [replace(config.output_features[0], normalization_data=dataset_stats)]
+    trainer = Mock()
+    trainer.datamodule.train_dataset = Mock(spec=Dataset)
+    policy._trainer = trainer
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+
+    policy.setup("fit")
+
+    assert policy.input_features[-1].normalization_data == config.input_features[-1].normalization_data
+    assert policy.output_features[0].normalization_data == config.output_features[0].normalization_data
+
+
+def test_setup_uses_dataset_normalization_when_uninitialized(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = MolmoAct2(
+        pretrained_name_or_path=None,
+        preserve_pretrained_normalization=True,
+    )
+    dataset_inputs = list(tiny_molmoact2_config.input_features)
+    dataset_outputs = list(tiny_molmoact2_config.output_features)
+    trainer = Mock()
+    trainer.datamodule.train_dataset = Mock(spec=Dataset)
+    policy._trainer = trainer
+    initialize_model = Mock()
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+    monkeypatch.setattr(policy, "initialize_model", initialize_model)
+
+    policy.setup("fit")
+
+    assert policy.input_features == dataset_inputs
+    assert policy.output_features == dataset_outputs
+    initialize_model.assert_called_once_with()
+
+
 def test_setup_transforms_dataset_normalization_in_adapted_mode(
     tiny_molmoact2_config: MolmoAct2Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -407,7 +493,10 @@ def test_load_from_checkpoint_restores_config_and_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    policy = MolmoAct2.from_config(
+        tiny_molmoact2_config,
+        preserve_pretrained_normalization=True,
+    )
     checkpoint = {
         "state_dict": policy.state_dict(),
         "pytorch-lightning_version": lightning.__version__,
@@ -430,8 +519,57 @@ def test_load_from_checkpoint_restores_config_and_weights(
     )
 
     assert restored.config == tiny_molmoact2_config
+    assert restored.preserve_pretrained_normalization is True
     for name, value in policy.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], value)
+
+
+def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
+    tiny_molmoact2_config: MolmoAct2Config,
+    tmp_path: Path,
+) -> None:
+    adapted_config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    policy = MolmoAct2.from_config(
+        adapted_config,
+        preserve_pretrained_normalization=True,
+        optimizer_lr=1e-5,
+        optimizer_vit_lr=5e-6,
+        optimizer_connector_lr=5e-6,
+        optimizer_action_expert_lr=5e-5,
+        scheduler_warmup_steps=200,
+        scheduler_decay_steps=24_000,
+        scheduler_decay_lr=1e-6,
+    )
+    checkpoint = {
+        "state_dict": policy.state_dict(),
+        "pytorch-lightning_version": lightning.__version__,
+        "hyper_parameters": dict(policy.hparams),
+    }
+    policy.on_save_checkpoint(checkpoint)
+    checkpoint_path = tmp_path / "molmoact2-training-arguments.ckpt"
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only trusted data.
+    torch.save(checkpoint, checkpoint_path)
+
+    restored = MolmoAct2.load_from_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert restored.preserve_pretrained_normalization is True
+    assert restored.adapt_to_so101 is True
+    assert restored.config is not None and restored.config.adapt_to_so101 is True
+    assert restored.input_features[-1].normalization_data == policy.input_features[-1].normalization_data
+    assert restored.output_features[0].normalization_data == policy.output_features[0].normalization_data
+    assert restored.n_action_steps == policy.n_action_steps
+    assert restored.chunk_size == policy.chunk_size
+    assert restored.optimizer_lr == 1e-5
+    assert restored.optimizer_vit_lr == 5e-6
+    assert restored.optimizer_connector_lr == 5e-6
+    assert restored.optimizer_action_expert_lr == 5e-5
+    assert restored.scheduler_warmup_steps == 200
+    assert restored.scheduler_decay_steps == 24_000
+    assert restored.scheduler_decay_lr == 1e-6
 
 
 @pytest.mark.parametrize("policy_config", [None, "invalid"])

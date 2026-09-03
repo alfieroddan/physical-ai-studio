@@ -116,6 +116,12 @@ trainer.fit(policy, datamodule=datamodule)
 When the policy is constructed lazily, the training dataset supplies its input
 and output feature contract during `setup("fit")`.
 
+When fine-tuning a compatible pretrained policy, set
+`preserve_pretrained_normalization=True` to adopt the dataset's feature and
+camera contract while retaining the initialized policy's state and action
+normalization statistics. The default is `False`, which uses the training
+dataset's statistics.
+
 ### SO-101 Fine-Tuning Frames
 
 SO-101 datasets are expected to contain samples and normalization statistics in
@@ -258,6 +264,8 @@ from physicalai.policies import MolmoAct2
 policy = MolmoAct2(
     pretrained_name_or_path="allenai/MolmoAct2-SO100_101",
     norm_tag="so100_so101_molmoact2",
+    adapt_to_so101=True,
+    preserve_pretrained_normalization=True,
 )
 
 policy.set_features(
