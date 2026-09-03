@@ -23,9 +23,9 @@ and actions with the server over WebSocket.
 The standard protocol evaluates Spatial, Object, Goal, and LIBERO-10 with 10
 tasks per suite and 50 episodes per task.
 
-| Model                                                   | Backend | Spatial | Object |  Goal | LIBERO-10 | Average |       Harness version |
-| ------------------------------------------------------- | ------- | ------: | -----: | ----: | --------: | ------: | ------------: |
-| [`lerobot/pi05_libero_finetuned`](#pi05-libero-pytorch) | PyTorch |   97.8% |  99.6% | 96.8% |     95.8% |   97.5% | 0.4.0 |
+| Model                                                   | Backend | Spatial | Object |  Goal | LIBERO-10 | Average | Harness version |
+| ------------------------------------------------------- | ------- | ------: | -----: | ----: | --------: | ------: | --------------: |
+| [`lerobot/pi05_libero_finetuned`](#pi05-libero-pytorch) | PyTorch |   97.8% |  99.6% | 96.8% |     95.8% |   97.5% |           0.4.0 |
 
 The four-suite average is the arithmetic mean of the suite success rates.
 
@@ -35,8 +35,8 @@ The LIBERO-Plus protocol evaluates the same four suites with one episode for
 each task entry, for 10,030 episodes in total. The suites are kept separate
 because each one is substantially longer than its standard LIBERO counterpart.
 
-| Model                                                        | Backend | Spatial | Object |  Goal | LIBERO-10 | Average | Harness version |
-| ------------------------------------------------------------ | ------- | ------: | -----: | ----: | --------: | ------: | --------------: |
+| Model                                                        | Backend | Spatial | Object |   Goal | LIBERO-10 | Average | Harness version |
+| ------------------------------------------------------------ | ------- | ------: | -----: | -----: | --------: | ------: | --------------: |
 | [`lerobot/pi05_libero_finetuned`](#pi05-libero-plus-pytorch) | PyTorch |  88.05% | 87.49% | 80.70% |    81.02% |  84.32% |           0.4.0 |
 
 The four-suite average is the arithmetic mean of the suite success rates. The
