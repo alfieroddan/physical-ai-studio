@@ -130,7 +130,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         setup_type: str | None = None,
         control_mode: str | None = None,
         adapt_to_so101: bool | None = None,
-        preserve_pretrained_normalization: bool = False,
+        preserve_pretrained_normalization_in_training: bool = False,
         # weight management
         compile_model: bool = False,
         openvino_compress_to_fp16: bool = False,
@@ -171,8 +171,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to train in the legacy SO-101 checkpoint frame.
                 When omitted, the SO-100/101 normalization tag enables it automatically.
-            preserve_pretrained_normalization: Whether automatic dataset setup keeps the
-                state and action normalization from an initialized pretrained policy.
+            preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
+                normalization from an initialized pretrained policy when adopting the training
+                dataset's feature contract. This does not affect explicit ``set_features`` calls.
             compile_model: Whether to compile model training and inference entrypoints.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
@@ -223,7 +224,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         self.setup_type = setup_type
         self.control_mode = control_mode
         self.adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
-        self.preserve_pretrained_normalization = preserve_pretrained_normalization
+        self.preserve_pretrained_normalization_in_training = preserve_pretrained_normalization_in_training
         self.compile_model = compile_model
         self.openvino_compress_to_fp16 = openvino_compress_to_fp16
         self.gradient_checkpointing = gradient_checkpointing
@@ -271,7 +272,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         cls,
         config: MolmoAct2Config,
         *,
-        preserve_pretrained_normalization: bool = False,
+        preserve_pretrained_normalization_in_training: bool = False,
         compile_model: bool = False,
         openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
@@ -294,8 +295,9 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
 
         Args:
             config: Resolved MolmoAct2 model and processor configuration.
-            preserve_pretrained_normalization: Whether automatic dataset setup keeps the
-                state and action normalization from the supplied configuration.
+            preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
+                normalization from the supplied configuration when adopting the training
+                dataset's feature contract. This does not affect explicit ``set_features`` calls.
             compile_model: Whether to compile model training and inference entrypoints.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
@@ -326,7 +328,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             setup_type=config.setup_type,
             control_mode=config.control_mode,
             adapt_to_so101=config.adapt_to_so101,
-            preserve_pretrained_normalization=preserve_pretrained_normalization,
+            preserve_pretrained_normalization_in_training=preserve_pretrained_normalization_in_training,
             compile_model=compile_model,
             openvino_compress_to_fp16=openvino_compress_to_fp16,
             gradient_checkpointing=gradient_checkpointing,
@@ -998,7 +1000,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         if self.model is not None:
             config = self._require_config()
             if config.input_features != dataset_input_features or config.output_features != dataset_output_features:
-                if self.preserve_pretrained_normalization:
+                if self.preserve_pretrained_normalization_in_training:
                     logger.warning(
                         "Eager MolmoAct2 features differ from the training dataset; replacing the feature contract "
                         "while preserving the initialized state and action normalization statistics.",

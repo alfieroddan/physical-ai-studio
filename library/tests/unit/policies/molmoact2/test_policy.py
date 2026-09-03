@@ -87,7 +87,7 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
 
     policy = MolmoAct2.from_config(
         config,
-        preserve_pretrained_normalization=True,
+        preserve_pretrained_normalization_in_training=True,
         compile_model=True,
         optimizer_lr=2e-5,
     )
@@ -95,7 +95,7 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert initialized == [config]
     assert policy.pretrained_name_or_path is None
     assert (policy.n_action_steps, policy.chunk_size) == (3, 5)
-    assert policy.preserve_pretrained_normalization is True
+    assert policy.preserve_pretrained_normalization_in_training is True
     assert policy.compile_model is True
     assert policy.optimizer_lr == 2e-5
 
@@ -191,6 +191,28 @@ def test_set_features_copies_only_requested_state_normalization(
     assert policy.output_features is not None
     assert policy.input_features[-1].normalization_data == state_feature.normalization_data
     assert policy.output_features[0].normalization_data is replacement_action_stats
+
+
+def test_set_features_ignores_training_normalization_preservation(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    policy = MolmoAct2.from_config(
+        tiny_molmoact2_config,
+        preserve_pretrained_normalization_in_training=True,
+    )
+    replacement_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    input_features = [
+        replace(tiny_molmoact2_config.input_features[0], name="dataset_camera"),
+        replace(tiny_molmoact2_config.input_features[-1], normalization_data=replacement_stats),
+    ]
+    output_features = [
+        replace(tiny_molmoact2_config.output_features[0], normalization_data=replacement_stats),
+    ]
+
+    policy.set_features(input_features, output_features)
+
+    assert policy.input_features[-1].normalization_data is replacement_stats
+    assert policy.output_features[0].normalization_data is replacement_stats
 
 
 def test_set_features_copies_only_requested_action_normalization(
@@ -354,7 +376,7 @@ def test_setup_preserves_pretrained_normalization_with_dataset_feature_contract(
 ) -> None:
     policy = MolmoAct2.from_config(
         tiny_molmoact2_config,
-        preserve_pretrained_normalization=True,
+        preserve_pretrained_normalization_in_training=True,
     )
     pretrained_state_stats = tiny_molmoact2_config.input_features[-1].normalization_data
     pretrained_action_stats = tiny_molmoact2_config.output_features[0].normalization_data
@@ -381,7 +403,7 @@ def test_setup_preserves_checkpoint_frame_normalization_without_transforming_twi
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = replace(tiny_molmoact2_config, adapt_to_so101=True)
-    policy = MolmoAct2.from_config(config, preserve_pretrained_normalization=True)
+    policy = MolmoAct2.from_config(config, preserve_pretrained_normalization_in_training=True)
     dataset_stats = NormalizationParameters(
         q01=[-2.0, -3.0, -4.0, -5.0],
         q99=[2.0, 3.0, 4.0, 5.0],
@@ -410,7 +432,7 @@ def test_setup_uses_dataset_normalization_when_uninitialized(
 ) -> None:
     policy = MolmoAct2(
         pretrained_name_or_path=None,
-        preserve_pretrained_normalization=True,
+        preserve_pretrained_normalization_in_training=True,
     )
     dataset_inputs = list(tiny_molmoact2_config.input_features)
     dataset_outputs = list(tiny_molmoact2_config.output_features)
@@ -495,7 +517,7 @@ def test_load_from_checkpoint_restores_config_and_weights(
 ) -> None:
     policy = MolmoAct2.from_config(
         tiny_molmoact2_config,
-        preserve_pretrained_normalization=True,
+        preserve_pretrained_normalization_in_training=True,
     )
     checkpoint = {
         "state_dict": policy.state_dict(),
@@ -519,7 +541,7 @@ def test_load_from_checkpoint_restores_config_and_weights(
     )
 
     assert restored.config == tiny_molmoact2_config
-    assert restored.preserve_pretrained_normalization is True
+    assert restored.preserve_pretrained_normalization_in_training is True
     for name, value in policy.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], value)
 
@@ -531,7 +553,7 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     adapted_config = replace(tiny_molmoact2_config, adapt_to_so101=True)
     policy = MolmoAct2.from_config(
         adapted_config,
-        preserve_pretrained_normalization=True,
+        preserve_pretrained_normalization_in_training=True,
         optimizer_lr=1e-5,
         optimizer_vit_lr=5e-6,
         optimizer_connector_lr=5e-6,
@@ -556,7 +578,7 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
         weights_only=True,
     )
 
-    assert restored.preserve_pretrained_normalization is True
+    assert restored.preserve_pretrained_normalization_in_training is True
     assert restored.adapt_to_so101 is True
     assert restored.config is not None and restored.config.adapt_to_so101 is True
     assert restored.input_features[-1].normalization_data == policy.input_features[-1].normalization_data
