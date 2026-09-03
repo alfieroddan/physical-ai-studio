@@ -12,6 +12,7 @@ Options:
   -n, --shards <count>      Number of shards (default: 4)
   -e, --eval-id <id>        Shared evaluation ID (default: generated UUID)
   -o, --output-dir <path>   Override the config output directory
+  -y, --yes                 Skip confirmation prompts (e.g. docker pull)
   -h, --help                Show this help
 EOF
 }
@@ -30,6 +31,7 @@ CONFIG=""
 NUM_SHARDS=4
 EVAL_ID="${EVAL_ID:-}"
 OUTPUT_DIR=""
+ASSUME_YES=0
 pids=()
 
 cleanup() {
@@ -70,6 +72,10 @@ while (($# > 0)); do
       OUTPUT_DIR="$2"
       shift 2
       ;;
+    -y|--yes)
+      ASSUME_YES=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -104,6 +110,9 @@ MERGE_ARGS=(--config "$CONFIG" --eval-id "$EVAL_ID")
 if [[ -n "$OUTPUT_DIR" ]]; then
   RUN_ARGS+=(--output-dir "$OUTPUT_DIR")
   MERGE_ARGS+=(--output-dir "$OUTPUT_DIR")
+fi
+if ((ASSUME_YES)); then
+  RUN_ARGS+=(--yes)
 fi
 
 echo "Launching $NUM_SHARDS shards with eval ID $EVAL_ID"
