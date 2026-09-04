@@ -133,7 +133,7 @@ if [[ -n "$GPUS" ]]; then
   RUN_ARGS+=(--gpus "$GPUS")
 fi
 if [[ -z "$LOG_DIR" ]]; then
-  LOG_DIR="results/logs"
+  LOG_DIR="results/logs/$EVAL_ID"
 fi
 mkdir -p "$LOG_DIR"
 

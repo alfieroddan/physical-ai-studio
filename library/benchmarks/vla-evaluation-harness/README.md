@@ -128,7 +128,7 @@ uv run --no-sync vla-eval run \
 
 ### Pi05 LIBERO-Plus PyTorch
 
-Start the non-v044 finetuned policy server:
+Start the Pi05 finetuned policy server:
 
 ```bash
 python model_servers/physicalai.py \
