@@ -3,6 +3,8 @@
 
 """Tests for MolmoAct2 preprocessing and postprocessing."""
 
+from dataclasses import replace
+
 import pytest
 import torch
 
@@ -20,7 +22,12 @@ from physicalai.policies.molmoact2.processors.inputs import (
     _default_action_dim_is_pad,
     _expand_image_placeholders,
 )
-from physicalai.policies.molmoact2.processors.joint_transform import JointFrameTransform
+from physicalai.policies.molmoact2.processors.joint_transform import (
+    SO101_DEGREES_PER_NORMALIZED_UNIT,
+    SO101_JOINT_OFFSETS,
+    SO101_JOINT_SIGNS,
+    JointFrameTransform,
+)
 from physicalai.policies.molmoact2.processors.normalization import MolmoAct2NormalizeTransform
 from physicalai.policies.molmoact2.processors.preprocess_steps import (
     ActionPadder,
@@ -99,6 +106,91 @@ def test_joint_transform_maps_normalization_to_checkpoint_frame() -> None:
     assert transformed.q99 == [8.0, 180.0, 170.0, 3.0, 4.0, 20.0, 6.0]
     assert transformed.mask == normalization.mask
     assert transformed is not normalization
+
+
+def test_joint_transform_aligns_pretrained_stats_with_normalized_so101_runtime() -> None:
+    degree_scales = [*SO101_DEGREES_PER_NORMALIZED_UNIT, 1.0]
+    offsets = [0.0, 90.0, 90.0, 0.0, 0.0, 0.0]
+    runtime_q01 = [-80.0, 110.0, -50.0, -25.0, -10.0, 2.0]
+    runtime_q99 = [70.0, -60.0, 60.0, 35.0, 20.0, 95.0]
+    checkpoint_q01 = [
+        offsets[index] + degree_scales[index] * (value - offsets[index])
+        for index, value in enumerate(runtime_q01)
+    ]
+    checkpoint_q99 = [
+        offsets[index] + degree_scales[index] * (value - offsets[index])
+        for index, value in enumerate(runtime_q99)
+    ]
+    normalization = NormalizationParameters(
+        mean=checkpoint_q01,
+        std=[2.0 * scale for scale in degree_scales],
+        min=checkpoint_q01,
+        max=checkpoint_q99,
+        q01=checkpoint_q01,
+        q99=checkpoint_q99,
+        mask=[True, True, True, True, True, True],
+    )
+
+    transformed = JointFrameTransform().pretrained_normalization_to_so101_runtime(normalization, dimension=6)
+
+    assert transformed.mean == pytest.approx(runtime_q01)
+    assert transformed.std == pytest.approx([2.0] * 6)
+    assert transformed.min == pytest.approx([min(a, b) for a, b in zip(runtime_q01, runtime_q99, strict=True)])
+    assert transformed.max == pytest.approx([max(a, b) for a, b in zip(runtime_q01, runtime_q99, strict=True)])
+    assert transformed.q01 == pytest.approx([min(a, b) for a, b in zip(runtime_q01, runtime_q99, strict=True)])
+    assert transformed.q99 == pytest.approx([max(a, b) for a, b in zip(runtime_q01, runtime_q99, strict=True)])
+    assert transformed.mask == normalization.mask
+
+
+def test_corrected_pretrained_stats_match_explicit_degree_conversion() -> None:
+    degree_scales = torch.tensor([*SO101_DEGREES_PER_NORMALIZED_UNIT, 1.0])
+    signs = torch.tensor(SO101_JOINT_SIGNS)
+    offsets = torch.tensor(SO101_JOINT_OFFSETS)
+    checkpoint_stats = NormalizationParameters(
+        q01=[-42.0, 44.0, 38.0, 6.0, -63.0, 1.0],
+        q99=[48.0, 185.0, 173.0, 92.0, 43.0, 44.0],
+    )
+    corrected_stats = JointFrameTransform().pretrained_normalization_to_so101_runtime(
+        checkpoint_stats,
+        dimension=6,
+    )
+    checkpoint_feature = Feature(
+        name=STATE,
+        ftype=FeatureType.STATE,
+        shape=(6,),
+        normalization_data=checkpoint_stats,
+    )
+    corrected_feature = replace(checkpoint_feature, normalization_data=corrected_stats)
+    robot_state = torch.tensor([[-50.0, 25.0, -30.0, 10.0, 15.0, 60.0]])
+    checkpoint_state = signs * degree_scales * robot_state + offsets
+    adapted_state = JointFrameTransform().to_checkpoint(robot_state)
+    reference_normalizer = MolmoAct2NormalizeTransform(input_features=[checkpoint_feature], output_features=[])
+    corrected_normalizer = MolmoAct2NormalizeTransform(input_features=[corrected_feature], output_features=[])
+
+    reference_state = reference_normalizer({STATE: checkpoint_state})[STATE]
+    corrected_state = corrected_normalizer({STATE: adapted_state})[STATE]
+
+    torch.testing.assert_close(corrected_state, reference_state)
+
+    normalized_action = torch.tensor([[[-0.5, 0.25, 0.75, -0.25, 0.0, 0.5]]])
+    checkpoint_action_feature = replace(checkpoint_feature, name=ACTION, ftype=FeatureType.ACTION)
+    corrected_action_feature = replace(checkpoint_action_feature, normalization_data=corrected_stats)
+    reference_denormalizer = MolmoAct2NormalizeTransform(
+        input_features=[],
+        output_features=[checkpoint_action_feature],
+        inverse=True,
+    )
+    corrected_denormalizer = MolmoAct2NormalizeTransform(
+        input_features=[],
+        output_features=[corrected_action_feature],
+        inverse=True,
+    )
+    checkpoint_action = reference_denormalizer({ACTION: normalized_action})[ACTION]
+    expected_robot_action = JointFrameTransform().to_robot(checkpoint_action) / degree_scales
+    corrected_action = corrected_denormalizer({ACTION: normalized_action})[ACTION]
+    actual_robot_action = JointFrameTransform().to_robot(corrected_action)
+
+    torch.testing.assert_close(actual_robot_action, expected_robot_action)
 
 
 def test_joint_transform_rejects_mismatched_statistic_length() -> None:

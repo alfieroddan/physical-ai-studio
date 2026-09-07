@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from physicalai.config import Config
-
 from physicalai.data import Feature  # noqa: TC001
 
 
@@ -40,6 +39,8 @@ class MolmoAct2Config(Config):
     setup_type: str = ""
     control_mode: str = ""
     adapt_to_so101: bool = False
+    # Compatibility for the released degree-statistics checkpoint, not native SO101 training.
+    convert_pretrained_so101_stats: bool = False
 
     # Text transformer
     hidden_size: int = 2560

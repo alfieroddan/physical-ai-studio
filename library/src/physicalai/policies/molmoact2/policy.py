@@ -110,6 +110,26 @@ def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureT
     ]
 
 
+def _pretrained_normalization_to_so101_runtime(
+    features: list[Feature],
+    feature_type: FeatureType,
+) -> list[Feature]:
+    feature = get_feature_by_type(features, feature_type)
+    if feature is None or feature.normalization_data is None:
+        return list(features)
+    if not feature.shape:
+        msg = f"Cannot convert pretrained {feature_type.value} normalization without a concrete feature shape."
+        raise ValueError(msg)
+    normalization = JointFrameTransform().pretrained_normalization_to_so101_runtime(
+        feature.normalization_data,
+        dimension=feature.shape[-1],
+    )
+    return [
+        replace(candidate, normalization_data=normalization) if candidate is feature else candidate
+        for candidate in features
+    ]
+
+
 class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
     """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs."""
 
@@ -129,6 +149,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         setup_type: str | None = None,
         control_mode: str | None = None,
         adapt_to_so101: bool | None = None,
+        convert_pretrained_so101_stats: bool = False,
         preserve_pretrained_normalization_in_training: bool = False,
         # weight management
         compile_model: bool = False,
@@ -170,6 +191,10 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             control_mode: Optional control mode used by the model configuration.
             adapt_to_so101: Whether to train in the legacy SO-101 checkpoint frame.
                 When omitted, the SO-100/101 normalization tag enables it automatically.
+            convert_pretrained_so101_stats: Whether to convert the released SO-101
+                checkpoint's degree-based statistics for the PhysicalAI SO101 driver's
+                normalized joint units. This compatibility option requires
+                ``adapt_to_so101=True`` and the ``so100_so101_molmoact2`` normalization tag.
             preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
                 normalization from an initialized pretrained policy when adopting the training
                 dataset's feature contract. This does not affect explicit ``set_features`` calls.
@@ -212,6 +237,14 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             msg = "lora_dropout must be in [0, 1)."
             raise ValueError(msg)
 
+        resolved_adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
+        if convert_pretrained_so101_stats and not resolved_adapt_to_so101:
+            msg = "convert_pretrained_so101_stats requires adapt_to_so101=True."
+            raise ValueError(msg)
+        if convert_pretrained_so101_stats and norm_tag != "so100_so101_molmoact2":
+            msg = "convert_pretrained_so101_stats is only supported with norm_tag='so100_so101_molmoact2'."
+            raise ValueError(msg)
+
         # args
         self.input_features = input_features
         self.output_features = output_features
@@ -222,7 +255,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         self.n_obs_steps = n_obs_steps
         self.setup_type = setup_type
         self.control_mode = control_mode
-        self.adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
+        self.adapt_to_so101 = resolved_adapt_to_so101
+        self.convert_pretrained_so101_stats = convert_pretrained_so101_stats
         self.preserve_pretrained_normalization_in_training = preserve_pretrained_normalization_in_training
         self.compile_model = compile_model
         self.openvino_compress_to_fp16 = openvino_compress_to_fp16
@@ -327,6 +361,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             setup_type=config.setup_type,
             control_mode=config.control_mode,
             adapt_to_so101=config.adapt_to_so101,
+            convert_pretrained_so101_stats=config.convert_pretrained_so101_stats,
             preserve_pretrained_normalization_in_training=preserve_pretrained_normalization_in_training,
             compile_model=compile_model,
             openvino_compress_to_fp16=openvino_compress_to_fp16,
@@ -458,6 +493,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 setup_type=self.setup_type or "",
                 control_mode=self.control_mode or "",
                 adapt_to_so101=self.adapt_to_so101,
+                convert_pretrained_so101_stats=self.convert_pretrained_so101_stats,
                 use_random_input_noise=self.use_random_input_noise,
                 lora_rank=self.lora_rank,
                 lora_alpha=self.lora_alpha,
@@ -490,6 +526,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         self.setup_type = config.setup_type
         self.control_mode = config.control_mode
         self.adapt_to_so101 = config.adapt_to_so101
+        self.convert_pretrained_so101_stats = config.convert_pretrained_so101_stats
 
         self.model = MolmoAct2Model.from_config(config)
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
@@ -861,6 +898,15 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 config.image_default_input_size,
                 normalize_gripper=normalize_gripper,
             )
+            if self.convert_pretrained_so101_stats:
+                tag_input_features = _pretrained_normalization_to_so101_runtime(
+                    tag_input_features,
+                    FeatureType.STATE,
+                )
+                tag_output_features = _pretrained_normalization_to_so101_runtime(
+                    tag_output_features,
+                    FeatureType.ACTION,
+                )
             input_features = self.input_features if self.input_features is not None else tag_input_features
             output_features = self.output_features if self.output_features is not None else tag_output_features
             action_horizon = tag_metadata.get("action_horizon")
@@ -885,6 +931,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             setup_type=setup_type,
             control_mode=control_mode,
             adapt_to_so101=self.adapt_to_so101,
+            convert_pretrained_so101_stats=self.convert_pretrained_so101_stats,
             normalization_mode=normalization_mode,
             tokenizer_config=tokenizer_config,
             tokenizer_name_or_path=str(snapshot_dir),

@@ -31,6 +31,14 @@ from physicalai.data import NormalizationParameters
 SO101_JOINT_SIGNS = (1.0, -1.0, 1.0, 1.0, 1.0, 1.0)
 SO101_JOINT_OFFSETS = (0.0, 90.0, 90.0, 0.0, 0.0, 0.0)
 
+# MolmoAct2's released SO-101 statistics use LeRobot degrees, while the
+# PhysicalAI SO101 driver maps these calibrated body-joint ranges to [-100, 100].
+SO101_EXPECTED_BODY_RANGE_WIDTHS = (2666.0, 2313.0, 2196.0, 2302.0, 3829.0)
+SO101_MAX_POSITION_TICKS = 4095.0
+SO101_DEGREES_PER_NORMALIZED_UNIT = tuple(
+    range_width * 360.0 / (200.0 * SO101_MAX_POSITION_TICKS) for range_width in SO101_EXPECTED_BODY_RANGE_WIDTHS
+)
+
 
 class JointFrameTransform:
     """Map SO-101 joint values between robot and checkpoint calibration frames.
@@ -94,6 +102,84 @@ class JointFrameTransform:
             mask=None if normalization.mask is None else list(normalization.mask),
         )
 
+    def pretrained_normalization_to_so101_runtime(
+        self,
+        normalization: NormalizationParameters,
+        dimension: int,
+    ) -> NormalizationParameters:
+        """Align released degree statistics with PhysicalAI-normalized SO101 input.
+
+        The existing joint transform maps normalized runtime values to
+        ``sign * value + offset``. The released checkpoint instead expects
+        ``sign * degrees + offset``. Rescaling its statistics into the former
+        space keeps the per-sample transform unchanged while producing the same
+        normalized model inputs and robot actions for the expected calibration.
+
+        Gripper and trailing dimensions pass through because both runtimes use
+        the same gripper units and this compatibility correction is body-only.
+
+        Returns:
+            New normalization metadata aligned with ``to_checkpoint`` applied
+            to PhysicalAI-normalized SO101 values.
+
+        Raises:
+            ValueError: If a statistic or mask does not match the feature dimension.
+        """
+        if normalization.mask is not None and len(normalization.mask) != dimension:
+            msg = f"Normalization mask length {len(normalization.mask)} does not match feature dimension {dimension}."
+            raise ValueError(msg)
+        mean = self._pretrained_stat_to_runtime(normalization.mean, dimension, include_offset=True)
+        std = self._pretrained_stat_to_runtime(normalization.std, dimension, absolute_scale=True)
+        minimum, maximum = self._pretrained_bounds_to_runtime(normalization.min, normalization.max, dimension)
+        q01, q99 = self._pretrained_bounds_to_runtime(normalization.q01, normalization.q99, dimension)
+        return NormalizationParameters(
+            mean=mean,
+            std=std,
+            min=minimum,
+            max=maximum,
+            q01=q01,
+            q99=q99,
+            mask=None if normalization.mask is None else list(normalization.mask),
+        )
+
+    def _pretrained_bounds_to_runtime(
+        self,
+        lower: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        upper: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        dimension: int,
+    ) -> tuple[list[float] | None, list[float] | None]:
+        transformed_lower = self._pretrained_stat_to_runtime(lower, dimension, include_offset=True)
+        transformed_upper = self._pretrained_stat_to_runtime(upper, dimension, include_offset=True)
+        if transformed_lower is None or transformed_upper is None:
+            return transformed_lower, transformed_upper
+        return (
+            list(starmap(min, zip(transformed_lower, transformed_upper, strict=True))),
+            list(starmap(max, zip(transformed_lower, transformed_upper, strict=True))),
+        )
+
+    def _pretrained_stat_to_runtime(
+        self,
+        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        dimension: int,
+        *,
+        include_offset: bool = False,
+        absolute_scale: bool = False,
+    ) -> list[float] | None:
+        values = self._stat_values(statistic, dimension)
+        if values is None:
+            return None
+
+        output = list(values)
+        for index, degree_scale in enumerate(SO101_DEGREES_PER_NORMALIZED_UNIT[:dimension]):
+            if absolute_scale:
+                output[index] = values[index] / abs(degree_scale)
+            elif include_offset:
+                offset = float(self._offsets[index])
+                output[index] = offset + (values[index] - offset) / degree_scale
+            else:
+                output[index] = values[index] / degree_scale
+        return output
+
     def _transform_bounds(
         self,
         lower: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
@@ -123,6 +209,23 @@ class JointFrameTransform:
         include_offset: bool = False,
         absolute_scale: bool = False,
     ) -> list[float] | None:
+        values = self._stat_values(statistic, dimension)
+        if values is None:
+            return None
+
+        count = min(self.num_joints, dimension)
+        output = list(values)
+        for index in range(count):
+            sign = float(self._signs[index])
+            scale = abs(sign) if absolute_scale else sign
+            output[index] = scale * values[index] + (float(self._offsets[index]) if include_offset else 0.0)
+        return output
+
+    @staticmethod
+    def _stat_values(
+        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        dimension: int,
+    ) -> list[float] | None:
         if statistic is None:
             return None
         if isinstance(statistic, int | float):
@@ -135,14 +238,7 @@ class JointFrameTransform:
         if len(values) != dimension:
             msg = f"Normalization statistic length {len(values)} does not match feature dimension {dimension}."
             raise ValueError(msg)
-
-        count = min(self.num_joints, dimension)
-        output = list(values)
-        for index in range(count):
-            sign = float(self._signs[index])
-            scale = abs(sign) if absolute_scale else sign
-            output[index] = scale * values[index] + (float(self._offsets[index]) if include_offset else 0.0)
-        return output
+        return values
 
     def _apply(self, values: torch.Tensor, *, inverse: bool) -> torch.Tensor:
         """Apply the (inverse) affine joint transform to the leading joint dims.

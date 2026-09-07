@@ -16,6 +16,7 @@ from physicalai.data.dataset import Dataset
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
+from physicalai.policies.molmoact2.processors.joint_transform import SO101_DEGREES_PER_NORMALIZED_UNIT
 
 
 def test_registration_and_lazy_initialization() -> None:
@@ -75,8 +76,36 @@ def test_so101_norm_tag_respects_explicit_adaptation_mode(
     assert policy.adapt_to_so101 is expected
 
 
+@pytest.mark.parametrize(
+    ("norm_tag", "adapt_to_so101", "message"),
+    [
+        ("so100_so101_molmoact2", False, "requires adapt_to_so101=True"),
+        ("other", True, "only supported with norm_tag"),
+    ],
+)
+def test_pretrained_so101_stats_conversion_rejects_incompatible_modes(
+    norm_tag: str,
+    adapt_to_so101: bool,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        MolmoAct2(
+            pretrained_name_or_path=None,
+            norm_tag=norm_tag,
+            adapt_to_so101=adapt_to_so101,
+            convert_pretrained_so101_stats=True,
+        )
+
+
 def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    config = MolmoAct2Config(n_action_steps=3, chunk_size=5, use_random_input_noise=True)
+    config = MolmoAct2Config(
+        n_action_steps=3,
+        chunk_size=5,
+        use_random_input_noise=True,
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=True,
+        convert_pretrained_so101_stats=True,
+    )
     initialized: list[MolmoAct2Config] = []
 
     def initialize(policy: MolmoAct2, policy_config: MolmoAct2Config) -> None:
@@ -96,6 +125,7 @@ def test_from_config_uses_resolved_config(monkeypatch: pytest.MonkeyPatch) -> No
     assert policy.pretrained_name_or_path is None
     assert (policy.n_action_steps, policy.chunk_size) == (3, 5)
     assert policy.preserve_pretrained_normalization_in_training is True
+    assert policy.convert_pretrained_so101_stats is True
     assert policy.compile_model is True
     assert policy.optimizer_lr == 2e-5
 
@@ -134,6 +164,67 @@ def test_explicit_features_override_norm_tag_features_without_inheriting_statist
     assert config.output_features[0].name == "action"
     assert config.output_features[0].shape == (4,)
     assert config.output_features[0].normalization_data is None
+
+
+def test_convert_config_corrects_pretrained_so101_statistics_once(tmp_path: Path) -> None:
+    checkpoint_q01 = [-40.0, 50.0, 40.0, -30.0, -20.0, 2.0]
+    checkpoint_q99 = [45.0, 180.0, 170.0, 35.0, 30.0, 95.0]
+    norm_stats = {
+        "metadata_by_tag": {
+            "so100_so101_molmoact2": {
+                "camera_keys": [],
+                "state_key": "observation.state",
+                "state_stats": {"q01": checkpoint_q01, "q99": checkpoint_q99},
+                "action_key": "action",
+                "action_stats": {"q01": checkpoint_q01, "q99": checkpoint_q99},
+                "action_horizon": 30,
+                "normalize_gripper": True,
+            },
+        },
+    }
+    policy = MolmoAct2(
+        pretrained_name_or_path=None,
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=True,
+        convert_pretrained_so101_stats=True,
+    )
+
+    config = policy._convert_config({}, norm_stats, {}, tmp_path)
+
+    assert config.convert_pretrained_so101_stats is True
+    assert config.input_features is not None
+    assert config.output_features is not None
+    state_stats = config.input_features[-1].normalization_data
+    action_stats = config.output_features[0].normalization_data
+    assert state_stats is not None
+    assert action_stats is not None
+    offsets = [0.0, 90.0, 90.0, 0.0, 0.0]
+    expected_q01 = [
+        offset + (value - offset) / scale
+        for value, offset, scale in zip(
+            checkpoint_q01[:5],
+            offsets,
+            SO101_DEGREES_PER_NORMALIZED_UNIT,
+            strict=True,
+        )
+    ] + [checkpoint_q01[-1]]
+    expected_q99 = [
+        offset + (value - offset) / scale
+        for value, offset, scale in zip(
+            checkpoint_q99[:5],
+            offsets,
+            SO101_DEGREES_PER_NORMALIZED_UNIT,
+            strict=True,
+        )
+    ] + [checkpoint_q99[-1]]
+    assert state_stats.q01 == pytest.approx(expected_q01)
+    assert state_stats.q99 == pytest.approx(expected_q99)
+    assert action_stats == state_stats
+
+    restored = MolmoAct2Config.from_dict(config.to_dict())
+
+    assert restored.input_features[-1].normalization_data == state_stats
+    assert restored.output_features[0].normalization_data == action_stats
 
 
 def test_set_features_copies_only_requested_state_normalization(
@@ -557,7 +648,12 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     tiny_molmoact2_config: MolmoAct2Config,
     tmp_path: Path,
 ) -> None:
-    adapted_config = replace(tiny_molmoact2_config, adapt_to_so101=True)
+    adapted_config = replace(
+        tiny_molmoact2_config,
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=True,
+        convert_pretrained_so101_stats=True,
+    )
     policy = MolmoAct2.from_config(
         adapted_config,
         preserve_pretrained_normalization_in_training=True,
@@ -587,7 +683,9 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
 
     assert restored.preserve_pretrained_normalization_in_training is True
     assert restored.adapt_to_so101 is True
+    assert restored.convert_pretrained_so101_stats is True
     assert restored.config is not None and restored.config.adapt_to_so101 is True
+    assert restored.config.convert_pretrained_so101_stats is True
     assert restored.input_features[-1].normalization_data == policy.input_features[-1].normalization_data
     assert restored.output_features[0].normalization_data == policy.output_features[0].normalization_data
     assert restored.n_action_steps == policy.n_action_steps
@@ -769,6 +867,39 @@ def test_openvino_export_preserves_resolved_so101_mode_and_statistics(
     assert preprocessor.state_stats["q99"] == expected_q99
     assert postprocessor.action_stats["q01"] == expected_q01
     assert postprocessor.action_stats["q99"] == expected_q99
+
+
+def test_openvino_export_uses_corrected_pretrained_so101_statistics(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(
+        tiny_molmoact2_config,
+        norm_tag="so100_so101_molmoact2",
+        adapt_to_so101=True,
+        convert_pretrained_so101_stats=True,
+    )
+    policy = MolmoAct2.from_config(config)
+    monkeypatch.setattr(policy, "_openvino_token_ids", lambda: (1, 0, [10, 11, 12]))
+
+    export_args = policy.extra_export_args[ExportBackend.OPENVINO]
+    preprocessor = next(spec for spec in export_args.preprocessors_specs if spec.type == "molmoact2")
+    postprocessor = next(spec for spec in export_args.postprocessors_specs if spec.type == "molmoact2_postprocess")
+    state_stats = config.input_features[-1].normalization_data
+    action_stats = config.output_features[0].normalization_data
+    assert state_stats is not None
+    assert action_stats is not None
+
+    assert preprocessor.adapt_to_so101 is True
+    assert postprocessor.adapt_to_so101 is True
+    assert preprocessor.state_stats == {
+        "q01": state_stats.q01,
+        "q99": state_stats.q99,
+    }
+    assert postprocessor.action_stats == {
+        "q01": action_stats.q01,
+        "q99": action_stats.q99,
+    }
 
 
 def test_model_modifications_are_applied_in_order(monkeypatch: pytest.MonkeyPatch) -> None:

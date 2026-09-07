@@ -259,6 +259,36 @@ The released SO-100/101 checkpoint uses an older joint calibration convention.
 Set `adapt_to_so101=True` to transform observations and actions between that
 checkpoint frame and the current robot frame.
 
+The released checkpoint's normalization statistics also use LeRobot degrees,
+whereas the PhysicalAI SO101 driver reports body joints in `[-100, 100]` and
+the gripper in `[0, 100]`. `adapt_to_so101` corrects the historical joint signs
+and offsets, but it does not by itself correct this unit-scale difference. For
+zero-shot deployment through PhysicalAI Runtime, also set
+`convert_pretrained_so101_stats=True`.
+
+This flag exists only to bridge the published `allenai/MolmoAct2-SO100_101`
+statistics to PhysicalAI's normalized SO101 units. It converts the pretrained
+state and action statistics once when `norm_stats.json` is loaded. The same
+corrected feature statistics are then used by the Torch processors and embedded
+in the OpenVINO manifest for Runtime; Runtime does not load or negotiate robot
+calibration.
+
+The conversion expects this SO101 calibration profile:
+
+| Joint         | `range_min` | `range_max` |
+| ------------- | ----------: | ----------: |
+| shoulder_pan  |         746 |        3412 |
+| shoulder_lift |         885 |        3198 |
+| elbow_flex    |         907 |        3103 |
+| wrist_flex    |         771 |        3073 |
+| wrist_roll    |         143 |        3972 |
+| gripper       |        2045 |        3492 |
+
+The body-joint conversion depends on each range width. Do not use this flag if
+the deployed arm has different body-joint ranges. Models trained or fine-tuned
+with PhysicalAI-normalized SO101 state/action statistics already use Runtime's
+native units and must leave `convert_pretrained_so101_stats=False`.
+
 ```python
 import torch
 
@@ -268,6 +298,7 @@ policy = MolmoAct2(
     pretrained_name_or_path="allenai/MolmoAct2-SO100_101",
     norm_tag="so100_so101_molmoact2",
     adapt_to_so101=True,
+    convert_pretrained_so101_stats=True,
 )
 
 policy.set_features(
