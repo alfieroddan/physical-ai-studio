@@ -135,8 +135,8 @@ def test_extractor_accepts_flattened_observations() -> None:
 
 def test_extractor_sorts_nested_fallback_but_preserves_explicit_order() -> None:
     images = {
-        "wrist": torch.ones(1, 3, 8, 8),
         "top": torch.zeros(1, 3, 8, 8),
+        "wrist": torch.ones(1, 3, 8, 8),
     }
     batch = {STATE: torch.zeros(1, 4), TASK: "Pick block.", IMAGES: images}
 

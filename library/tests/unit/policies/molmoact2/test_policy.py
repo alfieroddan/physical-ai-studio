@@ -381,8 +381,10 @@ def test_setup_preserves_pretrained_normalization_with_dataset_feature_contract(
     pretrained_state_stats = tiny_molmoact2_config.input_features[-1].normalization_data
     pretrained_action_stats = tiny_molmoact2_config.output_features[0].normalization_data
     dataset_stats = NormalizationParameters(q01=[-2.0] * 4, q99=[2.0] * 4)
+    visual_feature = tiny_molmoact2_config.input_features[0]
     dataset_inputs = [
-        replace(tiny_molmoact2_config.input_features[0], name="dataset_camera"),
+        replace(visual_feature, name="wrist"),
+        replace(visual_feature, name="overview"),
         replace(tiny_molmoact2_config.input_features[-1], normalization_data=dataset_stats),
     ]
     dataset_outputs = [replace(tiny_molmoact2_config.output_features[0], normalization_data=dataset_stats)]
@@ -393,7 +395,12 @@ def test_setup_preserves_pretrained_normalization_with_dataset_feature_contract(
 
     policy.setup("fit")
 
-    assert policy.input_features[0].name == "dataset_camera"
+    expected_input_names = ["wrist", "overview", tiny_molmoact2_config.input_features[-1].name]
+    assert [feature.name for feature in policy.input_features] == expected_input_names
+    assert policy.config is not None
+    assert [feature.name for feature in policy.config.input_features] == expected_input_names
+    assert policy._preprocessor is not None
+    assert policy._preprocessor._extractor.image_keys == ["wrist", "overview"]
     assert policy.input_features[-1].normalization_data == pretrained_state_stats
     assert policy.output_features[0].normalization_data == pretrained_action_stats
 
