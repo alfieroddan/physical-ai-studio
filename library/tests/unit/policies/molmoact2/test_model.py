@@ -81,7 +81,7 @@ def test_forward_dispatches_by_mode(model: MolmoAct2Model, monkeypatch: pytest.M
     assert model({}) is actions
 
 
-def test_predict_action_chunk_trims_output(
+def test_predict_action_chunk_returns_full_chunk(
     model: MolmoAct2Model,
     tiny_molmoact2_config: MolmoAct2Config,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,7 +96,7 @@ def test_predict_action_chunk_trims_output(
     monkeypatch.setattr(model._unwrapped_backbone.model, "generate_actions_from_inputs", generate)
     actions = model.predict_action_chunk({"input_ids": torch.zeros(1, 1, dtype=torch.long)})
 
-    assert actions.shape == (1, tiny_molmoact2_config.n_action_steps, 4)
+    assert actions.shape == (1, tiny_molmoact2_config.chunk_size, 4)
     assert calls["action_horizon"] == tiny_molmoact2_config.chunk_size
 
 

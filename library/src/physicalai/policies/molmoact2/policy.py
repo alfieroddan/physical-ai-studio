@@ -1103,7 +1103,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         """Predict and denormalize an action chunk.
 
         Returns:
-            Action tensor shaped ``(batch, n_action_steps, action_dim)``.
+            Action tensor shaped ``(batch, chunk_size, action_dim)``.
 
         Raises:
             RuntimeError: If the model or processors are not initialized.
@@ -1317,7 +1317,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         return [
             InferenceFeature(
                 ftype=InferenceFeatureType.ACTION,
-                shape=(self.n_action_steps, *action_feature.shape),
+                shape=(self.chunk_size, *action_feature.shape),
                 name=ACTION,
                 dtype=InferenceFeatureDtype.FLOAT32,
             ),
@@ -1440,9 +1440,27 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 image_token_ids=image_token_ids,
             ),
         ]
+        torch_postprocessors = []
+        openvino_postprocessors = [
+            ComponentSpec(
+                type="molmoact2_postprocess",
+                action_stats=_normalization_stats(action_feature),
+                normalization_mode=config.normalization_mode,
+                adapt_to_so101=config.adapt_to_so101,
+                **joint_params,
+            ),
+        ]
+        if self.chunk_size != self.n_action_steps:
+            chunk_trimmer = ComponentSpec(
+                type="action_chunk_trimmer",
+                n_action_steps=self.n_action_steps,
+            )
+            torch_postprocessors.append(chunk_trimmer)
+            openvino_postprocessors.append(chunk_trimmer)
         return {
             ExportBackend.TORCH: TorchExportParameters(
                 preprocessors_specs=[ComponentSpec(type="to_float_tensor")],
+                postprocessors_specs=torch_postprocessors,
             ),
             ExportBackend.OPENVINO: OpenVINOExportParameters(
                 outputs=[feature.name for feature in (self.outputs_schema or [])],
@@ -1450,15 +1468,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 compress_to_fp16=self.openvino_compress_to_fp16,
                 via_onnx=False,
                 preprocessors_specs=preprocessors,
-                postprocessors_specs=[
-                    ComponentSpec(
-                        type="molmoact2_postprocess",
-                        action_stats=_normalization_stats(action_feature),
-                        normalization_mode=config.normalization_mode,
-                        adapt_to_so101=config.adapt_to_so101,
-                        **joint_params,
-                    ),
-                ],
+                postprocessors_specs=openvino_postprocessors,
             ),
         }
 

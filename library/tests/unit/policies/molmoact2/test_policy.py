@@ -791,6 +791,33 @@ def test_sample_input_zeros_only_state_with_passthrough_dimensions(
     assert masked_sample["task"] == generic_sample["task"]
 
 
+@pytest.mark.parametrize("trim_actions", [True, False])
+def test_export_uses_action_chunk_trimmer_for_shorter_execution_horizon(
+    tiny_molmoact2_config: MolmoAct2Config,
+    trim_actions: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    n_action_steps = tiny_molmoact2_config.n_action_steps if trim_actions else tiny_molmoact2_config.chunk_size
+    config = replace(tiny_molmoact2_config, n_action_steps=n_action_steps)
+    policy = MolmoAct2.from_config(config)
+    monkeypatch.setattr(policy, "_openvino_token_ids", lambda: (1, 0, [10, 11, 12]))
+
+    assert policy.outputs_schema is not None
+    assert policy.outputs_schema[0].shape == (config.chunk_size, *config.output_features[0].shape)
+
+    export_args = policy.extra_export_args
+    torch_postprocessors = export_args[ExportBackend.TORCH].postprocessors_specs
+    openvino_postprocessors = export_args[ExportBackend.OPENVINO].postprocessors_specs
+    assert [spec.type for spec in torch_postprocessors] == (["action_chunk_trimmer"] if trim_actions else [])
+    assert [spec.type for spec in openvino_postprocessors] == [
+        "molmoact2_postprocess",
+        *(["action_chunk_trimmer"] if trim_actions else []),
+    ]
+    if trim_actions:
+        assert torch_postprocessors[0].n_action_steps == config.n_action_steps
+        assert openvino_postprocessors[-1].n_action_steps == config.n_action_steps
+
+
 def test_openvino_compression_is_used_by_export(
     tiny_molmoact2_config: MolmoAct2Config,
 ) -> None:

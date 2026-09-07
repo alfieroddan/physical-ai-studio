@@ -196,7 +196,6 @@ class MolmoAct2Model(Model):
         flow_matching_beta_alpha: float = 1.0,
         flow_matching_beta_beta: float = 1.5,
         chunk_size: int = 30,
-        n_action_steps: int = 30,
         action_dim: int | None = None,
         use_random_input_noise: bool = False,
         # LoRA
@@ -212,7 +211,6 @@ class MolmoAct2Model(Model):
         self._lora_dropout = lora_dropout
         self._lora_bias: Literal["all", "lora_only", "none"] = lora_bias
         self._chunk_size = chunk_size
-        self._n_action_steps = n_action_steps
         self._action_dim = action_dim or max_action_dim
         self._use_random_input_noise = use_random_input_noise
         self._vlm_frozen = False
@@ -504,7 +502,7 @@ class MolmoAct2Model(Model):
             sample_noise=self._use_random_input_noise if sample_noise is None else sample_noise,
             generator=generator,
         )
-        return actions[:, : self._n_action_steps, : self._action_dim].float()
+        return actions[:, : self._chunk_size, : self._action_dim].float()
 
     @torch.no_grad()
     @override
@@ -643,7 +641,6 @@ class MolmoAct2Model(Model):
             flow_matching_beta_alpha=config.flow_matching_beta_alpha,
             flow_matching_beta_beta=config.flow_matching_beta_beta,
             chunk_size=config.chunk_size,
-            n_action_steps=config.n_action_steps,
             action_dim=action_dim,
             use_random_input_noise=config.use_random_input_noise,
             lora_rank=config.lora_rank,
