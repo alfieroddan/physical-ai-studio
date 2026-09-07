@@ -5,13 +5,56 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor
+from torch.optim.lr_scheduler import LambdaLR
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+
+def molmoact2_cosine_with_warmup_scheduler(
+    optimizer: torch.optim.Optimizer,
+    *,
+    peak_lr: float,
+    decay_lr: float,
+    num_warmup_steps: int,
+    num_decay_steps: int,
+) -> LambdaLR:
+    """Build the fixed-clock warmup and cosine schedule used by MolmoAct2."""
+    if num_warmup_steps < 0:
+        msg = f"num_warmup_steps must be >= 0, got {num_warmup_steps}."
+        raise ValueError(msg)
+    if num_decay_steps < 1:
+        msg = f"num_decay_steps must be >= 1, got {num_decay_steps}."
+        raise ValueError(msg)
+    if peak_lr <= 0:
+        msg = f"peak_lr must be > 0, got {peak_lr}."
+        raise ValueError(msg)
+    if not 0 <= decay_lr < peak_lr:
+        msg = f"decay_lr must be in [0, peak_lr), got decay_lr={decay_lr}, peak_lr={peak_lr}."
+        raise ValueError(msg)
+
+    warmup_steps = min(num_warmup_steps, num_decay_steps)
+    alpha = decay_lr / peak_lr
+
+    def lr_lambda(current_step: int) -> float:
+        step = max(current_step + 1, 0)
+        if warmup_steps > 0 and step < warmup_steps:
+            return step / warmup_steps
+        if step >= num_decay_steps:
+            return alpha
+        cosine_span = num_decay_steps - warmup_steps
+        if cosine_span <= 0:
+            return alpha
+        cosine_step = step - warmup_steps
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * cosine_step / cosine_span))
+        return alpha + (1.0 - alpha) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 class MolmoAct2AdamW(torch.optim.AdamW):

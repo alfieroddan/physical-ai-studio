@@ -26,11 +26,10 @@ from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
 from physicalai.policies.utils.features import get_feature_by_type
-from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 from .config import MolmoAct2Config
 from .model import MolmoAct2Model
-from .optimizer import MolmoAct2AdamW
+from .optimizer import MolmoAct2AdamW, molmoact2_cosine_with_warmup_scheduler
 from .pretrained_utils import (
     ACTION_EXPERT_CONFIG_MAP,
     ADAPTER_CONFIG_MAP,
@@ -1168,14 +1167,12 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             weight_decay=self.optimizer_weight_decay,
             group_grad_clip_norm=self.optimizer_grad_clip_norm,
         )
-        training_steps = int(self.trainer.estimated_stepping_batches)
-        scheduler = cosine_decay_with_warmup_scheduler(
+        scheduler = molmoact2_cosine_with_warmup_scheduler(
             optimizer,
             peak_lr=self.optimizer_lr,
             decay_lr=self.scheduler_decay_lr,
             num_warmup_steps=self.scheduler_warmup_steps,
             num_decay_steps=self.scheduler_decay_steps,
-            num_training_steps=training_steps,
         )
         return {
             "optimizer": optimizer,

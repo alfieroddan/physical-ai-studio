@@ -594,6 +594,30 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     assert restored.scheduler_decay_lr == 1e-6
 
 
+def test_configure_optimizers_uses_fixed_scheduler_without_trainer(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    policy = MolmoAct2.from_config(
+        tiny_molmoact2_config,
+        optimizer_lr=1e-5,
+        optimizer_vit_lr=2e-5,
+        optimizer_connector_lr=3e-5,
+        optimizer_action_expert_lr=5e-5,
+        scheduler_warmup_steps=200,
+        scheduler_decay_steps=24_000,
+        scheduler_decay_lr=1e-6,
+    )
+
+    configured = policy.configure_optimizers()
+    optimizer = configured["optimizer"]
+    scheduler_config = configured["lr_scheduler"]
+    scheduler = scheduler_config["scheduler"]
+
+    assert scheduler_config["interval"] == "step"
+    assert all(group["lr"] == pytest.approx(group["initial_lr"] / 200) for group in optimizer.param_groups)
+    assert scheduler.get_last_lr() == pytest.approx([group["lr"] for group in optimizer.param_groups])
+
+
 @pytest.mark.parametrize("policy_config", [None, "invalid"])
 def test_load_checkpoint_requires_policy_config(policy_config: object) -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)

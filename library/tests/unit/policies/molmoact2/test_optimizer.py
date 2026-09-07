@@ -5,9 +5,64 @@
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
 
-from physicalai.policies.molmoact2.optimizer import MolmoAct2AdamW
+from physicalai.policies.molmoact2.optimizer import MolmoAct2AdamW, molmoact2_cosine_with_warmup_scheduler
+
+
+def test_scheduler_keeps_configured_clock_for_short_runs() -> None:
+    first = torch.nn.Parameter(torch.tensor([1.0]))
+    second = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW(
+        [
+            {"params": [first], "lr": 5e-5},
+            {"params": [second], "lr": 5e-6},
+        ],
+    )
+    scheduler = molmoact2_cosine_with_warmup_scheduler(
+        optimizer,
+        peak_lr=5e-5,
+        decay_lr=1e-6,
+        num_warmup_steps=200,
+        num_decay_steps=24_000,
+    )
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 200)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 / 200)
+    for _ in range(199):
+        optimizer.step()
+        scheduler.step()
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6)
+
+    for _ in range(2_800):
+        optimizer.step()
+        scheduler.step()
+    cosine_step = 3_000 - 200
+    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * cosine_step / 23_800))
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * expected_multiplier)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 * expected_multiplier)
+
+
+def test_scheduler_stays_at_floor_after_decay() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=5e-5)
+    scheduler = molmoact2_cosine_with_warmup_scheduler(
+        optimizer,
+        peak_lr=5e-5,
+        decay_lr=1e-6,
+        num_warmup_steps=2,
+        num_decay_steps=5,
+    )
+
+    for _ in range(10):
+        optimizer.step()
+        scheduler.step()
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-6)
 
 
 def test_updates_float32_parameters() -> None:
