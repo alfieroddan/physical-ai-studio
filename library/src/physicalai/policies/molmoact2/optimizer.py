@@ -24,7 +24,14 @@ def molmoact2_cosine_with_warmup_scheduler(
     num_warmup_steps: int,
     num_decay_steps: int,
 ) -> LambdaLR:
-    """Build the fixed-clock warmup and cosine schedule used by MolmoAct2."""
+    """Build the fixed-clock warmup and cosine schedule used by MolmoAct2.
+
+    Returns:
+        LambdaLR: The learning rate scheduler instance.
+
+    Raises:
+        ValueError: If any of the input arguments are invalid.
+    """
     if num_warmup_steps < 0:
         msg = f"num_warmup_steps must be >= 0, got {num_warmup_steps}."
         raise ValueError(msg)

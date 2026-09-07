@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from physicalai.config import Config
+
 from physicalai.data import Feature  # noqa: TC001
 
 
