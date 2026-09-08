@@ -1041,6 +1041,7 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
 
         # gather input and output features
         dataset_input_features, dataset_output_features = self._dataset_features(train_dataset)
+        self._warn_if_dataset_quantiles_missing(dataset_input_features, dataset_output_features)
 
         # Replace eager features with the training dataset contract without reloading weights.
         if self.model is not None:
@@ -1078,6 +1079,31 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             list(dataset.observation_features.values()),
             list(dataset.action_features.values()),
         )
+
+    def _warn_if_dataset_quantiles_missing(
+        self,
+        input_features: list[Feature],
+        output_features: list[Feature],
+    ) -> None:
+        config = getattr(self, "config", None)
+        if isinstance(config, MolmoAct2Config) and config.normalization_mode != "QUANTILES":
+            return
+
+        missing = []
+        for feature in input_features + output_features:
+            if feature.ftype not in {FeatureType.STATE, FeatureType.ACTION}:
+                continue
+            stats = feature.normalization_data
+            if stats is None or stats.q01 is None or stats.q99 is None:
+                missing.append(feature.name or str(feature.ftype))
+
+        if missing:
+            logger.warning(
+                "MolmoAct2 uses quantile normalization, but the training dataset is missing q01/q99 statistics "
+                "for: %s. Add them before training with `python -m "
+                "lerobot.scripts.augment_dataset_quantile_stats --repo-id=your_dataset`.",
+                ", ".join(missing),
+            )
 
     @override
     def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:

@@ -125,6 +125,17 @@ dataset's statistics. This option is used only by `setup("fit")`; explicit
 corresponding `copy_state_normalization` or `copy_action_normalization` flag is
 set.
 
+### Dataset Quantile Statistics
+
+MolmoAct2 defaults to quantile normalization for state and action features. If
+your dataset has not been converted with quantile statistics, you can add them
+with:
+
+```bash
+python -m lerobot.scripts.augment_dataset_quantile_stats \
+  --repo-id=your_dataset
+```
+
 ### SO-101 Fine-Tuning Frames
 
 SO-101 datasets are expected to contain samples and normalization statistics in

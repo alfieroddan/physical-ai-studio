@@ -527,6 +527,7 @@ def test_setup_preserves_checkpoint_frame_normalization_without_transforming_twi
 def test_setup_uses_dataset_normalization_when_uninitialized(
     tiny_molmoact2_config: MolmoAct2Config,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     policy = MolmoAct2(
         pretrained_name_or_path=None,
@@ -543,9 +544,36 @@ def test_setup_uses_dataset_normalization_when_uninitialized(
 
     policy.setup("fit")
 
+    assert "missing q01/q99 statistics" not in caplog.text
     assert policy.input_features == dataset_inputs
     assert policy.output_features == dataset_outputs
     initialize_model.assert_called_once_with()
+
+
+def test_setup_warns_when_dataset_quantiles_are_missing(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    policy = MolmoAct2(pretrained_name_or_path=None)
+    dataset_inputs = list(tiny_molmoact2_config.input_features)
+    dataset_outputs = [
+        replace(
+            tiny_molmoact2_config.output_features[0],
+            normalization_data=NormalizationParameters(mean=[0.0] * 4, std=[1.0] * 4),
+        ),
+    ]
+    trainer = Mock()
+    trainer.datamodule.train_dataset = Mock(spec=Dataset)
+    policy._trainer = trainer
+    monkeypatch.setattr(policy, "_dataset_features", lambda _dataset: (dataset_inputs, dataset_outputs))
+    monkeypatch.setattr(policy, "initialize_model", Mock())
+
+    with caplog.at_level("WARNING"):
+        policy.setup("fit")
+
+    assert "missing q01/q99 statistics for: action" in caplog.text
+    assert "lerobot.scripts.augment_dataset_quantile_stats" in caplog.text
 
 
 def test_setup_transforms_dataset_normalization_in_adapted_mode(
