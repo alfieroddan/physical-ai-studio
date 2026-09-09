@@ -92,25 +92,30 @@ for the available overrides.
 ### Python API
 
 ```python
+import multiprocessing
+
 from physicalai.data import LeRobotDataModule
 from physicalai.policies import MolmoAct2
 from physicalai.train import Trainer
 
-policy = MolmoAct2(
-    use_random_input_noise=True,
-    use_lora=True,
-    enable_lora_action_expert=False,
-    gradient_checkpointing=True,
-)
+multiprocessing.set_start_method("spawn", force=True)
 
-datamodule = LeRobotDataModule(
-    repo_id="lerobot/pusht",
-    train_batch_size=8,
-    data_format="physicalai",
-)
+if __name__ == "__main__":
+    policy = MolmoAct2(
+        use_random_input_noise=True,
+        use_lora=True,
+        enable_lora_action_expert=False,
+        gradient_checkpointing=True,
+    )
 
-trainer = Trainer(max_epochs=30, precision="bf16-mixed")
-trainer.fit(policy, datamodule=datamodule)
+    datamodule = LeRobotDataModule(
+        repo_id="lerobot/pusht",
+        train_batch_size=8,
+        data_format="physicalai",
+    )
+
+    trainer = Trainer(max_epochs=30, precision="bf16-mixed")
+    trainer.fit(policy, datamodule=datamodule)
 ```
 
 When the policy is constructed lazily, the training dataset supplies its input
