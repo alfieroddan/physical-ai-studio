@@ -553,6 +553,23 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 with normalization resolved during policy initialization.
             copy_action_normalization: Whether to fill missing replacement action normalization
                 with normalization resolved during policy initialization.
+
+        Example:
+            Initializing, setting features, and exporting a policy model:
+
+            >>> import torch
+            >>> policy = MolmoAct2(
+            ...     pretrained_name_or_path="allenai/MolmoAct2-SO100_101",
+            ...     norm_tag="so100_so101_molmoact2",
+            ...     adapt_to_so101=True,
+            ...     convert_pretrained_so101_stats=True,
+            ... )
+            >>> policy.set_features(
+            ...     input_features=input_features,
+            ...     output_features=output_features,
+            ...     copy_state_normalization=True,
+            ...     copy_action_normalization=True,
+            ... )
         """
         self._require_model()
         config = self._require_config()
@@ -586,6 +603,18 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
         Raises:
             ValueError: If a source name is unknown, a replacement name is invalid,
                 or the result contains duplicate feature names.
+
+        Example:
+            Renaming a checkpoint camera feature to match the environment:
+
+            >>> policy = MolmoAct2(
+            ...     pretrained_name_or_path="allenai/MolmoAct2-LIBERO",
+            ...     norm_tag="libero",
+            ...     n_action_steps=10,
+            ...     use_random_input_noise=True,
+            ...     compile_model=True,
+            ... )
+            >>> policy.rename_features({"wrist_image": "image2"})
         """
         self._require_model()
         config = self._require_config()

@@ -165,7 +165,6 @@ action-head-only training are mutually exclusive.
 
 ## Benchmarking LIBERO
 
-<!-- prettier-ignore -->
 ```python
 import random
 
