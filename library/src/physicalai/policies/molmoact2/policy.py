@@ -554,9 +554,8 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
             copy_action_normalization: Whether to fill missing replacement action normalization
                 with normalization resolved during policy initialization.
         """
-        model = self._require_model()
+        self._require_model()
         config = self._require_config()
-        training = self.training
 
         resolved_input_features = list(input_features)
         resolved_output_features = list(output_features)
@@ -576,18 +575,73 @@ class MolmoAct2(ExportablePolicyMixin, Policy):  # noqa: PLR0904
                 FeatureType.ACTION,
             )
 
+        self._set_resolved_features(resolved_input_features, resolved_output_features)
+
+    def rename_features(self, mapping: Mapping[str, str]) -> None:
+        """Rename resolved input features without changing their metadata or order.
+
+        Args:
+            mapping: Current input feature names mapped to replacement names.
+
+        Raises:
+            ValueError: If a source name is unknown, a replacement name is invalid,
+                or the result contains duplicate feature names.
+        """
+        self._require_model()
+        config = self._require_config()
+        input_features = list(config.input_features or [])
+        output_features = list(config.output_features or [])
+        if not mapping:
+            return
+
+        if any(not isinstance(name, str) or not name for name in mapping):
+            msg = "Feature names to rename must be non-empty strings."
+            raise ValueError(msg)
+        if any(not isinstance(name, str) or not name for name in mapping.values()):
+            msg = "Replacement feature names must be non-empty strings."
+            raise ValueError(msg)
+
+        current_names = {feature.name for feature in input_features}
+        unknown_names = sorted(set(mapping) - current_names)
+        if unknown_names:
+            msg = f"Cannot rename unknown input features: {unknown_names}."
+            raise ValueError(msg)
+
+        renamed_features = [
+            replace(feature, name=mapping[feature.name])
+            if feature.name is not None and feature.name in mapping
+            else feature
+            for feature in input_features
+        ]
+        renamed_names = [feature.name for feature in renamed_features]
+        if len(renamed_names) != len(set(renamed_names)):
+            msg = f"Feature renaming creates duplicate input names: {renamed_names}."
+            raise ValueError(msg)
+
+        self._set_resolved_features(renamed_features, output_features)
+
+    def _set_resolved_features(
+        self,
+        input_features: list[Feature],
+        output_features: list[Feature],
+    ) -> None:
+        """Install resolved features and rebuild their processors atomically."""
+        model = self._require_model()
+        config = self._require_config()
+        training = self.training
+
         replacement_config = replace(
             config,
-            input_features=resolved_input_features,
-            output_features=resolved_output_features,
+            input_features=input_features,
+            output_features=output_features,
         )
         preprocessor, postprocessor = make_molmoact2_preprocessors(replacement_config)
         parameter = next(model.parameters())
         preprocessor.to(device=parameter.device, dtype=parameter.dtype)
         postprocessor.to(device=parameter.device, dtype=parameter.dtype)
 
-        self.input_features = resolved_input_features
-        self.output_features = resolved_output_features
+        self.input_features = input_features
+        self.output_features = output_features
         self.config = replacement_config
         self._preprocessor = preprocessor
         self._postprocessor = postprocessor

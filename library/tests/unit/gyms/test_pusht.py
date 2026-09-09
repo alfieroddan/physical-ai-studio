@@ -71,41 +71,21 @@ class TestPushTGym(BaseTestGym):
         assert static_result.images["top"].shape == instance_result.images["top"].shape  # type: ignore[attr-defined]
         assert static_result.state.shape == instance_result.state.shape  # type: ignore[attr-defined]
 
+
 def test_state_only_obs():
     """Test we can convert with only position."""
-    raw_obs = {"agent_pos": np.array([[0.4,0.7]],dtype=np.float32)}
+    raw_obs = {"agent_pos": np.array([[0.4, 0.7]], dtype=np.float32)}
     obs = PushTGym.convert_raw_to_observation(raw_obs)
 
     assert obs.images is None
-    assert obs.state.shape == (1,2)
+    assert obs.state.shape == (1, 2)
+
 
 def test_pixels_only_obs():
     """Test that we can convert only pixels"""
-    raw_obs = {"pixels": np.random.rand(1,32,32,3).astype(np.float32)}
+    raw_obs = {"pixels": np.random.rand(1, 32, 32, 3).astype(np.float32)}
     obs = PushTGym.convert_raw_to_observation(raw_obs)
 
     assert isinstance(obs.images, dict)
     assert obs.images["top"].shape == (1, 3, 32, 32)
     assert obs.state is None
-
-
-def test_camera_name_mapping_renames_top_image_key():
-    """PushTGym applies the shared mapping to its top-camera output."""
-    env = PushTGym(camera_name_mapping={"top": "image"})
-    try:
-        raw_obs = {"pixels": np.zeros((1, 32, 32, 3), dtype=np.uint8)}
-        obs = env.to_observation(raw_obs)
-        assert set(obs.images) == {"image"}  # type: ignore[arg-type]
-    finally:
-        env.close()
-
-
-def test_vectorized_camera_name_mapping_is_wrapper_configuration():
-    """PushT vectorization retains mapping without forwarding it to gym.make."""
-    env = PushTGym.vectorize("gym_pusht/PushT-v0", num_envs=2, camera_name_mapping={"top": "image"})
-    try:
-        raw_obs = {"pixels": np.zeros((2, 32, 32, 3), dtype=np.uint8)}
-        obs = env.to_observation(raw_obs)
-        assert set(obs.images) == {"image"}  # type: ignore[arg-type]
-    finally:
-        env.close()

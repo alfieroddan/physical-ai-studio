@@ -165,6 +165,7 @@ action-head-only training are mutually exclusive.
 
 ## Benchmarking LIBERO
 
+<!-- prettier-ignore -->
 ```python
 import random
 
@@ -200,14 +201,15 @@ if __name__ == "__main__":
         use_random_input_noise=True,
         compile_model=True,
     )
-    policy = policy.to(device=DEVICE, dtype=torch.bfloat16)
+
+      policy.rename_features({"wrist_image": "image2"})
+      policy = policy.to(device=DEVICE, dtype=torch.bfloat16).eval()
 
     for task_suite in TASK_SUITES:
         benchmark = LiberoBenchmark(
             task_suite=task_suite,
             num_episodes=1,
             seed=SEED,
-            camera_name_mapping={"image2": "wrist_image"},
             observation_height=378,
             observation_width=378,
             record_mode="all",
@@ -225,6 +227,10 @@ if __name__ == "__main__":
             for gym in benchmark.gyms:
                 gym.close()
 ```
+
+`rename_features` maps the checkpoint's resolved input feature names to the
+names emitted by the environment. It preserves feature order, shapes, and
+normalization statistics.
 
 ### Reported Results
 

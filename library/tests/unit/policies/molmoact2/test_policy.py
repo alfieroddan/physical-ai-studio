@@ -427,6 +427,133 @@ def test_set_features_requires_initialized_policy() -> None:
         policy.set_features([], [])
 
 
+def test_rename_features_matches_libero_camera_names(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    wrist_feature = replace(tiny_molmoact2_config.input_features[0], name="wrist_image")
+    config = replace(
+        tiny_molmoact2_config,
+        input_features=[
+            tiny_molmoact2_config.input_features[0],
+            wrist_feature,
+            tiny_molmoact2_config.input_features[-1],
+        ],
+    )
+    policy = MolmoAct2.from_config(config).eval()
+    model = policy.model
+    output_features = policy.output_features
+    state_normalization = config.input_features[-1].normalization_data
+
+    policy.rename_features({"wrist_image": "image2"})
+
+    assert policy.model is model
+    assert policy.output_features == output_features
+    assert not policy.training
+    assert policy.config is not None
+    assert [feature.name for feature in policy.input_features or []] == ["image", "image2", "state"]
+    assert policy.input_features is not None
+    assert policy.input_features[1] == replace(wrist_feature, name="image2")
+    assert policy.input_features[-1].normalization_data is state_normalization
+    assert policy.config.input_features == policy.input_features
+    assert policy._preprocessor is not None
+    assert policy._preprocessor._extractor.image_keys == ["image", "image2"]
+
+    observation = Observation(
+        images={
+            "image": torch.zeros(1, 3, 28, 28),
+            "image2": torch.ones(1, 3, 28, 28),
+        },
+        state=torch.zeros(1, 4),
+        task=["pick up the object"],
+    )
+    extracted = policy._preprocessor._extractor.extract(observation.to_dict())
+    torch.testing.assert_close(extracted.images_by_example[0][0], torch.zeros(3, 28, 28))
+    torch.testing.assert_close(extracted.images_by_example[0][1], torch.ones(3, 28, 28))
+
+
+def test_rename_features_supports_swaps_and_empty_mapping(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    second_camera = replace(tiny_molmoact2_config.input_features[0], name="wrist_image")
+    config = replace(
+        tiny_molmoact2_config,
+        input_features=[
+            tiny_molmoact2_config.input_features[0],
+            second_camera,
+            tiny_molmoact2_config.input_features[-1],
+        ],
+    )
+    policy = MolmoAct2.from_config(config)
+
+    policy.rename_features({})
+    preprocessor = policy._preprocessor
+    policy.rename_features({"image": "wrist_image", "wrist_image": "image"})
+
+    assert preprocessor is not None
+    assert policy._preprocessor is not preprocessor
+    assert [feature.name for feature in policy.input_features or []] == ["wrist_image", "image", "state"]
+
+
+@pytest.mark.parametrize(
+    ("mapping", "message"),
+    [
+        ({"missing": "camera"}, "unknown input features"),
+        ({"image": ""}, "Replacement feature names"),
+        ({"image": 1}, "Replacement feature names"),
+        ({"image": "state"}, "duplicate input names"),
+    ],
+)
+def test_rename_features_rejects_invalid_mapping_atomically(
+    tiny_molmoact2_config: MolmoAct2Config,
+    mapping: dict[str, str],
+    message: str,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    config = policy.config
+    input_features = policy.input_features
+    preprocessor = policy._preprocessor
+
+    with pytest.raises(ValueError, match=message):
+        policy.rename_features(mapping)
+
+    assert policy.config is config
+    assert policy.input_features is input_features
+    assert policy._preprocessor is preprocessor
+
+
+def test_rename_features_rolls_back_when_processor_creation_fails(
+    tiny_molmoact2_config: MolmoAct2Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = MolmoAct2.from_config(tiny_molmoact2_config)
+    config = policy.config
+    input_features = policy.input_features
+    preprocessor = policy._preprocessor
+
+    def fail_to_create_processors(_config: MolmoAct2Config) -> None:
+        msg = "processor creation failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(
+        "physicalai.policies.molmoact2.policy.make_molmoact2_preprocessors",
+        fail_to_create_processors,
+    )
+
+    with pytest.raises(RuntimeError, match="processor creation failed"):
+        policy.rename_features({"image": "camera"})
+
+    assert policy.config is config
+    assert policy.input_features is input_features
+    assert policy._preprocessor is preprocessor
+
+
+def test_rename_features_requires_initialized_policy() -> None:
+    policy = MolmoAct2(pretrained_name_or_path=None)
+
+    with pytest.raises(TypeError, match="not initialized"):
+        policy.rename_features({"image": "camera"})
+
+
 def test_setup_replaces_eager_normalization_with_dataset_normalization(
     tiny_molmoact2_config: MolmoAct2Config,
     monkeypatch: pytest.MonkeyPatch,
