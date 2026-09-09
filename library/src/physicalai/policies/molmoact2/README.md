@@ -199,10 +199,10 @@ if __name__ == "__main__":
         n_action_steps=10,
         use_random_input_noise=True,
         compile_model=True,
-    )
+    ).eval()
 
-      policy.rename_features({"wrist_image": "image2"})
-      policy = policy.to(device=DEVICE, dtype=torch.bfloat16).eval()
+    policy.rename_features({"wrist_image": "image2"})
+    policy = policy.to(device=DEVICE, dtype=torch.bfloat16).eval()
 
     for task_suite in TASK_SUITES:
         benchmark = LiberoBenchmark(
