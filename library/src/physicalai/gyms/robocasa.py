@@ -181,7 +181,10 @@ def _split_fields(order: FieldOrder, flat: np.ndarray) -> dict[str, np.ndarray]:
     return out
 
 
-# Default PandaOmron cameras. Raw RoboCasa names are surfaced in observations.
+# Default PandaOmron cameras. Raw RoboCasa names are surfaced verbatim as
+# `Observation.images["robot0_*"]` so the keys match the upstream RoboCasa
+# dataset exactly. Per-policy renames go through the
+# RLDX_CAMERA_REMAP_KITCHEN adapter at policy-input time, not here.
 DEFAULT_CAMERAS: tuple[str, ...] = (
     "robot0_agentview_left",
     "robot0_agentview_right",
@@ -507,17 +510,17 @@ class RoboCasaGym(Gym):
 
         images: dict[str, torch.Tensor] = {}
         if "pixels" in raw_obs:
-            for camera_name in camera_keys:
-                if camera_name not in raw_obs["pixels"]:
+            for cam in camera_keys:
+                if cam not in raw_obs["pixels"]:
                     continue
-                img = raw_obs["pixels"][camera_name]
+                img = raw_obs["pixels"][cam]
                 if not isinstance(img, torch.Tensor):
                     img = torch.from_numpy(img)
                 if img.ndim == 3 and img.shape[-1] == 3:  # noqa: PLR2004
                     img = img.permute(2, 0, 1)  # HWC → CHW
                 if img.dtype == torch.uint8:
                     img = img.float() / 255.0
-                images[camera_name] = img.unsqueeze(0)  # (C, H, W) → (1, C, H, W)
+                images[cam] = img.unsqueeze(0)  # (C, H, W) → (1, C, H, W)
 
         obs_dict: dict[str, Any] = {"images": images or None}
 
