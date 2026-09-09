@@ -17,6 +17,7 @@ from physicalai.inference.manifest import ComponentSpec
 from physicalai.data.observation import (
     ACTION,
     IMAGES,
+    STATE,
     TASK,
     Feature,
     FeatureType,
@@ -26,7 +27,7 @@ from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.utils.features import get_feature_by_type
 
-from .processors.joint_transform import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
+from .constants import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
 
 if TYPE_CHECKING:
     from .config import MolmoAct2Config
@@ -216,10 +217,6 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
             int(config.image_processor_size["height"]),
             int(config.image_processor_size["width"]),
         )
-        joint_params = {
-            "joint_signs": list(SO101_JOINT_SIGNS),
-            "joint_offsets": list(SO101_JOINT_OFFSETS),
-        }
         preprocessors = [
             ComponentSpec(
                 type="molmoact2",
@@ -236,8 +233,6 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
                 control_mode=config.control_mode,
                 add_setup_tokens=config.add_setup_tokens,
                 add_control_tokens=config.add_control_tokens,
-                adapt_to_so101=config.adapt_to_so101,
-                **joint_params,
             ),
             ComponentSpec(
                 type="ov_tokenizer",
@@ -270,16 +265,33 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
                 image_token_ids=image_token_ids,
             ),
         ]
+        if config.adapt_to_so101:
+            preprocessors.insert(
+                0,
+                ComponentSpec(
+                    type="joint_frame_preprocess",
+                    feature=STATE,
+                    signs=list(SO101_JOINT_SIGNS),
+                    offsets=list(SO101_JOINT_OFFSETS),
+                ),
+            )
         torch_postprocessors = []
         openvino_postprocessors = [
             ComponentSpec(
                 type="molmoact2_postprocess",
                 action_stats=_normalization_stats(action_feature),
                 normalization_mode=config.normalization_mode,
-                adapt_to_so101=config.adapt_to_so101,
-                **joint_params,
             ),
         ]
+        if config.adapt_to_so101:
+            openvino_postprocessors.append(
+                ComponentSpec(
+                    type="joint_frame_postprocess",
+                    feature=ACTION,
+                    signs=list(SO101_JOINT_SIGNS),
+                    offsets=list(SO101_JOINT_OFFSETS),
+                ),
+            )
         if self.chunk_size != self.n_action_steps:
             chunk_trimmer = ComponentSpec(
                 type="action_chunk_trimmer",

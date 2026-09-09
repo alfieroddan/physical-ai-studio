@@ -10,7 +10,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from physicalai.data.observation import Feature, FeatureType
+from physicalai.policies.molmoact2.constants import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
 from physicalai.policies.utils.features import get_feature_by_type
+from physicalai.transforms import JointFrameTransform
 
 from .image import MolmoAct2ImageProcessor
 from .inputs import MolmoAct2InputLayout
@@ -47,6 +49,12 @@ def _check_missing_action_feature(action_feature: Feature | None) -> None:
     if action_feature is None or action_feature.shape is None:
         msg = "MolmoAct2 requires an action output feature with a resolved shape."
         raise ValueError(msg)
+
+
+def _make_joint_transform(config: MolmoAct2Config) -> JointFrameTransform | None:
+    if not config.adapt_to_so101:
+        return None
+    return JointFrameTransform(signs=SO101_JOINT_SIGNS, offsets=SO101_JOINT_OFFSETS)
 
 
 def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Preprocessor, MolmoAct2Postprocessor]:
@@ -163,11 +171,11 @@ def make_molmoact2_preprocessors(config: MolmoAct2Config) -> tuple[MolmoAct2Prep
             tokenizers=tokenizers,
             action_padder=action_padder,
             input_layout=input_layout,
-            adapt_to_so101=config.adapt_to_so101,
+            joint_transform=_make_joint_transform(config),
         ),
         MolmoAct2Postprocessor(
             output_features=config.output_features,
             normalization_mode=config.normalization_mode,
-            adapt_to_so101=config.adapt_to_so101,
+            joint_transform=_make_joint_transform(config),
         ),
     )

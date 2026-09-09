@@ -24,8 +24,10 @@ from physicalai.data.observation import (
 )
 from physicalai.policies.base import Policy
 from physicalai.policies.utils.features import get_feature_by_type
+from physicalai.transforms import JointFrameTransform
 
 from .config import MolmoAct2Config
+from .constants import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
 from .export import MolmoAct2ExportMixin
 from .from_hf import MolmoAct2FromHFMixin
 from .model import MolmoAct2Model
@@ -35,7 +37,6 @@ from .processors import (
     MolmoAct2Preprocessor,
     make_molmoact2_preprocessors,
 )
-from .processors.joint_transform import JointFrameTransform
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -75,7 +76,10 @@ def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureT
     if not feature.shape:
         msg = f"Cannot adapt {feature_type.value} normalization without a concrete feature shape."
         raise ValueError(msg)
-    normalization = JointFrameTransform().normalization_to_checkpoint(
+    normalization = JointFrameTransform(
+        signs=SO101_JOINT_SIGNS,
+        offsets=SO101_JOINT_OFFSETS,
+    ).normalization_to_checkpoint(
         feature.normalization_data,
         dimension=feature.shape[-1],
     )

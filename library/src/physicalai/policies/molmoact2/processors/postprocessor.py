@@ -7,13 +7,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 
 from physicalai.data.observation import ACTION, Feature, FeatureType
 from physicalai.policies.utils.features import get_feature_by_type
 
-from .joint_transform import JointFrameTransform
 from .normalization import MolmoAct2NormalizeTransform
+
+if TYPE_CHECKING:
+    from physicalai.transforms import JointFrameTransform
 
 
 class MolmoAct2Postprocessor(torch.nn.Module):
@@ -31,15 +35,14 @@ class MolmoAct2Postprocessor(torch.nn.Module):
         *,
         output_features: list[Feature],
         normalization_mode: str = "QUANTILES",
-        adapt_to_so101: bool = False,
+        joint_transform: JointFrameTransform | None = None,
     ) -> None:
         """Initialize MolmoAct2 postprocessor.
 
         Args:
             output_features: Output feature definitions.
             normalization_mode: Normalization mode for action denormalization.
-            adapt_to_so101: Map actions from the checkpoint frame back to the SO-101
-                robot frame after denormalization.
+            joint_transform: Optional calibration transform applied after denormalization.
         """
         super().__init__()
         action_feature = get_feature_by_type(output_features, FeatureType.ACTION)
@@ -50,7 +53,7 @@ class MolmoAct2Postprocessor(torch.nn.Module):
             normalization_mode=normalization_mode,
             inverse=True,
         )
-        self._joint_transform = JointFrameTransform() if adapt_to_so101 else None
+        self._joint_transform = joint_transform
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Denormalize, clamp and (optionally) map actions back to the robot frame.

@@ -15,7 +15,6 @@ from physicalai.data.constants import EXTRA, TOKENIZED_PROMPT, TOKENIZED_PROMPT_
 from physicalai.data.observation import ACTION, IMAGES, STATE, TASK
 
 from .inputs import MolmoAct2InputLayout, build_model_inputs
-from .joint_transform import JointFrameTransform
 from .preprocess_steps import (
     ActionExtractor,
     ActionPadder,
@@ -27,6 +26,8 @@ from .preprocess_steps import (
 
 if TYPE_CHECKING:
     from transformers import Qwen2Tokenizer
+
+    from physicalai.transforms import JointFrameTransform
 
     from .image import MolmoAct2ImageProcessor
     from .normalization import MolmoAct2NormalizeTransform
@@ -59,7 +60,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         tokenizers: MolmoAct2Tokenizers,
         action_padder: ActionPadder,
         input_layout: MolmoAct2InputLayout,
-        adapt_to_so101: bool = False,
+        joint_transform: JointFrameTransform | None = None,
     ) -> None:
         """Store focused preprocessing components."""
         super().__init__()
@@ -72,7 +73,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         self._tokenizers = tokenizers
         self._action_padder = action_padder
         self._input_layout = input_layout
-        self._joint_transform = JointFrameTransform() if adapt_to_so101 else None
+        self._joint_transform = joint_transform
 
     @property
     def tokenizer(self) -> Qwen2Tokenizer:

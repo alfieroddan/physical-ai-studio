@@ -16,8 +16,14 @@ from huggingface_hub import snapshot_download
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
 from physicalai.policies.utils.features import get_feature_by_type
+from physicalai.transforms import JointFrameTransform
 
 from .config import MolmoAct2Config
+from .constants import (
+    SO101_DEGREES_PER_NORMALIZED_UNIT,
+    SO101_JOINT_OFFSETS,
+    SO101_JOINT_SIGNS,
+)
 from .pretrained_utils import (
     ACTION_EXPERT_CONFIG_MAP,
     ADAPTER_CONFIG_MAP,
@@ -26,7 +32,6 @@ from .pretrained_utils import (
     VISION_CONFIG_MAP,
     copy_component,
 )
-from .processors.joint_transform import JointFrameTransform
 
 
 def _pretrained_normalization_to_so101_runtime(
@@ -39,9 +44,13 @@ def _pretrained_normalization_to_so101_runtime(
     if not feature.shape:
         msg = f"Cannot convert pretrained {feature_type.value} normalization without a concrete feature shape."
         raise ValueError(msg)
-    normalization = JointFrameTransform().pretrained_normalization_to_so101_runtime(
+    normalization = JointFrameTransform(
+        signs=SO101_JOINT_SIGNS,
+        offsets=SO101_JOINT_OFFSETS,
+    ).normalization_from_scaled_input(
         feature.normalization_data,
         dimension=feature.shape[-1],
+        scales=SO101_DEGREES_PER_NORMALIZED_UNIT,
     )
     return [
         replace(candidate, normalization_data=normalization) if candidate is feature else candidate

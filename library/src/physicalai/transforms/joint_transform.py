@@ -1,66 +1,45 @@
-# Copyright 2026 The Allen Institute for Artificial Intelligence and The HuggingFace Inc. team.
-
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""SO-100/101 joint frame transform for MolmoAct2.
-
-The released MolmoAct2-SO100_101 checkpoint was trained with the pre-#777
-LeRobot joint calibration. Newer LeRobot data uses a different convention, so
-joint observations/actions must be mapped into the checkpoint convention on the
-way in and back to the robot convention on the way out.
-
-- Robot -> checkpoint:  ``x_ckpt = sign * x_robot + offset``
-- Checkpoint -> robot:  ``x_robot = sign * (x_ckpt - offset)``
-
-``sign`` is +/-1 (so ``1 / sign == sign``). The transform touches only the
-leading joint dimensions; any trailing dimensions pass through unchanged. For
-SO-101 the defaults flip ``shoulder_lift`` and shift ``shoulder_lift`` /
-``elbow_flex`` by 90 degrees, matching the LeRobot backward-compatibility guide.
-"""
+"""Joint calibration frame transforms."""
 
 from __future__ import annotations
 
 from itertools import starmap
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import torch
 
 from physicalai.data import NormalizationParameters, NormalizationValue
 
-SO101_JOINT_SIGNS = (1.0, -1.0, 1.0, 1.0, 1.0, 1.0)
-SO101_JOINT_OFFSETS = (0.0, 90.0, 90.0, 0.0, 0.0, 0.0)
-
-# MolmoAct2's released SO-101 statistics use LeRobot degrees, while the
-# PhysicalAI SO101 driver maps these calibrated body-joint ranges to [-100, 100].
-SO101_EXPECTED_BODY_RANGE_WIDTHS = (2666.0, 2313.0, 2196.0, 2302.0, 3829.0)
-SO101_MAX_POSITION_TICKS = 4095.0
-SO101_DEGREES_PER_NORMALIZED_UNIT = tuple(
-    range_width * 360.0 / (200.0 * SO101_MAX_POSITION_TICKS) for range_width in SO101_EXPECTED_BODY_RANGE_WIDTHS
-)
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class JointFrameTransform:
-    """Map SO-101 joint values between robot and checkpoint calibration frames.
+    """Map leading joint values between robot and checkpoint calibration frames."""
 
-    Steps:
-        1. Select the leading SO-101 joint dimensions.
-        2. Move fixed signs and offsets to the input tensor device and dtype.
-        3. Apply the forward or inverse affine calibration.
-        4. Preserve any trailing non-joint dimensions unchanged.
-    """
+    def __init__(self, *, signs: Sequence[float], offsets: Sequence[float]) -> None:
+        """Store the joint signs and offsets.
 
-    def __init__(self) -> None:
-        """Store the fixed SO-101 joint signs and offsets."""
-        self.num_joints = len(SO101_JOINT_SIGNS)
-        self._signs = torch.tensor(SO101_JOINT_SIGNS, dtype=torch.float32)
-        self._offsets = torch.tensor(SO101_JOINT_OFFSETS, dtype=torch.float32)
+        Raises:
+            ValueError: If signs and offsets differ in length or a sign is not +/-1.
+        """
+        if len(signs) != len(offsets):
+            msg = f"signs ({len(signs)}) and offsets ({len(offsets)}) must match."
+            raise ValueError(msg)
+        if any(sign not in {-1.0, 1.0} for sign in signs):
+            msg = "Joint frame transform signs must be either -1 or 1."
+            raise ValueError(msg)
+        self.num_joints = len(signs)
+        self._signs = torch.tensor(signs, dtype=torch.float32)
+        self._offsets = torch.tensor(offsets, dtype=torch.float32)
 
     def to_checkpoint(self, values: torch.Tensor) -> torch.Tensor:
         """Map robot-frame joints to the checkpoint frame.
 
         Returns:
-            ``values`` with the leading joint dims mapped ``sign * x + offset``.
+            ``values`` with leading dimensions mapped to ``sign * value + offset``.
         """
         return self._apply(values, inverse=False)
 
@@ -68,7 +47,7 @@ class JointFrameTransform:
         """Map checkpoint-frame joints back to the robot frame.
 
         Returns:
-            ``values`` with the leading joint dims mapped ``sign * (x - offset)``.
+            ``values`` with leading dimensions mapped to ``sign * (value - offset)``.
         """
         return self._apply(values, inverse=True)
 
@@ -81,13 +60,8 @@ class JointFrameTransform:
 
         Returns:
             New normalization metadata aligned with ``to_checkpoint`` values.
-
-        Raises:
-            ValueError: If a statistic does not match the feature dimension.
         """
-        if normalization.mask is not None and len(normalization.mask) != dimension:
-            msg = f"Normalization mask length {len(normalization.mask)} does not match feature dimension {dimension}."
-            raise ValueError(msg)
+        self._validate_mask(normalization, dimension)
         mean = self._transform_stat(normalization.mean, dimension, include_offset=True)
         std = self._transform_stat(normalization.std, dimension, absolute_scale=True)
         minimum, maximum = self._transform_bounds(normalization.min, normalization.max, dimension)
@@ -102,36 +76,33 @@ class JointFrameTransform:
             mask=None if normalization.mask is None else list(normalization.mask),
         )
 
-    def pretrained_normalization_to_so101_runtime(
+    def normalization_from_scaled_input(
         self,
         normalization: NormalizationParameters,
         dimension: int,
+        *,
+        scales: Sequence[float],
     ) -> NormalizationParameters:
-        """Align released degree statistics with PhysicalAI-normalized SO101 input.
+        """Align normalization metadata with an input that uses different scales.
 
-        The existing joint transform maps normalized runtime values to
-        ``sign * value + offset``. The released checkpoint instead expects
-        ``sign * degrees + offset``. Rescaling its statistics into the former
-        space keeps the per-sample transform unchanged while producing the same
-        normalized model inputs and robot actions for the expected calibration.
-
-        Gripper and trailing dimensions pass through because both runtimes use
-        the same gripper units and this compatibility correction is body-only.
+        ``scales`` applies to leading configured dimensions. Remaining dimensions
+        pass through unchanged.
 
         Returns:
-            New normalization metadata aligned with ``to_checkpoint`` applied
-            to PhysicalAI-normalized SO101 values.
+            New normalization metadata aligned with ``to_checkpoint`` applied to scaled inputs.
 
         Raises:
-            ValueError: If a statistic or mask does not match the feature dimension.
+            ValueError: If a statistic or mask has the wrong dimension or a scale is zero.
         """
-        if normalization.mask is not None and len(normalization.mask) != dimension:
-            msg = f"Normalization mask length {len(normalization.mask)} does not match feature dimension {dimension}."
+        self._validate_mask(normalization, dimension)
+        active_scales = scales[: min(len(scales), self.num_joints, dimension)]
+        if any(scale == 0 for scale in active_scales):
+            msg = "Joint input scales must be non-zero."
             raise ValueError(msg)
-        mean = self._pretrained_stat_to_runtime(normalization.mean, dimension, include_offset=True)
-        std = self._pretrained_stat_to_runtime(normalization.std, dimension, absolute_scale=True)
-        minimum, maximum = self._pretrained_bounds_to_runtime(normalization.min, normalization.max, dimension)
-        q01, q99 = self._pretrained_bounds_to_runtime(normalization.q01, normalization.q99, dimension)
+        mean = self._scaled_stat(normalization.mean, dimension, active_scales, include_offset=True)
+        std = self._scaled_stat(normalization.std, dimension, active_scales, absolute_scale=True)
+        minimum, maximum = self._scaled_bounds(normalization.min, normalization.max, dimension, active_scales)
+        q01, q99 = self._scaled_bounds(normalization.q01, normalization.q99, dimension, active_scales)
         return NormalizationParameters(
             mean=mean,
             std=std,
@@ -142,14 +113,21 @@ class JointFrameTransform:
             mask=None if normalization.mask is None else list(normalization.mask),
         )
 
-    def _pretrained_bounds_to_runtime(
+    @staticmethod
+    def _validate_mask(normalization: NormalizationParameters, dimension: int) -> None:
+        if normalization.mask is not None and len(normalization.mask) != dimension:
+            msg = f"Normalization mask length {len(normalization.mask)} does not match feature dimension {dimension}."
+            raise ValueError(msg)
+
+    def _scaled_bounds(
         self,
         lower: NormalizationValue,
         upper: NormalizationValue,
         dimension: int,
+        scales: Sequence[float],
     ) -> tuple[list[float] | None, list[float] | None]:
-        transformed_lower = self._pretrained_stat_to_runtime(lower, dimension, include_offset=True)
-        transformed_upper = self._pretrained_stat_to_runtime(upper, dimension, include_offset=True)
+        transformed_lower = self._scaled_stat(lower, dimension, scales, include_offset=True)
+        transformed_upper = self._scaled_stat(upper, dimension, scales, include_offset=True)
         if transformed_lower is None or transformed_upper is None:
             return transformed_lower, transformed_upper
         return (
@@ -157,10 +135,11 @@ class JointFrameTransform:
             list(starmap(max, zip(transformed_lower, transformed_upper, strict=True))),
         )
 
-    def _pretrained_stat_to_runtime(
+    def _scaled_stat(
         self,
         statistic: NormalizationValue,
         dimension: int,
+        scales: Sequence[float],
         *,
         include_offset: bool = False,
         absolute_scale: bool = False,
@@ -170,14 +149,14 @@ class JointFrameTransform:
             return None
 
         output = list(values)
-        for index, degree_scale in enumerate(SO101_DEGREES_PER_NORMALIZED_UNIT[:dimension]):
+        for index, input_scale in enumerate(scales[:dimension]):
             if absolute_scale:
-                output[index] = values[index] / abs(degree_scale)
+                output[index] = values[index] / abs(input_scale)
             elif include_offset:
                 offset = float(self._offsets[index])
-                output[index] = offset + (values[index] - offset) / degree_scale
+                output[index] = offset + (values[index] - offset) / input_scale
             else:
-                output[index] = values[index] / degree_scale
+                output[index] = values[index] / input_scale
         return output
 
     def _transform_bounds(
@@ -222,10 +201,7 @@ class JointFrameTransform:
         return output
 
     @staticmethod
-    def _stat_values(
-        statistic: NormalizationValue,
-        dimension: int,
-    ) -> list[float] | None:
+    def _stat_values(statistic: NormalizationValue, dimension: int) -> list[float] | None:
         if statistic is None:
             return None
         if isinstance(statistic, int | float):
@@ -241,16 +217,11 @@ class JointFrameTransform:
         return values
 
     def _apply(self, values: torch.Tensor, *, inverse: bool) -> torch.Tensor:
-        """Apply the (inverse) affine joint transform to the leading joint dims.
-
-        Returns:
-            A new tensor with the leading joint dimensions transformed.
-        """
         num_joints = min(self.num_joints, values.shape[-1])
         signs = self._signs[:num_joints].to(device=values.device, dtype=values.dtype)
         offsets = self._offsets[:num_joints].to(device=values.device, dtype=values.dtype)
 
-        out = values.clone()
+        output = values.clone()
         joints = values[..., :num_joints]
-        out[..., :num_joints] = signs * (joints - offsets) if inverse else signs * joints + offsets
-        return out
+        output[..., :num_joints] = signs * (joints - offsets) if inverse else signs * joints + offsets
+        return output

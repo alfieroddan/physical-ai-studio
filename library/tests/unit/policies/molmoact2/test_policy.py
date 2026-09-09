@@ -16,7 +16,11 @@ from physicalai.data.dataset import Dataset
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
-from physicalai.policies.molmoact2.processors.joint_transform import SO101_DEGREES_PER_NORMALIZED_UNIT
+from physicalai.policies.molmoact2.constants import (
+    SO101_DEGREES_PER_NORMALIZED_UNIT,
+    SO101_JOINT_OFFSETS,
+    SO101_JOINT_SIGNS,
+)
 
 
 def test_registration_and_lazy_initialization() -> None:
@@ -1051,11 +1055,22 @@ def test_openvino_export_preserves_resolved_so101_mode_and_statistics(
     export_args = policy.extra_export_args[ExportBackend.OPENVINO]
     preprocessor = next(spec for spec in export_args.preprocessors_specs if spec.type == "molmoact2")
     postprocessor = next(spec for spec in export_args.postprocessors_specs if spec.type == "molmoact2_postprocess")
+    preprocessor_types = [spec.type for spec in export_args.preprocessors_specs]
+    postprocessor_types = [spec.type for spec in export_args.postprocessors_specs]
     expected_q01 = [-2.0, 87.0, 86.0, -5.0] if adapt_to_so101 else raw_stats.q01
     expected_q99 = [2.0, 93.0, 94.0, 5.0] if adapt_to_so101 else raw_stats.q99
 
-    assert preprocessor.adapt_to_so101 is adapt_to_so101
-    assert postprocessor.adapt_to_so101 is adapt_to_so101
+    assert (preprocessor_types[0] == "joint_frame_preprocess") is adapt_to_so101
+    assert (postprocessor_types[:2] == ["molmoact2_postprocess", "joint_frame_postprocess"]) is adapt_to_so101
+    if adapt_to_so101:
+        joint_preprocessor = export_args.preprocessors_specs[0]
+        joint_postprocessor = export_args.postprocessors_specs[1]
+        assert joint_preprocessor.feature == "state"
+        assert joint_postprocessor.feature == "action"
+        assert joint_preprocessor.signs == list(SO101_JOINT_SIGNS)
+        assert joint_postprocessor.signs == list(SO101_JOINT_SIGNS)
+        assert joint_preprocessor.offsets == list(SO101_JOINT_OFFSETS)
+        assert joint_postprocessor.offsets == list(SO101_JOINT_OFFSETS)
     assert preprocessor.state_stats["q01"] == expected_q01
     assert preprocessor.state_stats["q99"] == expected_q99
     assert postprocessor.action_stats["q01"] == expected_q01
@@ -1083,8 +1098,11 @@ def test_openvino_export_uses_corrected_pretrained_so101_statistics(
     assert state_stats is not None
     assert action_stats is not None
 
-    assert preprocessor.adapt_to_so101 is True
-    assert postprocessor.adapt_to_so101 is True
+    assert export_args.preprocessors_specs[0].type == "joint_frame_preprocess"
+    assert export_args.postprocessors_specs[:2] == [
+        postprocessor,
+        next(spec for spec in export_args.postprocessors_specs if spec.type == "joint_frame_postprocess"),
+    ]
     assert preprocessor.state_stats == {
         "q01": state_stats.q01,
         "q99": state_stats.q99,
