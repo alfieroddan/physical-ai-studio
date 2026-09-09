@@ -23,8 +23,8 @@ from physicalai.data.observation import (
     Observation,
 )
 from physicalai.policies.base import Policy
+from physicalai.policies.utils import JointFrameTransform
 from physicalai.policies.utils.features import get_feature_by_type
-from physicalai.transforms import JointFrameTransform
 
 from .config import MolmoAct2Config
 from .constants import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS

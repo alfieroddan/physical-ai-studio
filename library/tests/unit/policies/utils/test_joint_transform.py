@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from physicalai.transforms import JointFrameTransform
+from physicalai.policies.utils import JointFrameTransform
 
 
 def test_joint_transform_round_trip_uses_supplied_frame() -> None:

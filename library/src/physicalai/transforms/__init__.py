@@ -11,7 +11,6 @@ from physicalai.transforms.image_transforms import (
     RandomChoice,
     RandomSharpness,
 )
-from physicalai.transforms.joint_transform import JointFrameTransform
 from physicalai.transforms.onnx_transforms import (
     CenterCrop,
     center_crop_image,
@@ -20,7 +19,6 @@ from physicalai.transforms.onnx_transforms import (
 
 __all__ = [
     "CenterCrop",
-    "JointFrameTransform",
     "RandomChoice",
     "RandomSharpness",
     "center_crop_image",

@@ -35,7 +35,7 @@ from physicalai.policies.molmoact2.processors.preprocess_steps import (
     RobotPromptEncoder,
     StateTaskImageExtractor,
 )
-from physicalai.transforms import JointFrameTransform
+from physicalai.policies.utils import JointFrameTransform
 
 
 def _so101_joint_transform() -> JointFrameTransform:

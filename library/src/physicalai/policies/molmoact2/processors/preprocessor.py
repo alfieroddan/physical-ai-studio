@@ -27,7 +27,7 @@ from .preprocess_steps import (
 if TYPE_CHECKING:
     from transformers import Qwen2Tokenizer
 
-    from physicalai.transforms import JointFrameTransform
+    from physicalai.policies.utils import JointFrameTransform
 
     from .image import MolmoAct2ImageProcessor
     from .normalization import MolmoAct2NormalizeTransform

@@ -5,7 +5,7 @@
 
 Example:
     >>> import torch
-    >>> from physicalai.transforms import JointFrameTransform
+    >>> from physicalai.policies.utils import JointFrameTransform
     >>> transform = JointFrameTransform(signs=[1.0, -1.0], offsets=[10.0, 20.0])
     >>> source_joints = torch.tensor([[2.0, 3.0, 4.0]])
     >>> transformed_joints = transform.forward(source_joints)

@@ -15,8 +15,8 @@ from typing import Any, Literal
 from huggingface_hub import snapshot_download
 
 from physicalai.data.observation import Feature, FeatureType, NormalizationParameters
+from physicalai.policies.utils import JointFrameTransform
 from physicalai.policies.utils.features import get_feature_by_type
-from physicalai.transforms import JointFrameTransform
 
 from .config import MolmoAct2Config
 from .constants import (

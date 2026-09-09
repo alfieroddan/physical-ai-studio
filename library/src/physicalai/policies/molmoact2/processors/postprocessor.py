@@ -17,7 +17,7 @@ from physicalai.policies.utils.features import get_feature_by_type
 from .normalization import MolmoAct2NormalizeTransform
 
 if TYPE_CHECKING:
-    from physicalai.transforms import JointFrameTransform
+    from physicalai.policies.utils import JointFrameTransform
 
 
 class MolmoAct2Postprocessor(torch.nn.Module):
