@@ -26,7 +26,7 @@ from typing import cast
 
 import torch
 
-from physicalai.data import NormalizationParameters
+from physicalai.data import NormalizationParameters, NormalizationValue
 
 SO101_JOINT_SIGNS = (1.0, -1.0, 1.0, 1.0, 1.0, 1.0)
 SO101_JOINT_OFFSETS = (0.0, 90.0, 90.0, 0.0, 0.0, 0.0)
@@ -144,8 +144,8 @@ class JointFrameTransform:
 
     def _pretrained_bounds_to_runtime(
         self,
-        lower: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
-        upper: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        lower: NormalizationValue,
+        upper: NormalizationValue,
         dimension: int,
     ) -> tuple[list[float] | None, list[float] | None]:
         transformed_lower = self._pretrained_stat_to_runtime(lower, dimension, include_offset=True)
@@ -159,7 +159,7 @@ class JointFrameTransform:
 
     def _pretrained_stat_to_runtime(
         self,
-        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        statistic: NormalizationValue,
         dimension: int,
         *,
         include_offset: bool = False,
@@ -182,8 +182,8 @@ class JointFrameTransform:
 
     def _transform_bounds(
         self,
-        lower: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
-        upper: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        lower: NormalizationValue,
+        upper: NormalizationValue,
         dimension: int,
     ) -> tuple[list[float] | None, list[float] | None]:
         if lower is None or upper is None:
@@ -203,7 +203,7 @@ class JointFrameTransform:
 
     def _transform_stat(
         self,
-        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        statistic: NormalizationValue,
         dimension: int,
         *,
         include_offset: bool = False,
@@ -223,7 +223,7 @@ class JointFrameTransform:
 
     @staticmethod
     def _stat_values(
-        statistic: list[float] | list[list[float]] | list[list[list[float]]] | float | None,
+        statistic: NormalizationValue,
         dimension: int,
     ) -> list[float] | None:
         if statistic is None:

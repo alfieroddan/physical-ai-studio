@@ -21,7 +21,16 @@ from physicalai.inference.manifest import ComponentSpec
 from torch import Tensor
 
 from physicalai.data.dataset import Dataset
-from physicalai.data.observation import ACTION, IMAGES, TASK, Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.observation import (
+    ACTION,
+    IMAGES,
+    TASK,
+    Feature,
+    FeatureType,
+    NormalizationParameters,
+    NormalizationValue,
+    Observation,
+)
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import ExportParameters, OpenVINOExportParameters, TorchExportParameters
 from physicalai.policies.base import Policy
@@ -55,14 +64,11 @@ logger = logging.getLogger(__name__)
 
 def _normalization_stats(
     feature: Feature | None,
-) -> dict[str, float | list[float] | list[list[float]] | list[list[list[float]]] | list[bool] | None]:
+) -> dict[str, NormalizationValue | list[bool]]:
     if feature is None or feature.normalization_data is None:
         return {}
     normalization = feature.normalization_data
-    stats: dict[
-        str,
-        float | list[float] | list[list[float]] | list[list[list[float]]] | list[bool] | None,
-    ] = {
+    stats: dict[str, NormalizationValue | list[bool]] = {
         name: value
         for name in ("mean", "std", "min", "max", "q01", "q99")
         if (value := getattr(normalization, name)) is not None
