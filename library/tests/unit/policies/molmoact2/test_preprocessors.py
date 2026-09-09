@@ -100,7 +100,7 @@ def test_joint_transform_maps_normalization_to_checkpoint_frame() -> None:
         mask=[True, True, True, True, True, True, False],
     )
 
-    transformed = _so101_joint_transform().normalization_to_checkpoint(normalization, dimension=7)
+    transformed = _so101_joint_transform().forward_normalization(normalization, dimension=7)
 
     assert transformed.mean == [1.0, 130.0, 140.0, 4.0, 5.0, 6.0, 7.0]
     assert transformed.std == [2.0] * 7
@@ -135,7 +135,7 @@ def test_joint_transform_aligns_pretrained_stats_with_normalized_so101_runtime()
         mask=[True, True, True, True, True, True],
     )
 
-    transformed = _so101_joint_transform().normalization_from_scaled_input(
+    transformed = _so101_joint_transform().forward_normalization_from_scaled_input(
         normalization,
         dimension=6,
         scales=SO101_DEGREES_PER_NORMALIZED_UNIT,
@@ -158,7 +158,7 @@ def test_corrected_pretrained_stats_match_explicit_degree_conversion() -> None:
         q01=[-42.0, 44.0, 38.0, 6.0, -63.0, 1.0],
         q99=[48.0, 185.0, 173.0, 92.0, 43.0, 44.0],
     )
-    corrected_stats = _so101_joint_transform().normalization_from_scaled_input(
+    corrected_stats = _so101_joint_transform().forward_normalization_from_scaled_input(
         checkpoint_stats,
         dimension=6,
         scales=SO101_DEGREES_PER_NORMALIZED_UNIT,
@@ -172,7 +172,7 @@ def test_corrected_pretrained_stats_match_explicit_degree_conversion() -> None:
     corrected_feature = replace(checkpoint_feature, normalization_data=corrected_stats)
     robot_state = torch.tensor([[-50.0, 25.0, -30.0, 10.0, 15.0, 60.0]])
     checkpoint_state = signs * degree_scales * robot_state + offsets
-    adapted_state = _so101_joint_transform().to_checkpoint(robot_state)
+    adapted_state = _so101_joint_transform().forward(robot_state)
     reference_normalizer = MolmoAct2NormalizeTransform(input_features=[checkpoint_feature], output_features=[])
     corrected_normalizer = MolmoAct2NormalizeTransform(input_features=[corrected_feature], output_features=[])
 
@@ -195,9 +195,9 @@ def test_corrected_pretrained_stats_match_explicit_degree_conversion() -> None:
         inverse=True,
     )
     checkpoint_action = reference_denormalizer({ACTION: normalized_action})[ACTION]
-    expected_robot_action = _so101_joint_transform().to_robot(checkpoint_action) / degree_scales
+    expected_robot_action = _so101_joint_transform().inverse(checkpoint_action) / degree_scales
     corrected_action = corrected_denormalizer({ACTION: normalized_action})[ACTION]
-    actual_robot_action = _so101_joint_transform().to_robot(corrected_action)
+    actual_robot_action = _so101_joint_transform().inverse(corrected_action)
 
     torch.testing.assert_close(actual_robot_action, expected_robot_action)
 
@@ -206,21 +206,21 @@ def test_joint_transform_rejects_mismatched_statistic_length() -> None:
     normalization = NormalizationParameters(q01=[-1.0], q99=[1.0])
 
     with pytest.raises(ValueError, match="does not match feature dimension"):
-        _so101_joint_transform().normalization_to_checkpoint(normalization, dimension=6)
+        _so101_joint_transform().forward_normalization(normalization, dimension=6)
 
 
 def test_joint_transform_rejects_nested_statistics() -> None:
     normalization = NormalizationParameters(q01=[[[-1.0]]], q99=[[[1.0]]])
 
     with pytest.raises(ValueError, match="scalar or one-dimensional"):
-        _so101_joint_transform().normalization_to_checkpoint(normalization, dimension=1)
+        _so101_joint_transform().forward_normalization(normalization, dimension=1)
 
 
 def test_joint_transform_rejects_mismatched_mask_length() -> None:
     normalization = NormalizationParameters(q01=-1.0, q99=1.0, mask=[True])
 
     with pytest.raises(ValueError, match="mask length"):
-        _so101_joint_transform().normalization_to_checkpoint(normalization, dimension=6)
+        _so101_joint_transform().forward_normalization(normalization, dimension=6)
 
 
 def test_extractor_accepts_flattened_observations() -> None:

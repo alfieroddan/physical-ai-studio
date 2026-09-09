@@ -1,7 +1,19 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Joint calibration frame transforms."""
+"""Joint calibration frame transforms.
+
+Example:
+    >>> import torch
+    >>> from physicalai.transforms import JointFrameTransform
+    >>> transform = JointFrameTransform(signs=[1.0, -1.0], offsets=[10.0, 20.0])
+    >>> source_joints = torch.tensor([[2.0, 3.0, 4.0]])
+    >>> transformed_joints = transform.forward(source_joints)
+    >>> transformed_joints
+    tensor([[12., 17.,  4.]])
+    >>> transform.inverse(transformed_joints)
+    tensor([[2., 3., 4.]])
+"""
 
 from __future__ import annotations
 
@@ -17,7 +29,7 @@ if TYPE_CHECKING:
 
 
 class JointFrameTransform:
-    """Map leading joint values between robot and checkpoint calibration frames."""
+    """Apply an invertible affine transform to leading joint values."""
 
     def __init__(self, *, signs: Sequence[float], offsets: Sequence[float]) -> None:
         """Store the joint signs and offsets.
@@ -35,31 +47,31 @@ class JointFrameTransform:
         self._signs = torch.tensor(signs, dtype=torch.float32)
         self._offsets = torch.tensor(offsets, dtype=torch.float32)
 
-    def to_checkpoint(self, values: torch.Tensor) -> torch.Tensor:
-        """Map robot-frame joints to the checkpoint frame.
+    def forward(self, values: torch.Tensor) -> torch.Tensor:
+        """Apply ``sign * value + offset`` to leading joint values.
 
         Returns:
-            ``values`` with leading dimensions mapped to ``sign * value + offset``.
+            A transformed copy of ``values``.
         """
         return self._apply(values, inverse=False)
 
-    def to_robot(self, values: torch.Tensor) -> torch.Tensor:
-        """Map checkpoint-frame joints back to the robot frame.
+    def inverse(self, values: torch.Tensor) -> torch.Tensor:
+        """Apply ``sign * (value - offset)`` to leading joint values.
 
         Returns:
-            ``values`` with leading dimensions mapped to ``sign * (value - offset)``.
+            An inverse-transformed copy of ``values``.
         """
         return self._apply(values, inverse=True)
 
-    def normalization_to_checkpoint(
+    def forward_normalization(
         self,
         normalization: NormalizationParameters,
         dimension: int,
     ) -> NormalizationParameters:
-        """Map robot-frame normalization metadata to the checkpoint frame.
+        """Apply the forward affine transform to normalization metadata.
 
         Returns:
-            New normalization metadata aligned with ``to_checkpoint`` values.
+            New normalization metadata aligned with ``forward`` values.
         """
         self._validate_mask(normalization, dimension)
         mean = self._transform_stat(normalization.mean, dimension, include_offset=True)
@@ -76,7 +88,7 @@ class JointFrameTransform:
             mask=None if normalization.mask is None else list(normalization.mask),
         )
 
-    def normalization_from_scaled_input(
+    def forward_normalization_from_scaled_input(
         self,
         normalization: NormalizationParameters,
         dimension: int,
@@ -89,7 +101,7 @@ class JointFrameTransform:
         pass through unchanged.
 
         Returns:
-            New normalization metadata aligned with ``to_checkpoint`` applied to scaled inputs.
+            New normalization metadata aligned with ``forward`` applied to scaled inputs.
 
         Raises:
             ValueError: If a statistic or mask has the wrong dimension or a scale is zero.

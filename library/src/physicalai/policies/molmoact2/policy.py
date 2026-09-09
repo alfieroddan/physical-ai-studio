@@ -79,7 +79,7 @@ def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureT
     normalization = JointFrameTransform(
         signs=SO101_JOINT_SIGNS,
         offsets=SO101_JOINT_OFFSETS,
-    ).normalization_to_checkpoint(
+    ).forward_normalization(
         feature.normalization_data,
         dimension=feature.shape[-1],
     )

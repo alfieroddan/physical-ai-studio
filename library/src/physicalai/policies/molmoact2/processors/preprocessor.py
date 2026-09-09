@@ -162,7 +162,7 @@ class MolmoAct2Preprocessor(torch.nn.Module):
         for key in (STATE, ACTION):
             value = batch.get(key)
             if torch.is_tensor(value):
-                batch[key] = self._joint_transform.to_checkpoint(value)
+                batch[key] = self._joint_transform.forward(value)
         return batch
 
     @staticmethod

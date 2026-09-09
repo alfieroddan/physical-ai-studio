@@ -47,7 +47,7 @@ def _pretrained_normalization_to_so101_runtime(
     normalization = JointFrameTransform(
         signs=SO101_JOINT_SIGNS,
         offsets=SO101_JOINT_OFFSETS,
-    ).normalization_from_scaled_input(
+    ).forward_normalization_from_scaled_input(
         feature.normalization_data,
         dimension=feature.shape[-1],
         scales=SO101_DEGREES_PER_NORMALIZED_UNIT,

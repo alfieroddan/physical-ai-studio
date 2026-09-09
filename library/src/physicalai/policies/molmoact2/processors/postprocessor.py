@@ -76,6 +76,6 @@ class MolmoAct2Postprocessor(torch.nn.Module):
         action = action.clamp(-1.0, 1.0)
         action = self._denormalizer.to(action.device)({self.action_name: action})[self.action_name]
         if self._joint_transform is not None:
-            action = self._joint_transform.to_robot(action)
+            action = self._joint_transform.inverse(action)
         batch[ACTION] = action
         return batch
