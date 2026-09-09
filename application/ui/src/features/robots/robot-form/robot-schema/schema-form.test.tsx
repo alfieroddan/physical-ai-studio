@@ -699,6 +699,288 @@ describe('SchemaForm', () => {
         expect(screen.getByRole('switch', { name: 'Torque Enabled' })).toBeChecked();
     });
 
+    it('renders a calibration upload control from x-physicalai-ui calibration items', () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            $defs: {
+                SO101JointCalibration: {
+                    type: 'object',
+                    properties: {
+                        id: { type: 'integer' },
+                        drive_mode: { type: 'integer' },
+                        homing_offset: { type: 'integer' },
+                        range_min: { type: 'integer' },
+                        range_max: { type: 'integer' },
+                    },
+                    required: ['id', 'drive_mode', 'homing_offset', 'range_min', 'range_max'],
+                },
+            },
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: { $ref: '#/$defs/SO101JointCalibration' },
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+
+        render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+
+        expect(screen.getByRole('button', { name: 'Upload calibration JSON' })).toBeVisible();
+        expect(screen.queryByRole('textbox', { name: 'Calibration' })).not.toBeInTheDocument();
+    });
+
+    it('imports uploaded calibration JSON into the payload', async () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            $defs: {
+                SO101JointCalibration: {
+                    type: 'object',
+                    properties: {
+                        id: { type: 'integer' },
+                        drive_mode: { type: 'integer' },
+                        homing_offset: { type: 'integer' },
+                        range_min: { type: 'integer' },
+                        range_max: { type: 'integer' },
+                    },
+                    required: ['id', 'drive_mode', 'homing_offset', 'range_min', 'range_max'],
+                },
+            },
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: { $ref: '#/$defs/SO101JointCalibration' },
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+        const calibrationPayload = {
+            shoulder_pan: { id: 1, drive_mode: 0, homing_offset: 10, range_min: -100, range_max: 100 },
+        };
+        const user = userEvent.setup();
+        const { container } = render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+                <Payload />
+            </RobotFormProvider>
+        );
+        const fileInput = container.querySelector('input[type="file"]');
+
+        expect(fileInput).not.toBeNull();
+        if (fileInput === null) {
+            throw new Error('Expected calibration file input to be rendered.');
+        }
+        await user.upload(
+            fileInput as HTMLInputElement,
+            new File([JSON.stringify(calibrationPayload)], 'calibration.json', { type: 'application/json' })
+        );
+
+        expect(await screen.findByRole('status')).toHaveTextContent(
+            JSON.stringify({ calibration: calibrationPayload })
+        );
+        expect(screen.getByRole('table', { name: 'Calibration preview' })).toBeVisible();
+        expect(screen.getByRole('cell', { name: 'shoulder_pan' })).toBeVisible();
+    });
+
+    it('shows an error when uploaded calibration JSON is invalid', async () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: true,
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+        const user = userEvent.setup();
+        const { container } = render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+        const fileInput = container.querySelector('input[type="file"]');
+
+        expect(fileInput).not.toBeNull();
+        if (fileInput === null) {
+            throw new Error('Expected calibration file input to be rendered.');
+        }
+        await user.upload(
+            fileInput as HTMLInputElement,
+            new File(['{"bad_json":'], 'broken.json', { type: 'application/json' })
+        );
+
+        expect(await screen.findByText('Could not parse JSON. Upload a valid calibration .json file.')).toBeVisible();
+    });
+
+    it('hides advanced calibration items until advanced options are shown', () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: true,
+                    'x-physicalai-ui': { advanced_configuration: true },
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+
+        render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+
+        expect(screen.queryByRole('button', { name: 'Upload calibration JSON' })).not.toBeInTheDocument();
+    });
+
+    it('shows optional marker for non-required calibration items', () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: true,
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+
+        render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+
+        expect(screen.getByText('Calibration (optional)')).toBeVisible();
+    });
+
+    it('sorts calibration preview rows by ascending ID', async () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                calibration: {
+                    type: 'object',
+                    title: 'Calibration',
+                    additionalProperties: true,
+                },
+            },
+            'x-physicalai-ui': [{ kind: 'calibration', name: 'calibration' }],
+        };
+        const payload = {
+            wrist_flex: { id: 5, drive_mode: 0, homing_offset: 11, range_min: -80, range_max: 80 },
+            shoulder_pan: { id: 1, drive_mode: 0, homing_offset: 10, range_min: -100, range_max: 100 },
+            elbow_flex: { id: 3, drive_mode: 0, homing_offset: 12, range_min: -90, range_max: 90 },
+        };
+        const user = userEvent.setup();
+        const { container } = render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+        const fileInput = container.querySelector('input[type="file"]');
+
+        expect(fileInput).not.toBeNull();
+        if (fileInput === null) {
+            throw new Error('Expected calibration file input to be rendered.');
+        }
+        await user.upload(
+            fileInput as HTMLInputElement,
+            new File([JSON.stringify(payload)], 'calibration.json', { type: 'application/json' })
+        );
+
+        const rows = screen.getAllByRole('row');
+        expect(rows[1]).toHaveTextContent('shoulder_pan');
+        expect(rows[2]).toHaveTextContent('elbow_flex');
+        expect(rows[3]).toHaveTextContent('wrist_flex');
+    });
+
+    it('renders contextual help from field-level info metadata', async () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                connection_string: {
+                    type: 'string',
+                    title: 'Connection String',
+                    'x-physicalai-ui': {
+                        info: {
+                            title: 'Connection setup',
+                            description: 'Use the full serial device path for manual setup.',
+                            link_url: 'https://example.com/serial-setup',
+                            variant: 'help',
+                        },
+                    },
+                },
+            },
+        };
+        const user = userEvent.setup();
+
+        render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+
+        await user.click(screen.getByRole('button', { name: /Help$/ }));
+
+        expect(await screen.findByRole('heading', { name: 'Connection setup' })).toBeVisible();
+        expect(screen.getByText('Use the full serial device path for manual setup.')).toBeVisible();
+        expect(screen.getByRole('link', { name: 'Learn more' })).toHaveAttribute(
+            'href',
+            'https://example.com/serial-setup'
+        );
+    });
+
+    it('prefers item-level contextual help over field-level info metadata', async () => {
+        const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
+            type: 'object',
+            properties: {
+                connection_string: {
+                    type: 'string',
+                    title: 'Connection String',
+                    'x-physicalai-ui': {
+                        info: {
+                            description: 'Field-level help text',
+                        },
+                    },
+                },
+            },
+            'x-physicalai-ui': [
+                {
+                    kind: 'field',
+                    name: 'connection_string',
+                    info: {
+                        title: 'Connection details',
+                        description: 'Item-level help text',
+                    },
+                },
+            ],
+        };
+        const user = userEvent.setup();
+
+        render(
+            <RobotFormProvider>
+                <SchemaForm schema={schema} />
+            </RobotFormProvider>
+        );
+
+        await user.click(screen.getByRole('button', { name: /Information$/ }));
+
+        expect(await screen.findByRole('heading', { name: 'Connection details' })).toBeVisible();
+        expect(screen.getByText('Item-level help text')).toBeVisible();
+        expect(screen.queryByText('Field-level help text')).not.toBeInTheDocument();
+    });
+
     it('keeps advanced configuration fields hidden when the toggle is hidden', () => {
         const schema: Parameters<typeof SchemaForm>[0]['schema'] = {
             type: 'object',

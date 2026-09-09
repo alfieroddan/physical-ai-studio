@@ -4,6 +4,7 @@ import { Flex, Heading, Switch, Text, View } from '@geti-ui/ui';
 
 import { SchemaRobotType } from '../../robot-types';
 import { useRobotForm } from '../provider';
+import { CalibrationField } from './components/calibration-field';
 import { ConnectionField } from './components/connection-field';
 import { InfoField } from './components/info-field';
 import { IpAddressField } from './components/ip-address-field';
@@ -12,13 +13,14 @@ import {
     asRecord,
     EMPTY_DEFINITIONS,
     EMPTY_PROPERTIES,
+    fieldContextualInfo,
     fieldLabel,
     isRequiredField,
     resolveReference,
     schemaDefaults,
     updateObjectField,
 } from './schema-utils';
-import { FieldSchema, JsonSchema, ModelUiOptions, RobotUiItem } from './types';
+import { ContextualInfo, FieldSchema, JsonSchema, ModelUiOptions, RobotUiItem } from './types';
 
 const EMPTY_ITEMS: RobotUiItem[] = [];
 
@@ -39,6 +41,9 @@ const fieldNamesOwnedByItems = (items: RobotUiItem[]): Set<string> =>
             if (item.kind === 'ip_address') {
                 return [item.name];
             }
+            if (item.kind === 'calibration') {
+                return [item.name];
+            }
             if (item.kind === 'section') {
                 return [...fieldNamesOwnedByItems(item.items)];
             }
@@ -48,6 +53,7 @@ const fieldNamesOwnedByItems = (items: RobotUiItem[]): Set<string> =>
 
 type OnChange = (name: string, value: unknown) => void;
 type IsFieldVisible = (name: string, field: FieldSchema, required: Set<string>) => boolean;
+type IsFieldEnabled = (name: string, field: FieldSchema, required: Set<string>) => boolean;
 type IsRenderable = (item: RobotUiItem, properties: Record<string, FieldSchema>, required: Set<string>) => boolean;
 
 type SchemaFormItemProps = SchemaFormItemsProps & {
@@ -63,6 +69,7 @@ type SchemaFormItemsProps = {
     robotType: SchemaRobotType;
     definitions: Record<string, FieldSchema>;
     isFieldVisible: IsFieldVisible;
+    isFieldEnabled: IsFieldEnabled;
     isRenderable: IsRenderable;
     renderUnownedFields: boolean;
 };
@@ -70,12 +77,16 @@ type SchemaFormItemsProps = {
 type SchemaFormFieldProps = Omit<SchemaFormItemsProps, 'items' | 'renderUnownedFields'> & {
     name: string;
     field: FieldSchema;
+    info?: ContextualInfo;
 };
 
 const getResolvedField = ({ properties, definitions }: SchemaFormItemsProps, name: string) => {
     const field = properties[name];
     return field === undefined ? undefined : resolveReference(field, definitions);
 };
+
+const asFieldSchema = (value: FieldSchema | boolean | undefined): FieldSchema | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value) ? value : undefined;
 
 const SchemaFormItem = ({ item, ...props }: SchemaFormItemProps) => {
     if (item.kind === 'info') {
@@ -90,7 +101,7 @@ const SchemaFormItem = ({ item, ...props }: SchemaFormItemProps) => {
             <ConnectionField
                 robotType={props.robotType}
                 payload={props.values}
-                options={item}
+                options={{ ...item, info: item.info ?? fieldContextualInfo(field) }}
                 isRequired={isRequiredField(item.bind.connection, field, props.required)}
                 onChange={props.onChange}
             />
@@ -105,15 +116,39 @@ const SchemaFormItem = ({ item, ...props }: SchemaFormItemProps) => {
             <IpAddressField
                 robotType={props.robotType}
                 payload={props.values}
-                options={item}
+                options={{ ...item, info: item.info ?? fieldContextualInfo(field) }}
                 isRequired={isRequiredField(item.name, field, props.required)}
                 onChange={props.onChange}
             />
         );
     }
+    if (item.kind === 'calibration') {
+        const field = getResolvedField(props, item.name);
+        if (field === undefined) {
+            return null;
+        }
+        if (!props.isFieldEnabled(item.name, field, props.required)) {
+            return null;
+        }
+
+        return (
+            <CalibrationField
+                label={item.label ?? fieldLabel(item.name, field)}
+                description={item.description ?? field.description}
+                info={item.info ?? fieldContextualInfo(field)}
+                isRequired={isRequiredField(item.name, field, props.required)}
+                value={props.values[item.name]}
+                valueSchema={asFieldSchema(field.additionalProperties)}
+                definitions={props.definitions}
+                onChange={(value) => props.onChange(item.name, value)}
+            />
+        );
+    }
     if (item.kind === 'field') {
         const field = props.properties[item.name];
-        return field === undefined ? null : <SchemaFormField {...props} name={item.name} field={field} />;
+        return field === undefined ? null : (
+            <SchemaFormField {...props} name={item.name} field={field} info={item.info} />
+        );
     }
     if (!props.isRenderable(item, props.properties, props.required)) {
         return null;
@@ -192,6 +227,7 @@ const SchemaFormField = ({ name, field, ...props }: SchemaFormFieldProps) => {
         <SchemaField
             name={name}
             schema={resolvedField}
+            info={props.info ?? fieldContextualInfo(resolvedField)}
             value={props.values[name]}
             isRequired={isRequired}
             onChange={(value) => props.onChange(name, value)}
@@ -219,19 +255,28 @@ export const SchemaForm = ({ schema }: { schema: JsonSchema }) => {
 
     const isFieldVisible: IsFieldVisible = (name, field, fieldRequired) => {
         const resolvedField = resolveReference(field, definitions);
-        const fieldUi = resolvedField['x-physicalai-ui'];
-
-        const isRequired = isRequiredField(name, resolvedField, fieldRequired);
-        if (!isRequired && !isUiItems(fieldUi) && fieldUi?.advanced_configuration === true && !showAdvanced) {
+        if (!isFieldEnabled(name, resolvedField, fieldRequired)) {
             return false;
         }
 
         return resolvedField.type !== 'object' || resolvedField.properties !== undefined;
     };
 
+    const isFieldEnabled: IsFieldEnabled = (name, field, fieldRequired) => {
+        const resolvedField = resolveReference(field, definitions);
+        const fieldUi = resolvedField['x-physicalai-ui'];
+        const isRequired = isRequiredField(name, resolvedField, fieldRequired);
+
+        return isRequired || isUiItems(fieldUi) || fieldUi?.advanced_configuration !== true || showAdvanced;
+    };
+
     const isRenderable: IsRenderable = (item, itemProperties, itemRequired) => {
         if (item.kind === 'info' || item.kind === 'connection' || item.kind === 'ip_address') {
             return true;
+        }
+        if (item.kind === 'calibration') {
+            const field = itemProperties[item.name];
+            return field !== undefined && isFieldEnabled(item.name, field, itemRequired);
         }
         if (item.kind === 'field') {
             const field = itemProperties[item.name];
@@ -256,6 +301,7 @@ export const SchemaForm = ({ schema }: { schema: JsonSchema }) => {
                 robotType={activeType!}
                 definitions={definitions}
                 isFieldVisible={isFieldVisible}
+                isFieldEnabled={isFieldEnabled}
                 isRenderable={isRenderable}
                 renderUnownedFields
             />
