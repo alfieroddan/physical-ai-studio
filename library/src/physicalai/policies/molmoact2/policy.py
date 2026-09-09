@@ -119,16 +119,16 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         lora_bias: Literal["all", "lora_only", "none"] = "none",
         train_action_head_only: bool = False,
         # optimization
-        optimizer_lr: float = 1e-5,
-        optimizer_vit_lr: float = 5e-6,
-        optimizer_connector_lr: float = 5e-6,
+        optimizer_lr: float = 5e-5,
+        optimizer_vit_lr: float = 5e-5,
+        optimizer_connector_lr: float = 5e-5,
         optimizer_action_expert_lr: float = 5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
         optimizer_eps: float = 1e-6,
         optimizer_weight_decay: float = 0.0,
         optimizer_grad_clip_norm: float = 1.0,
-        scheduler_warmup_steps: int = 200,
-        scheduler_decay_steps: int = 24_000,
+        scheduler_warmup_epochs: int = 2,
+        scheduler_decay_epochs: int = 8,
         scheduler_decay_lr: float = 1e-6,
     ) -> None:
         """Initialize a MolmoAct2 policy instance.
@@ -172,8 +172,8 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer_eps: AdamW epsilon.
             optimizer_weight_decay: AdamW weight decay.
             optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
-            scheduler_warmup_steps: Number of linear warmup steps.
-            scheduler_decay_steps: Number of cosine decay steps.
+            scheduler_warmup_epochs: Number of linear warmup epochs.
+            scheduler_decay_epochs: Number of cosine decay epochs.
             scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
 
         Raises:
@@ -232,8 +232,8 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         self.optimizer_eps = optimizer_eps
         self.optimizer_weight_decay = optimizer_weight_decay
         self.optimizer_grad_clip_norm = optimizer_grad_clip_norm
-        self.scheduler_warmup_steps = scheduler_warmup_steps
-        self.scheduler_decay_steps = scheduler_decay_steps
+        self.scheduler_warmup_epochs = scheduler_warmup_epochs
+        self.scheduler_decay_epochs = scheduler_decay_epochs
         self.scheduler_decay_lr = scheduler_decay_lr
 
         # initialize super
@@ -267,16 +267,16 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         use_lora: bool = False,
         enable_lora_action_expert: bool = False,
         train_action_head_only: bool = False,
-        optimizer_lr: float = 1e-5,
-        optimizer_vit_lr: float = 5e-6,
-        optimizer_connector_lr: float = 5e-6,
+        optimizer_lr: float = 5e-5,
+        optimizer_vit_lr: float = 5e-5,
+        optimizer_connector_lr: float = 5e-5,
         optimizer_action_expert_lr: float = 5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
         optimizer_eps: float = 1e-6,
         optimizer_weight_decay: float = 0.0,
         optimizer_grad_clip_norm: float = 1.0,
-        scheduler_warmup_steps: int = 200,
-        scheduler_decay_steps: int = 24_000,
+        scheduler_warmup_epochs: int = 2,
+        scheduler_decay_epochs: int = 8,
         scheduler_decay_lr: float = 1e-6,
     ) -> MolmoAct2:
         """Create a policy directly from a resolved model configuration.
@@ -300,8 +300,8 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer_eps: AdamW epsilon.
             optimizer_weight_decay: AdamW weight decay.
             optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
-            scheduler_warmup_steps: Number of linear warmup steps.
-            scheduler_decay_steps: Number of cosine decay steps.
+            scheduler_warmup_epochs: Number of linear warmup epochs.
+            scheduler_decay_epochs: Number of cosine decay epochs.
             scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
 
         Returns:
@@ -337,8 +337,8 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer_eps=optimizer_eps,
             optimizer_weight_decay=optimizer_weight_decay,
             optimizer_grad_clip_norm=optimizer_grad_clip_norm,
-            scheduler_warmup_steps=scheduler_warmup_steps,
-            scheduler_decay_steps=scheduler_decay_steps,
+            scheduler_warmup_epochs=scheduler_warmup_epochs,
+            scheduler_decay_epochs=scheduler_decay_epochs,
             scheduler_decay_lr=scheduler_decay_lr,
         )
         policy._initialize_from_config(config)
@@ -852,7 +852,7 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         ]
 
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        """Build the MolmoAct2 optimizer and step-wise cosine scheduler.
+        """Build the MolmoAct2 optimizer and epoch-wise cosine scheduler.
 
         Returns:
             Lightning optimizer and scheduler configuration.
@@ -869,12 +869,12 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer,
             peak_lr=self.optimizer_lr,
             decay_lr=self.scheduler_decay_lr,
-            num_warmup_steps=self.scheduler_warmup_steps,
-            num_decay_steps=self.scheduler_decay_steps,
+            num_warmup_epochs=self.scheduler_warmup_epochs,
+            num_decay_epochs=self.scheduler_decay_epochs,
         )
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "step"},
+            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
         }
 
     @override

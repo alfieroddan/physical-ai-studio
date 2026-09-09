@@ -816,8 +816,8 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
         optimizer_vit_lr=5e-6,
         optimizer_connector_lr=5e-6,
         optimizer_action_expert_lr=5e-5,
-        scheduler_warmup_steps=200,
-        scheduler_decay_steps=24_000,
+        scheduler_warmup_epochs=2,
+        scheduler_decay_epochs=30,
         scheduler_decay_lr=1e-6,
     )
     checkpoint = {
@@ -849,12 +849,12 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     assert restored.optimizer_vit_lr == 5e-6
     assert restored.optimizer_connector_lr == 5e-6
     assert restored.optimizer_action_expert_lr == 5e-5
-    assert restored.scheduler_warmup_steps == 200
-    assert restored.scheduler_decay_steps == 24_000
+    assert restored.scheduler_warmup_epochs == 2
+    assert restored.scheduler_decay_epochs == 30
     assert restored.scheduler_decay_lr == 1e-6
 
 
-def test_configure_optimizers_uses_fixed_scheduler_without_trainer(
+def test_configure_optimizers_uses_epoch_scheduler_without_trainer(
     tiny_molmoact2_config: MolmoAct2Config,
 ) -> None:
     policy = MolmoAct2.from_config(
@@ -863,8 +863,8 @@ def test_configure_optimizers_uses_fixed_scheduler_without_trainer(
         optimizer_vit_lr=2e-5,
         optimizer_connector_lr=3e-5,
         optimizer_action_expert_lr=5e-5,
-        scheduler_warmup_steps=200,
-        scheduler_decay_steps=24_000,
+        scheduler_warmup_epochs=2,
+        scheduler_decay_epochs=30,
         scheduler_decay_lr=1e-6,
     )
 
@@ -873,9 +873,20 @@ def test_configure_optimizers_uses_fixed_scheduler_without_trainer(
     scheduler_config = configured["lr_scheduler"]
     scheduler = scheduler_config["scheduler"]
 
-    assert scheduler_config["interval"] == "step"
-    assert all(group["lr"] == pytest.approx(group["initial_lr"] / 200) for group in optimizer.param_groups)
+    assert scheduler_config["interval"] == "epoch"
+    assert all(group["lr"] == pytest.approx(group["initial_lr"] / 2) for group in optimizer.param_groups)
     assert scheduler.get_last_lr() == pytest.approx([group["lr"] for group in optimizer.param_groups])
+
+
+def test_optimizer_defaults_match_so101_finetuning_recipe() -> None:
+    policy = MolmoAct2(pretrained_name_or_path=None)
+
+    assert policy.optimizer_lr == 5e-5
+    assert policy.optimizer_vit_lr == 5e-5
+    assert policy.optimizer_connector_lr == 5e-5
+    assert policy.optimizer_action_expert_lr == 5e-5
+    assert policy.scheduler_warmup_epochs == 2
+    assert policy.scheduler_decay_epochs == 8
 
 
 @pytest.mark.parametrize("policy_config", [None, "invalid"])
