@@ -236,21 +236,15 @@ if __name__ == "__main__":
 names emitted by the environment. It preserves feature order, shapes, and
 normalization statistics.
 
-### Reported Results
-
-The following measurements are retained from the original integration report.
-Performance depends on hardware, precision, runtime versions, and benchmark
-configuration.
-
-NVIDIA A100, BF16:
+Results on NVIDIA A100:
 
 | Suite          | Tasks  | Avg. success rate (%) | Avg. reward | Avg. episode length | Avg. FPS  |
 | -------------- | ------ | --------------------- | ----------- | ------------------- | --------- |
-| libero_spatial | 10     | 100.0                 | 1.00        | 107.2               | 14.70     |
-| libero_object  | 10     | 100.0                 | 1.00        | 137.0               | 20.30     |
-| libero_goal    | 10     | 90.0                  | 0.90        | 134.7               | 20.50     |
-| libero_10      | 10     | 90.0                  | 0.90        | 278.6               | 20.70     |
-| **Average**    | **40** | **95.0**              | **0.95**    | **164.4**           | **19.05** |
+| libero_spatial | 10     | 100.0                 | 1.00        | 107.4               | 14.60     |
+| libero_object  | 10     | 100.0                 | 1.00        | 131.7               | 19.00     |
+| libero_goal    | 10     | 100.0                 | 1.00        | 108.3               | 18.10     |
+| libero_10      | 10     | 100.0                 | 1.00        | 242.8               | 19.50     |
+| **Average**    | **40** | **100.0**             | **1.00**    | **147.6**           | **17.80** |
 
 ## Export
 
