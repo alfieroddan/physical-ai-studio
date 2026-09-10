@@ -13,7 +13,7 @@ import torch
 from physicalai.policies.molmoact2.optimizer import MolmoAct2AdamW, molmoact2_cosine_with_warmup_scheduler
 
 
-def test_scheduler_uses_epoch_clock() -> None:
+def test_scheduler_uses_step_clock() -> None:
     first = torch.nn.Parameter(torch.tensor([1.0]))
     second = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = torch.optim.AdamW(
@@ -26,8 +26,9 @@ def test_scheduler_uses_epoch_clock() -> None:
         optimizer,
         peak_lr=5e-5,
         decay_lr=1e-6,
-        num_warmup_epochs=2,
-        num_decay_epochs=8,
+        num_warmup_steps=2,
+        num_decay_steps=8,
+        num_training_steps=8,
     )
 
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 2)
@@ -37,30 +38,31 @@ def test_scheduler_uses_epoch_clock() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
     assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6)
 
-    for _ in range(4):
+    for _ in range(3):
         optimizer.step()
         scheduler.step()
-    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * 4 / 8))
+    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * 3 / 6))
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * expected_multiplier)
     assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 * expected_multiplier)
 
 
-def test_scheduler_stays_at_floor_after_decay() -> None:
+def test_scheduler_shortens_decay_to_training_steps() -> None:
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = torch.optim.AdamW([parameter], lr=5e-5)
     scheduler = molmoact2_cosine_with_warmup_scheduler(
         optimizer,
         peak_lr=5e-5,
         decay_lr=1e-6,
-        num_warmup_epochs=2,
-        num_decay_epochs=5,
+        num_warmup_steps=2,
+        num_decay_steps=30,
+        num_training_steps=5,
     )
 
-    for _ in range(5):
+    for _ in range(4):
         optimizer.step()
         scheduler.step()
 
-    assert optimizer.param_groups[0]["lr"] > 1e-6
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-6)
 
     optimizer.step()
     scheduler.step()
@@ -68,7 +70,24 @@ def test_scheduler_stays_at_floor_after_decay() -> None:
     assert optimizer.param_groups[0]["lr"] == pytest.approx(1e-6)
 
 
-def test_scheduler_without_warmup_starts_at_peak() -> None:
+def test_scheduler_scales_warmup_for_shorter_training() -> None:
+    parameter = torch.nn.Parameter(torch.tensor([1.0]))
+    optimizer = torch.optim.AdamW([parameter], lr=5e-5)
+    scheduler = molmoact2_cosine_with_warmup_scheduler(
+        optimizer,
+        peak_lr=5e-5,
+        decay_lr=1e-6,
+        num_warmup_steps=200,
+        num_decay_steps=30_000,
+        num_training_steps=3_000,
+    )
+
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 20)
+    assert scheduler.lr_lambdas[0](19) == pytest.approx(1.0)
+    assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 5e-5)
+
+
+def test_scheduler_without_warmup_starts_cosine_on_first_step() -> None:
     parameter = torch.nn.Parameter(torch.tensor([1.0]))
     optimizer = torch.optim.AdamW([parameter], lr=5e-5)
 
@@ -76,11 +95,13 @@ def test_scheduler_without_warmup_starts_at_peak() -> None:
         optimizer,
         peak_lr=5e-5,
         decay_lr=1e-6,
-        num_warmup_epochs=0,
-        num_decay_epochs=8,
+        num_warmup_steps=0,
+        num_decay_steps=8,
+        num_training_steps=8,
     )
 
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
+    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi / 8))
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * expected_multiplier)
 
 
 def test_updates_float32_parameters() -> None:

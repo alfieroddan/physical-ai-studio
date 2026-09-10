@@ -38,9 +38,9 @@ model:
     optimizer_action_expert_lr: 5e-5
     optimizer_grad_clip_norm: 1.0
 
-    # Scheduler (2 warmup + 8 decay = 10 trainer epochs)
-    scheduler_warmup_epochs: 2
-    scheduler_decay_epochs: 8
+    # Scheduler
+    scheduler_warmup_steps: 200
+    scheduler_decay_steps: 30000
     scheduler_decay_lr: 1e-6
 
 data:

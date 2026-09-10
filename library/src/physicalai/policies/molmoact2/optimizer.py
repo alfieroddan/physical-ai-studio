@@ -21,12 +21,14 @@ def molmoact2_cosine_with_warmup_scheduler(
     *,
     peak_lr: float,
     decay_lr: float,
-    num_warmup_epochs: int,
-    num_decay_epochs: int,
+    num_warmup_steps: int,
+    num_decay_steps: int,
+    num_training_steps: int,
 ) -> LambdaLR:
-    """Build the epoch-based warmup and cosine schedule used by MolmoAct2.
+    """Build the step-based warmup and cosine schedule used by MolmoAct2.
 
-    Warmup and decay are consecutive phases, so their sum defines the full schedule.
+    When training has fewer optimizer updates than the configured decay
+    horizon, warmup and decay are scaled proportionally to fit the run.
 
     Returns:
         LambdaLR: The learning rate scheduler instance.
@@ -34,11 +36,14 @@ def molmoact2_cosine_with_warmup_scheduler(
     Raises:
         ValueError: If any of the input arguments are invalid.
     """
-    if num_warmup_epochs < 0:
-        msg = f"num_warmup_epochs must be >= 0, got {num_warmup_epochs}."
+    if num_warmup_steps < 0:
+        msg = f"num_warmup_steps must be >= 0, got {num_warmup_steps}."
         raise ValueError(msg)
-    if num_decay_epochs < 1:
-        msg = f"num_decay_epochs must be >= 1, got {num_decay_epochs}."
+    if num_decay_steps < 1:
+        msg = f"num_decay_steps must be >= 1, got {num_decay_steps}."
+        raise ValueError(msg)
+    if num_training_steps < 1:
+        msg = f"num_training_steps must be >= 1, got {num_training_steps}."
         raise ValueError(msg)
     if peak_lr <= 0:
         msg = f"peak_lr must be > 0, got {peak_lr}."
@@ -47,20 +52,22 @@ def molmoact2_cosine_with_warmup_scheduler(
         msg = f"decay_lr must be in [0, peak_lr), got decay_lr={decay_lr}, peak_lr={peak_lr}."
         raise ValueError(msg)
 
-    warmup_epochs = num_warmup_epochs
+    decay_steps = min(num_decay_steps, num_training_steps)
+    warmup_steps = num_warmup_steps
+    if num_training_steps < num_decay_steps:
+        warmup_steps = int(num_warmup_steps * num_training_steps / num_decay_steps)
+    warmup_steps = min(warmup_steps, max(decay_steps - 1, 0))
     alpha = decay_lr / peak_lr
 
-    def lr_lambda(current_epoch: int) -> float:
-        epoch = max(current_epoch, 0)
-        if warmup_epochs > 0:
-            if epoch < warmup_epochs:
-                return (epoch + 1) / warmup_epochs
-            decay_epoch = epoch - warmup_epochs + 1
-        else:
-            decay_epoch = epoch
-        if decay_epoch >= num_decay_epochs:
+    def lr_lambda(current_step: int) -> float:
+        step = max(current_step + 1, 0)
+        if warmup_steps > 0 and step < warmup_steps:
+            return step / warmup_steps
+        if step >= decay_steps:
             return alpha
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * decay_epoch / num_decay_epochs))
+        cosine_span = decay_steps - warmup_steps
+        cosine_step = step - warmup_steps
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * cosine_step / cosine_span))
         return alpha + (1.0 - alpha) * cosine_decay
 
     return LambdaLR(optimizer, lr_lambda)
