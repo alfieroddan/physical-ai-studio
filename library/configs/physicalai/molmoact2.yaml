@@ -40,7 +40,7 @@ model:
 
     # Scheduler
     scheduler_warmup_steps: 200
-    scheduler_decay_steps: 30000
+    scheduler_decay_steps: null # cosine decay spans all training steps after warmup
     scheduler_decay_lr: 1e-6
 
 data:

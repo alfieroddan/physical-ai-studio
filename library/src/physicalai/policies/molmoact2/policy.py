@@ -132,7 +132,7 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         optimizer_weight_decay: float = 0.0,
         optimizer_grad_clip_norm: float = 1.0,
         scheduler_warmup_steps: int = 200,
-        scheduler_decay_steps: int = 30_000,
+        scheduler_decay_steps: int | None = None,
         scheduler_decay_lr: float = 1e-6,
     ) -> None:
         """Initialize a MolmoAct2 policy instance.
@@ -177,7 +177,9 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer_weight_decay: AdamW weight decay.
             optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
             scheduler_warmup_steps: Number of linear warmup optimizer steps.
-            scheduler_decay_steps: Cosine decay horizon in optimizer steps.
+            scheduler_decay_steps: Optimizer step at which cosine decay reaches its final learning rate.
+                When ``None``, use the complete Lightning training-step budget, leaving
+                ``num_training_steps - scheduler_warmup_steps`` steps for cosine decay.
             scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
 
         Raises:
@@ -280,7 +282,7 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         optimizer_weight_decay: float = 0.0,
         optimizer_grad_clip_norm: float = 1.0,
         scheduler_warmup_steps: int = 200,
-        scheduler_decay_steps: int = 30_000,
+        scheduler_decay_steps: int | None = None,
         scheduler_decay_lr: float = 1e-6,
     ) -> MolmoAct2:
         """Create a policy directly from a resolved model configuration.
@@ -305,7 +307,9 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             optimizer_weight_decay: AdamW weight decay.
             optimizer_grad_clip_norm: Independent gradient clipping norm for each parameter group.
             scheduler_warmup_steps: Number of linear warmup optimizer steps.
-            scheduler_decay_steps: Cosine decay horizon in optimizer steps.
+            scheduler_decay_steps: Optimizer step at which cosine decay reaches its final learning rate.
+                When ``None``, use the complete Lightning training-step budget, leaving
+                ``num_training_steps - scheduler_warmup_steps`` steps for cosine decay.
             scheduler_decay_lr: Final scheduler learning rate for the base parameter group.
 
         Returns:
@@ -858,6 +862,10 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
     def configure_optimizers(self) -> OptimizerLRScheduler:
         """Build the MolmoAct2 optimizer and step-wise cosine scheduler.
 
+        When ``scheduler_decay_steps`` is ``None``, the final learning rate is
+        reached at the end of Lightning's estimated optimizer-step budget. The
+        cosine phase therefore spans the training budget minus warmup steps.
+
         Returns:
             Lightning optimizer and scheduler configuration.
 
@@ -876,12 +884,15 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         if num_training_steps < 1:
             msg = f"Expected at least one optimizer step, got {num_training_steps}."
             raise RuntimeError(msg)
+        num_decay_steps = self.scheduler_decay_steps
+        if num_decay_steps is None:
+            num_decay_steps = num_training_steps
         scheduler = molmoact2_cosine_with_warmup_scheduler(
             optimizer,
             peak_lr=self.optimizer_lr,
             decay_lr=self.scheduler_decay_lr,
             num_warmup_steps=self.scheduler_warmup_steps,
-            num_decay_steps=self.scheduler_decay_steps,
+            num_decay_steps=num_decay_steps,
             num_training_steps=num_training_steps,
         )
         return {

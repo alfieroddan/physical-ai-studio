@@ -121,6 +121,13 @@ if __name__ == "__main__":
 When the policy is constructed lazily, the training dataset supplies its input
 and output feature contract during `setup("fit")`.
 
+By default, `scheduler_decay_steps=None` derives the cosine schedule from
+Lightning's estimated optimizer-step budget. After `scheduler_warmup_steps`,
+the learning rate decays across all remaining training steps and reaches
+`scheduler_decay_lr` at the end of training. Set `scheduler_decay_steps` to an
+integer to use a manual decay horizon instead. If that horizon is longer than
+the run, MolmoAct2 scales it and the warmup proportionally to fit the run.
+
 When fine-tuning a compatible pretrained policy, set
 `preserve_pretrained_normalization_in_training=True` to adopt the dataset's feature and
 camera contract while retaining the initialized policy's state and action

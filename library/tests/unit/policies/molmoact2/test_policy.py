@@ -858,7 +858,7 @@ def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     assert restored.scheduler_decay_lr == 1e-6
 
 
-def test_configure_optimizers_uses_estimated_step_budget(
+def test_configure_optimizers_scales_manual_horizon_to_estimated_step_budget(
     tiny_molmoact2_config: MolmoAct2Config,
 ) -> None:
     policy = MolmoAct2.from_config(
@@ -886,6 +886,27 @@ def test_configure_optimizers_uses_estimated_step_budget(
     assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 1e-5)
 
 
+def test_configure_optimizers_uses_training_length_when_decay_steps_are_none(
+    tiny_molmoact2_config: MolmoAct2Config,
+) -> None:
+    policy = MolmoAct2.from_config(
+        tiny_molmoact2_config,
+        optimizer_lr=1e-5,
+        scheduler_warmup_steps=200,
+        scheduler_decay_steps=None,
+        scheduler_decay_lr=1e-6,
+    )
+    trainer = Mock()
+    trainer.estimated_stepping_batches = 3_000
+    policy._trainer = trainer
+
+    scheduler = policy.configure_optimizers()["lr_scheduler"]["scheduler"]
+
+    assert scheduler.lr_lambdas[0](99) == pytest.approx(0.5)
+    assert scheduler.lr_lambdas[0](199) == pytest.approx(1.0)
+    assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 1e-5)
+
+
 def test_optimizer_defaults_match_so101_finetuning_recipe() -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)
 
@@ -894,7 +915,7 @@ def test_optimizer_defaults_match_so101_finetuning_recipe() -> None:
     assert policy.optimizer_connector_lr == 5e-5
     assert policy.optimizer_action_expert_lr == 5e-5
     assert policy.scheduler_warmup_steps == 200
-    assert policy.scheduler_decay_steps == 30_000
+    assert policy.scheduler_decay_steps is None
 
 
 @pytest.mark.parametrize("policy_config", [None, "invalid"])
