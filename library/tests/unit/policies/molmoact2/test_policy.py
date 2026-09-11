@@ -1002,7 +1002,11 @@ def test_export_uses_action_chunk_trimmer_for_shorter_execution_horizon(
 
     export_args = policy.extra_export_args
     torch_postprocessors = export_args[ExportBackend.TORCH].postprocessors_specs
-    openvino_postprocessors = export_args[ExportBackend.OPENVINO].postprocessors_specs
+    openvino_args = export_args[ExportBackend.OPENVINO]
+    openvino_postprocessors = openvino_args.postprocessors_specs
+    molmoact2_postprocessor = openvino_postprocessors[0]
+    assert openvino_args.outputs == [policy.outputs_schema[0].name]
+    assert molmoact2_postprocessor.action_key == policy.outputs_schema[0].name
     assert [spec.type for spec in torch_postprocessors] == (["action_chunk_trimmer"] if trim_actions else [])
     assert [spec.type for spec in openvino_postprocessors] == [
         "molmoact2_postprocess",

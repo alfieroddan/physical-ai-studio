@@ -211,6 +211,10 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
         if action_feature is None or action_feature.shape is None:
             msg = "MolmoAct2 export requires an action feature with a concrete shape."
             raise ValueError(msg)
+        outputs_schema = self.outputs_schema
+        if not outputs_schema:
+            msg = "MolmoAct2 export requires an output schema."
+            raise ValueError(msg)
 
         bos_token_id, pad_token_id, image_token_ids = self._openvino_token_ids()
         image_size = (
@@ -279,6 +283,7 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
         openvino_postprocessors = [
             ComponentSpec(
                 type="molmoact2_postprocess",
+                action_key=outputs_schema[0].name,
                 action_stats=_normalization_stats(action_feature),
                 normalization_mode=config.normalization_mode,
             ),
@@ -305,7 +310,7 @@ class MolmoAct2ExportMixin(ExportablePolicyMixin):
                 postprocessors_specs=torch_postprocessors,
             ),
             ExportBackend.OPENVINO: OpenVINOExportParameters(
-                outputs=[feature.name for feature in (self.outputs_schema or [])],
+                outputs=[feature.name for feature in outputs_schema],
                 export_tokenizer=True,
                 compress_to_fp16=self.openvino_compress_to_fp16,
                 via_onnx=False,
