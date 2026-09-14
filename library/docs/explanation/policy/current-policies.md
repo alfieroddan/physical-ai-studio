@@ -125,12 +125,24 @@ flowchart LR
 | RLDX1 | Features merged into `dataset_stats` | Merged stats |
 | LeRobot | Explicit or LeRobot features | Separate stats passed to processors |
 
-This causes four problems:
+## Why Problems Occur
 
-- feature contracts vary by input route;
-- export may rediscover features from stats;
-- normalization changes can appear architectural;
-- checkpoints may need stats before model creation.
+Current routes make the same decisions in different places. Each route may resolve
+features, dimensions, processors, weights, and capabilities differently.
+
+| Cause | Possible result |
+| --- | --- |
+| Constructor and `setup()` can both create the model | The model is built twice or guarded differently per policy |
+| Pretrained and checkpoint paths use separate loaders | One route applies weights or capabilities in a different order |
+| Features are rebuilt from `dataset_stats` | Missing stats can block model creation even when architecture is known |
+| Stats contain features and normalization | New normalization values can appear to change model structure |
+| Export reads `dataset_stats` again | Training and export can use different names, shapes, or order |
+| Checkpoints save constructor inputs instead of one resolved config | Restore can depend on old defaults or the original artifact |
+| LoRA is injected after checkpoint loading | Adapter keys do not match the checkpoint state dictionary |
+| Action chunks are trimmed inside the model | RTC loses future actions needed for blending |
+
+These bugs are route-dependent. A policy may work in training but fail when loaded
+from a checkpoint or exported.
 
 ## Proposed Design
 
@@ -233,21 +245,45 @@ sequenceDiagram
 ## Before and After
 
 ```mermaid
-flowchart LR
-    subgraph Current
-        B1[Arguments] --> B4[Policy-specific initializer]
-        B2[dataset_stats] --> B4
-        B3[Artifact or checkpoint] --> B4
-        B4 --> B5[Model and processors]
+flowchart TB
+    subgraph Current[Current: each route owns construction]
+        direction LR
+        B1[Constructor] --> I1[Init helper]
+        B2[setup + dataset_stats] --> I2[Init helper]
+        B3[Pretrained loader] --> I3[Init helper]
+        B4[Checkpoint constructor args] --> I4[Init helper]
+        I1 --> M1[Model + processors]
+        I2 --> M2[Model + processors]
+        I3 --> M3[Model + processors]
+        I4 --> M4[Model + processors]
     end
 
-    subgraph Proposed
-        A1[Policy config] --> A4[configure_model]
-        A2[Normalization state] --> A5[Processors]
-        A3[External weights] --> A4
-        A4 --> A6[Model]
-        A4 --> A5
+    subgraph Proposed[Proposed: inputs converge before construction]
+        direction LR
+        A1[Constructor] --> C[Resolved policy config]
+        A2[Dataset setup] --> C
+        A3[Pretrained resolver] --> C
+        A4[Checkpoint config] --> C
+        C --> G[configure_model]
+        G --> M[One model]
+        G --> P[One processor pair]
+        N[Normalization state] --> P
+        W[External weights] --> M
     end
 ```
+
+### What Changes
+
+| Current | Proposed |
+| --- | --- |
+| Each route can create a model | Routes only resolve inputs |
+| Each route may infer features | One config owns the feature contract |
+| Stats drive structure and normalization | Config drives structure; processor state drives normalization |
+| Weight order varies by loader | `configure_model()` fixes the order |
+| Checkpoint restore may replay pretrained loading | Checkpoint config rebuilds locally |
+| Export can rediscover the contract | Export derives from the same config |
+
+The new design does not remove input routes. It removes route-specific model creation.
+This makes training, restore, inference, and export use the same resolved contract.
 
 See [Policy Migration](migration.md) for migration steps.
