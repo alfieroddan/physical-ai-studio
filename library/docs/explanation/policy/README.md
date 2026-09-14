@@ -271,7 +271,6 @@ def configure_model(self) -> None:
 Lightning may call this hook for fit, validation, testing, and prediction in the same
 process. The model guard makes repeated calls no-ops.
 
-```python
 The order is deliberate:
 
 1. Record the resolved feature and action contract, and keep the config itself for
@@ -725,6 +724,7 @@ When adding or migrating a native policy:
 
 ## See Also
 
+- [Current and proposed policy construction](current-policies.md)
 - [Data design](../data/README.md)
 - [Trainer design](../trainer/README.md)
 - [Export design](../export/README.md)
