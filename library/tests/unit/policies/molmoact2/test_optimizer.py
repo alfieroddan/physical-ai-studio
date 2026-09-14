@@ -31,17 +31,17 @@ def test_scheduler_uses_step_clock() -> None:
         num_training_steps=8,
     )
 
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 2)
-    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 / 2)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 3)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 / 3)
     optimizer.step()
     scheduler.step()
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
-    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * 2 / 3)
+    assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 * 2 / 3)
 
     for _ in range(3):
         optimizer.step()
         scheduler.step()
-    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * 3 / 6))
+    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * 4 / 8))
     assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * expected_multiplier)
     assert optimizer.param_groups[1]["lr"] == pytest.approx(5e-6 * expected_multiplier)
 
@@ -58,7 +58,7 @@ def test_scheduler_shortens_decay_to_training_steps() -> None:
         num_training_steps=5,
     )
 
-    for _ in range(4):
+    for _ in range(5):
         optimizer.step()
         scheduler.step()
 
@@ -82,9 +82,9 @@ def test_scheduler_scales_warmup_for_shorter_training() -> None:
         num_training_steps=3_000,
     )
 
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 20)
-    assert scheduler.lr_lambdas[0](19) == pytest.approx(1.0)
-    assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 5e-5)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 / 21)
+    assert scheduler.lr_lambdas[0](19) == pytest.approx(20 / 21)
+    assert scheduler.lr_lambdas[0](3_000) == pytest.approx(1e-6 / 5e-5)
 
 
 def test_scheduler_without_warmup_starts_cosine_on_first_step() -> None:
@@ -100,8 +100,7 @@ def test_scheduler_without_warmup_starts_cosine_on_first_step() -> None:
         num_training_steps=8,
     )
 
-    expected_multiplier = 0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi / 8))
-    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5 * expected_multiplier)
+    assert optimizer.param_groups[0]["lr"] == pytest.approx(5e-5)
 
 
 def test_updates_float32_parameters() -> None:

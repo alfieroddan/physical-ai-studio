@@ -881,9 +881,9 @@ def test_configure_optimizers_scales_manual_horizon_to_estimated_step_budget(
     scheduler = scheduler_config["scheduler"]
 
     assert scheduler_config["interval"] == "step"
-    assert all(group["lr"] == pytest.approx(group["initial_lr"] / 20) for group in optimizer.param_groups)
+    assert all(group["lr"] == pytest.approx(group["initial_lr"] / 21) for group in optimizer.param_groups)
     assert scheduler.get_last_lr() == pytest.approx([group["lr"] for group in optimizer.param_groups])
-    assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 1e-5)
+    assert scheduler.lr_lambdas[0](3_000) == pytest.approx(1e-6 / 1e-5)
 
 
 def test_configure_optimizers_uses_training_length_when_decay_steps_are_none(
@@ -902,17 +902,17 @@ def test_configure_optimizers_uses_training_length_when_decay_steps_are_none(
 
     scheduler = policy.configure_optimizers()["lr_scheduler"]["scheduler"]
 
-    assert scheduler.lr_lambdas[0](99) == pytest.approx(0.5)
-    assert scheduler.lr_lambdas[0](199) == pytest.approx(1.0)
-    assert scheduler.lr_lambdas[0](2_999) == pytest.approx(1e-6 / 1e-5)
+    assert scheduler.lr_lambdas[0](99) == pytest.approx(100 / 201)
+    assert scheduler.lr_lambdas[0](199) == pytest.approx(200 / 201)
+    assert scheduler.lr_lambdas[0](3_000) == pytest.approx(1e-6 / 1e-5)
 
 
 def test_optimizer_defaults_match_so101_finetuning_recipe() -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)
 
-    assert policy.optimizer_lr == 5e-5
-    assert policy.optimizer_vit_lr == 5e-5
-    assert policy.optimizer_connector_lr == 5e-5
+    assert policy.optimizer_lr == 1e-5
+    assert policy.optimizer_vit_lr == 5e-6
+    assert policy.optimizer_connector_lr == 5e-6
     assert policy.optimizer_action_expert_lr == 5e-5
     assert policy.scheduler_warmup_steps == 200
     assert policy.scheduler_decay_steps is None

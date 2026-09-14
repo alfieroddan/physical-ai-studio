@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
+
+from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -52,25 +53,14 @@ def molmoact2_cosine_with_warmup_scheduler(
         msg = f"decay_lr must be in [0, peak_lr), got decay_lr={decay_lr}, peak_lr={peak_lr}."
         raise ValueError(msg)
 
-    decay_steps = min(num_decay_steps, num_training_steps)
-    warmup_steps = num_warmup_steps
-    if num_training_steps < num_decay_steps:
-        warmup_steps = int(num_warmup_steps * num_training_steps / num_decay_steps)
-    warmup_steps = min(warmup_steps, max(decay_steps - 1, 0))
-    alpha = decay_lr / peak_lr
-
-    def lr_lambda(current_step: int) -> float:
-        step = max(current_step + 1, 0)
-        if warmup_steps > 0 and step < warmup_steps:
-            return step / warmup_steps
-        if step >= decay_steps:
-            return alpha
-        cosine_span = decay_steps - warmup_steps
-        cosine_step = step - warmup_steps
-        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * cosine_step / cosine_span))
-        return alpha + (1.0 - alpha) * cosine_decay
-
-    return LambdaLR(optimizer, lr_lambda)
+    return cosine_decay_with_warmup_scheduler(
+        optimizer,
+        peak_lr=peak_lr,
+        decay_lr=decay_lr,
+        num_warmup_steps=num_warmup_steps,
+        num_decay_steps=num_decay_steps,
+        num_training_steps=num_training_steps,
+    )
 
 
 class MolmoAct2AdamW(torch.optim.AdamW):
