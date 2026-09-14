@@ -75,6 +75,25 @@ Use this order:
 5. Apply state-dict-shaping capabilities.
 6. Sync runtime capabilities.
 
+### Lightning Constraints
+
+`configure_model()` is a Lightning lifecycle hook, so implementations must follow
+these constraints:
+
+| Constraint | Required behavior |
+| --- | --- |
+| Lightning may call the hook more than once | Make it idempotent and return when the model already exists |
+| Strategies such as FSDP control module creation | Create large modules inside the hook, not before Lightning invokes it |
+| Checkpoint tensors load after module construction | Rebuild the exact module and adapter structure from saved config first |
+| Checkpoint restore must be self-contained | Do not fetch a pretrained artifact or overwrite checkpoint weights |
+| Dataset state may arrive later in `setup()` | Keep architecture independent of normalization state and do not rebuild the model |
+| Manual inference may call the hook without a Trainer | Do not depend on trainer, dataloader, or device state during construction |
+| Config fields and defaults may change | Version or migrate saved config so old checkpoints rebuild the same structure |
+
+Keep the hook deterministic and free of network access. It should materialize module
+structure from resolved config; `setup()` may validate dataset features and attach
+normalization state without changing that structure.
+
 ## Construction Routes
 
 | Route | Config source | Weight source |
