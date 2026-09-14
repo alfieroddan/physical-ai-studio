@@ -6,7 +6,7 @@
 import inspect
 import logging
 import tempfile
-from collections.abc import Generator, Iterable
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 from os import PathLike
 from pathlib import Path
@@ -125,7 +125,7 @@ class ExportablePolicyMixin:
             # a leading batch dimension; tensor-shaped features get a batch of 1.
             shape = feature.shape if feature.shape == () else (1, *feature.shape)
             if feature.dtype is InferenceFeatureDtype.INT64:
-                input_sample[feature.name] = torch.zeros(shape, dtype=torch.int64)
+                input_sample[feature.name] = torch.ones(shape, dtype=torch.int64)
             else:
                 input_sample[feature.name] = torch.randn(shape, dtype=torch.float32)
 
@@ -169,16 +169,6 @@ class ExportablePolicyMixin:
             A dictionary mapping backend names to their export parameters.
         """
         return {}
-
-    @contextmanager
-    def _scoped_rtc(self, *, enable: bool) -> Generator[None, None, None]:
-        """Temporarily set enable_rtc on the model, restoring the previous value on exit."""
-        prev = getattr(self.model, "enable_rtc", False)
-        setattr(self.model, "enable_rtc", enable)  # noqa: B010
-        try:
-            yield
-        finally:
-            setattr(self.model, "enable_rtc", prev)  # noqa: B010
 
     def create_manifest(
         self,
@@ -378,46 +368,44 @@ class ExportablePolicyMixin:
             )
             raise NotImplementedError(msg)
 
-        enable_rtc = bool(export_kwargs.pop("enable_rtc", False))
-        with self._scoped_rtc(enable=enable_rtc):
-            if input_sample is None:
-                input_sample = self._get_default_export_input_sample()
+        if input_sample is None:
+            input_sample = self._get_default_export_input_sample()
 
-            if input_sample is None:
-                msg = "An input sample must be provided for ONNX export, or the policy must implement "
-                "`sample_input` property."
-                raise RuntimeError(msg)
+        if input_sample is None:
+            msg = "An input sample must be provided for ONNX export, or the policy must implement "
+            "`sample_input` property."
+            raise RuntimeError(msg)
 
-            model_path = self._prepare_export_path(output_path, ".onnx")
-            export_dir = model_path.parent
+        model_path = self._prepare_export_path(output_path, ".onnx")
+        export_dir = model_path.parent
 
-            extra_model_args = cast("ONNXExportParameters", self._get_export_extra_args(ExportBackend.ONNX))
-            extra_export_kwargs = extra_model_args.exporter_kwargs
-            extra_export_kwargs.update(export_kwargs)
+        extra_model_args = cast("ONNXExportParameters", self._get_export_extra_args(ExportBackend.ONNX))
+        extra_export_kwargs = extra_model_args.exporter_kwargs
+        extra_export_kwargs.update(export_kwargs)
 
-            arg_name = self._get_forward_arg_name()
+        arg_name = self._get_forward_arg_name()
 
-            self.model.eval()
-            self._onnx_core_export_step(
-                model_path=model_path,
-                input_sample=input_sample,
-                arg_name=arg_name,
-                **extra_export_kwargs,
-            )
+        self.model.eval()
+        self._onnx_core_export_step(
+            model_path=model_path,
+            input_sample=input_sample,
+            arg_name=arg_name,
+            **extra_export_kwargs,
+        )
 
-            if extra_model_args.export_tokenizer:
-                msg = "Tokenizer export is not supported for ONNX backend at this time."
-                raise NotImplementedError(msg)
+        if extra_model_args.export_tokenizer:
+            msg = "Tokenizer export is not supported for ONNX backend at this time."
+            raise NotImplementedError(msg)
 
-            self.create_manifest(
-                export_dir,
-                ExportBackend.ONNX,
-                runner=ComponentSpec.from_class(SinglePass),
-                preprocessors=extra_model_args.preprocessors_specs,
-                postprocessors=extra_model_args.postprocessors_specs,
-                input_features=self._to_component_specs(self.inputs_schema or []),
-                output_features=self._to_component_specs(self.outputs_schema or []),
-            )
+        self.create_manifest(
+            export_dir,
+            ExportBackend.ONNX,
+            runner=ComponentSpec.from_class(SinglePass),
+            preprocessors=extra_model_args.preprocessors_specs,
+            postprocessors=extra_model_args.postprocessors_specs,
+            input_features=self._to_component_specs(self.inputs_schema or []),
+            output_features=self._to_component_specs(self.outputs_schema or []),
+        )
 
     @torch.no_grad()
     def to_openvino(
@@ -457,58 +445,57 @@ class ExportablePolicyMixin:
             )
             raise NotImplementedError(msg)
 
-        enable_rtc = bool(export_kwargs.pop("enable_rtc", False))
-        with self._scoped_rtc(enable=enable_rtc):
-            if input_sample is None:
-                input_sample = self._get_default_export_input_sample()
+        if input_sample is None:
+            input_sample = self._get_default_export_input_sample()
 
-            if input_sample is None:
-                msg = "An input sample must be provided for OpenVINO export, or the policy must implement "
-                "`sample_input` property."
-                raise RuntimeError(msg)
+        if input_sample is None:
+            msg = "An input sample must be provided for OpenVINO export, or the policy must implement "
+            "`sample_input` property."
+            raise RuntimeError(msg)
 
-            model_path = self._prepare_export_path(output_path, ".xml")
-            export_dir = model_path.parent
+        model_path = self._prepare_export_path(output_path, ".xml")
+        export_dir = model_path.parent
 
-            arg_name = self._get_forward_arg_name()
-            input_shapes = [openvino.Shape(tuple(tensor.shape)) for tensor in input_sample.values()]
+        arg_name = self._get_forward_arg_name()
+        input_shapes = [openvino.Shape(tuple(tensor.shape)) for tensor in input_sample.values()]
 
-            extra_model_args: OpenVINOExportParameters = cast(
-                "OpenVINOExportParameters",
-                self._get_export_extra_args(ExportBackend.OPENVINO),
-            )
-            extra_export_kwargs = extra_model_args.exporter_kwargs
+        extra_model_args: OpenVINOExportParameters = cast(
+            "OpenVINOExportParameters",
+            self._get_export_extra_args(ExportBackend.OPENVINO),
+        )
+        extra_export_kwargs = extra_model_args.exporter_kwargs
 
-            if extra_model_args.via_onnx:
-                onnx_model_args = cast("ONNXExportParameters", self._get_export_extra_args(ExportBackend.ONNX))
-                extra_export_kwargs = onnx_model_args.exporter_kwargs
+        if extra_model_args.via_onnx:
+            onnx_model_args = cast("ONNXExportParameters", self._get_export_extra_args(ExportBackend.ONNX))
+            extra_export_kwargs = onnx_model_args.exporter_kwargs
 
-            extra_export_kwargs.update(export_kwargs)
+        extra_export_kwargs.update(export_kwargs)
 
-            self.model.eval()
+        self.model.eval()
 
-            if extra_model_args.via_onnx:
-                with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
-                    self._onnx_core_export_step(
-                        model_path=Path(tmp.name),
-                        input_sample=input_sample,
-                        arg_name=arg_name,
-                        **extra_export_kwargs,
-                    )
-                    with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
-                        ov_model = openvino.convert_model(
-                            tmp.name,
-                            example_input={arg_name: input_sample},
-                            input=input_shapes,
-                        )
-            else:
-                ov_model = openvino.convert_model(
-                    self.model,
-                    example_input={arg_name: input_sample},
-                    input=input_shapes,
+        if extra_model_args.via_onnx:
+            with tempfile.NamedTemporaryFile(suffix=".onnx") as tmp:
+                self._onnx_core_export_step(
+                    model_path=Path(tmp.name),
+                    input_sample=input_sample,
+                    arg_name=arg_name,
                     **extra_export_kwargs,
                 )
-            _postprocess_openvino_model(ov_model, extra_model_args.outputs)
+                with _quiet_loggers(_ONNX_PROBE_NOISE_LOGGERS, level=logging.ERROR):
+                    ov_model = openvino.convert_model(
+                        tmp.name,
+                        example_input={arg_name: input_sample},
+                        input=input_shapes,
+                    )
+        else:
+            ov_model = openvino.convert_model(
+                self.model,
+                example_input={arg_name: input_sample},
+                input=input_shapes,
+                **extra_export_kwargs,
+            )
+        _set_openvino_input_names(ov_model, extra_model_args.inputs)
+        _postprocess_openvino_model(ov_model, extra_model_args.outputs)
 
         openvino.save_model(ov_model, str(model_path), compress_to_fp16=extra_model_args.compress_to_fp16)
         if extra_model_args.export_tokenizer:
@@ -575,7 +562,6 @@ class ExportablePolicyMixin:
                 implement ``sample_input`` property.
             ImportError: If the required ``executorch`` package (or selected delegate
                 dependencies) is not installed.
-            ValueError: If an unsupported delegate is specified.
         """
         if ExportBackend.EXECUTORCH not in self.get_supported_export_backends():
             msg = (
@@ -612,10 +598,68 @@ class ExportablePolicyMixin:
             msg = "executorch package is required for ExecuTorch export. Install with: pip install executorch"
             raise ImportError(msg) from e
 
+        # ExecuTorch doesn't support CUDA/XPU tensors (segfaults instead of
+        # raising), so trace on CPU. Original device/train mode are always
+        # restored.
+        original_device = self.device
+        was_training = self.model.training
+        self.model.to("cpu")
         self.model.eval()
+        try:
+            self._export_executorch_pte(
+                model_path=model_path,
+                input_sample=input_sample,
+                extra_export_kwargs=extra_export_kwargs,
+                delegate=delegate,
+                delegate_config=delegate_config,
+                to_edge_transform_and_lower=to_edge_transform_and_lower,
+            )
+        finally:
+            self.model.to(original_device)
+            self.model.train(was_training)
+
+        self.create_manifest(
+            export_dir,
+            ExportBackend.EXECUTORCH,
+            runner=ComponentSpec.from_class(SinglePass),
+            input_names=list(input_sample.keys()),  # type: ignore[arg-type, union-attr]
+            output_names=extra_model_args.output_names,
+            input_features=self._to_component_specs(self.inputs_schema or []),
+            output_features=self._to_component_specs(self.outputs_schema or []),
+        )
+
+        return model_path
+
+    def _export_executorch_pte(
+        self,
+        model_path: Path,
+        input_sample: dict[str, torch.Tensor],
+        extra_export_kwargs: dict,
+        delegate: "ExecuTorchDelegate | None",
+        delegate_config: dict[str, Any] | None,
+        to_edge_transform_and_lower: Any,  # noqa: ANN401
+    ) -> None:
+        """Trace, lower, and serialize ``self.model`` to a ``.pte`` file.
+
+        Assumes ``self.model`` is already on CPU and in eval mode; the caller
+        is responsible for restoring the original device/train mode.
+
+        Args:
+            model_path: Destination path for the serialized ``.pte`` file.
+            input_sample: Input tensor dictionary used to trace the model.
+            extra_export_kwargs: Extra keyword arguments for ``torch.export.export``.
+            delegate: ExecuTorch delegate backend to use.
+            delegate_config: Optional delegate-specific configuration.
+            to_edge_transform_and_lower: The imported ``executorch.exir.to_edge_transform_and_lower`` function.
+
+        Raises:
+            ValueError: If an unsupported delegate is specified.
+            ImportError: If the selected delegate's dependencies are not installed.
+        """
+        cpu_input_sample = {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in input_sample.items()}
         aten_dialect = torch.export.export(
             self.model,
-            args=(input_sample,),
+            args=(cpu_input_sample,),
             **extra_export_kwargs,
         )
 
@@ -654,23 +698,12 @@ class ExportablePolicyMixin:
         with model_path.open("wb") as f:
             exec_program.write_to_file(f)
 
-        self.create_manifest(
-            export_dir,
-            ExportBackend.EXECUTORCH,
-            runner=ComponentSpec.from_class(SinglePass),
-            input_names=list(input_sample.keys()),  # type: ignore[arg-type, union-attr]
-            output_names=extra_model_args.output_names,
-            input_features=self._to_component_specs(self.inputs_schema or []),
-            output_features=self._to_component_specs(self.outputs_schema or []),
-        )
-
-        return model_path
-
     def export(
         self,
         output_path: PathLike | str,
         backend: ExportBackend | str,
         input_sample: dict[str, torch.Tensor] | None = None,
+        post_export_hooks: list[Callable[[str], None]] | None = None,
         **export_kwargs: dict,
     ) -> None:
         """Export the model to the specified backend format.
@@ -687,6 +720,9 @@ class ExportablePolicyMixin:
                 input tensor dictionary for model tracing.
                 If None, attempts to use the policy's `sample_input` property.
                 Defaults to None.
+            post_export_hooks: Optional list of callables to run after export completes.
+                Each hook receives the exported model file path (str) and can perform
+                post-processing such as quantization or compression.
             **export_kwargs (dict): Additional keyword arguments to pass to the
                 backend-specific export method.
 
@@ -706,6 +742,11 @@ class ExportablePolicyMixin:
         else:
             msg = f"Unsupported export backend: {backend}"
             raise ValueError(msg)
+
+        if post_export_hooks:
+            model_path = self._prepare_export_path(output_path, backend.extension)
+            for hook in post_export_hooks:
+                hook(str(model_path))
 
     @_quiet_onnx_export_logs()
     def _onnx_core_export_step(
@@ -827,3 +868,22 @@ def _postprocess_openvino_model(ov_model: openvino.Model, output_names: list[str
     if output_names is not None and len(ov_model.outputs) >= len(output_names):
         for i, name in enumerate(output_names):
             ov_model.outputs[i].tensor.set_names({name})
+
+
+def _set_openvino_input_names(ov_model: openvino.Model, input_names: list[str]) -> None:
+    """Collapse each OpenVINO input tensor to one canonical name.
+
+    OpenVINO may attach multiple aliases to a single input tensor during
+    conversion. Runtime input routing expects one deterministic key, so policies
+    can opt in to replacing that alias set with a single configured name.
+    """
+    if not input_names:
+        return
+
+    remaining_ports = list(ov_model.inputs)
+    for name in input_names:
+        for index, port in enumerate(remaining_ports):
+            if name in port.get_names():
+                port.tensor.set_names({name})
+                remaining_ports.pop(index)
+                break

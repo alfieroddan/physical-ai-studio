@@ -18,8 +18,9 @@ from physicalai.inference.data import InferenceFeature, InferenceFeatureDtype, I
 from physicalai.inference.manifest import ComponentSpec
 from safetensors.torch import load_file
 
+from physicalai.data.constants import RTC_EXECUTION_HORIZON, RTC_INFERENCE_DELAY, RTC_MAX_GUIDANCE_WEIGHT
 from physicalai.data.dataset import Dataset
-from physicalai.data.observation import ACTION, IMAGES, STATE, TASK, FeatureType
+from physicalai.data.observation import ACTION, IMAGES, PREV_CHUNK_LEFT_OVER, STATE, TASK, FeatureType
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import (
     ExportParameters,
@@ -28,7 +29,8 @@ from physicalai.export.backends import (
     TorchExportParameters,
 )
 from physicalai.policies.base import Policy
-from physicalai.policies.mixins import SnapFlowPolicyMixin
+from physicalai.policies.mixins import RTCPolicyMixin, SnapFlowPolicyMixin
+from physicalai.policies.mixins.peft import PeftPolicyMixin
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -47,7 +49,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
+class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolicyMixin, Policy):
     """Pi05 Policy - Physical Intelligence's flow matching VLA model.
 
     Lightning wrapper for training and inference with Pi05 model.
@@ -149,6 +151,14 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
         # Finetuning
         freeze_vision_encoder: bool = False,
         train_expert_only: bool = False,
+        # LoRA
+        lora_enabled: bool = False,
+        lora_rank: int = 32,
+        lora_alpha: int | None = None,
+        lora_dropout: float = 0.05,
+        lora_target_modules: str | tuple[str, ...] | None = None,
+        lora_adapter_dtype: Literal["float32", "auto"] = "float32",
+        lora_use_dora: bool = False,
         # Normalization
         normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES",
         # Optimizer
@@ -181,6 +191,13 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
                 compile_mode=compile_mode,
                 freeze_vision_encoder=freeze_vision_encoder,
                 train_expert_only=train_expert_only,
+                lora_enabled=lora_enabled,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_target_modules=lora_target_modules,
+                lora_adapter_dtype=lora_adapter_dtype,
+                lora_use_dora=lora_use_dora,
                 optimizer_lr=optimizer_lr,
                 optimizer_betas=optimizer_betas,
                 optimizer_eps=optimizer_eps,
@@ -224,6 +241,13 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
                 compile_mode=compile_mode,
                 freeze_vision_encoder=freeze_vision_encoder,
                 train_expert_only=train_expert_only,
+                lora_enabled=lora_enabled,
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                lora_dropout=lora_dropout,
+                lora_target_modules=lora_target_modules,
+                lora_adapter_dtype=lora_adapter_dtype,
+                lora_use_dora=lora_use_dora,
                 normalization_mode=normalization_mode,
                 optimizer_lr=optimizer_lr,
                 optimizer_betas=optimizer_betas,
@@ -245,6 +269,13 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
         self._postprocessor: Pi05Postprocessor | None = None
 
         self._dataset_stats = dataset_stats
+
+        if self.config.use_lora and pretrained_name_or_path is None and weight_file is None:
+            logger.warning(
+                "LoRA is enabled (lora_rank=%d) but no pretrained_name_or_path was given. "
+                "LoRA fine-tuning on a randomly initialized model is unlikely to be useful.",
+                self.config.lora_rank,
+            )
 
         if dataset_stats is not None:
             self._initialize_model(dataset_stats, weight_file)
@@ -291,6 +322,7 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             train_expert_only=self.config.train_expert_only,
             gradient_checkpointing=self.config.gradient_checkpointing,
             compile_model=self.config.compile_model,
+            compile_mode=self.config.compile_mode,
             use_random_input_noise=self.config.use_random_input_noise,
         )
         if weights_file is not None:
@@ -319,6 +351,9 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             self.model.paligemma_with_expert.to_bfloat16_for_selected_params(self.config.dtype)
             self.model.paligemma_with_expert._set_requires_grad()  # noqa: SLF001
 
+        if self.config.use_lora:
+            self._inject_lora()
+
         self._preprocessor, self._postprocessor = make_pi05_preprocessors(
             max_action_dim=self.config.max_action_dim,
             stats=dataset_stats,
@@ -330,7 +365,10 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
 
         self._dataset_stats = dataset_stats
 
-    def _from_hf(  # noqa: PLR6301, PLR0913, PLR0912, PLR0915
+        # Apply any RTC state requested before the model was built.
+        self._sync_rtc_to_model()
+
+    def _from_hf(  # noqa: PLR6301, PLR0913, PLR0912, PLR0915, C901
         self,
         pretrained_name_or_path: str | Path,
         *,
@@ -348,6 +386,13 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
         compile_mode: str | None = "max-autotune",
         freeze_vision_encoder: bool = False,
         train_expert_only: bool = False,
+        lora_enabled: bool = False,
+        lora_rank: int = 32,
+        lora_alpha: int | None = None,
+        lora_dropout: float = 0.05,
+        lora_target_modules: str | tuple[str, ...] | None = None,
+        lora_adapter_dtype: Literal["float32", "auto"] = "float32",
+        lora_use_dora: bool = False,
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
         optimizer_eps: float = 1e-8,
@@ -386,6 +431,13 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             compile_mode: Override torch compile mode.
             freeze_vision_encoder: Override whether to freeze the vision encoder.
             train_expert_only: Override whether to train only the action expert.
+            lora_enabled: Override whether LoRA/DoRA fine-tuning is enabled.
+            lora_rank: Override LoRA rank.
+            lora_alpha: Override LoRA alpha scaling factor. ``None`` resolves to lora_rank.
+            lora_dropout: Override LoRA dropout probability.
+            lora_target_modules: Override LoRA target modules (regex or suffix tuple).
+            lora_adapter_dtype: Override precision for newly created LoRA parameters.
+            lora_use_dora: Override whether to use DoRA instead of plain LoRA.
             optimizer_lr: Override learning rate.
             optimizer_betas: Override Adam beta coefficients.
             optimizer_eps: Override optimizer epsilon.
@@ -472,6 +524,15 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             hf_config["compile_mode"] = compile_mode
         hf_config["freeze_vision_encoder"] = freeze_vision_encoder
         hf_config["train_expert_only"] = train_expert_only
+        hf_config["lora_enabled"] = lora_enabled
+        hf_config["lora_rank"] = lora_rank
+        if lora_alpha is not None:
+            hf_config["lora_alpha"] = lora_alpha
+        hf_config["lora_dropout"] = lora_dropout
+        if lora_target_modules is not None:
+            hf_config["lora_target_modules"] = lora_target_modules
+        hf_config["lora_adapter_dtype"] = lora_adapter_dtype
+        hf_config["lora_use_dora"] = lora_use_dora
         hf_config["optimizer_lr"] = optimizer_lr
         hf_config["optimizer_betas"] = optimizer_betas
         hf_config["optimizer_eps"] = optimizer_eps
@@ -611,13 +672,15 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             Action chunk tensor after post-processing.
 
         Raises:
-            ValueError: If the model is not initialized.
+            ValueError: If the model is not initialized, or if RTC is enabled and
+                the batch carries out-of-range RTC control values.
         """
         if self.model is None or self._preprocessor is None or self._postprocessor is None:
             msg = "Model is not initialized"
             raise ValueError(msg)
 
         processed_batch = self._preprocessor(batch.to(self.device).to_dict())
+        self._validate_rtc_inputs(processed_batch)
         actions = self.model.predict_action_chunk(processed_batch)
 
         return self._postprocessor({ACTION: actions})[ACTION]
@@ -726,6 +789,10 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
         """
         return [ExportBackend.TORCH, ExportBackend.OPENVINO]
 
+    # export() is provided by PeftPolicyMixin (merges LoRA adapters into a disposable
+    # copy of self.model before delegating to ExportablePolicyMixin.export() via
+    # cooperative super()); see physicalai.policies.mixins.peft.PeftPolicyMixin.export.
+
     @property
     def inputs_schema(self) -> list[InferenceFeature] | None:
         """Describe the policy's expected model inputs for export tracing.
@@ -733,7 +800,7 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
         Returns:
             A list of feature descriptors matching the model's expected input format,
             covering the robot state, image observations, language task, and any
-            real-time chunking control tensors when ``enable_rtc`` is set on the model.
+            real-time chunking control tensors when :attr:`rtc_enabled` is ``True``.
             Returns ``None`` if the underlying model or dataset stats have not been
             initialized yet.
         """
@@ -782,31 +849,32 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             ),
         )
 
-        if self.model.enable_rtc:
+        if self.rtc_enabled:
+            action_shape = cast("tuple", self._dataset_stats[ACTION]["shape"])
             schema.extend(
                 [
                     InferenceFeature(
                         ftype=InferenceFeatureType.COMMON,
-                        shape=(self.config.chunk_size, self.config.max_action_dim),
-                        name="prev_chunk_left_over",
+                        shape=(self.config.chunk_size, *action_shape),
+                        name=PREV_CHUNK_LEFT_OVER,
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                     InferenceFeature(
                         ftype=InferenceFeatureType.COMMON,
                         shape=(),
-                        name="inference_delay",
+                        name=RTC_INFERENCE_DELAY,
                         dtype=InferenceFeatureDtype.INT64,
                     ),
                     InferenceFeature(
                         ftype=InferenceFeatureType.COMMON,
                         shape=(),
-                        name="max_guidance_weight",
+                        name=RTC_MAX_GUIDANCE_WEIGHT,
                         dtype=InferenceFeatureDtype.FLOAT32,
                     ),
                     InferenceFeature(
                         ftype=InferenceFeatureType.COMMON,
                         shape=(),
-                        name="execution_horizon",
+                        name=RTC_EXECUTION_HORIZON,
                         dtype=InferenceFeatureDtype.INT64,
                     ),
                 ],
@@ -855,10 +923,14 @@ class Pi05(SnapFlowPolicyMixin, ExportablePolicyMixin, Policy):
             )
             raise ValueError(msg)
 
+        normalize_stats: dict[str, Any] = {STATE: self._dataset_stats[f"observation.{STATE}"]}
+        if self.rtc_enabled:
+            normalize_stats[PREV_CHUNK_LEFT_OVER] = self._dataset_stats[ACTION]
+
         base_preproc_specs = [
             ComponentSpec(
                 type="normalize",
-                stats={STATE: self._dataset_stats[f"observation.{STATE}"]},
+                stats=normalize_stats,
                 mode=self.config.normalization_mode.lower(),
             ),
             ComponentSpec(
