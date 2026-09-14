@@ -35,7 +35,7 @@ graph TD
     D[Dataset features] --> R[Resolve complete model config]
     A[Direct arguments] --> R
     H[Pretrained artifact] --> R
-    C[Explicit config] --> I[_initialize_from_config]
+    C[Explicit config] --> I[configure_model]
     K[Checkpoint config] --> I
     R --> I
     I --> M[Model.from_config]
@@ -55,7 +55,7 @@ graph TD
 owns network computation, training loss, validation loss, and temporal indices.
 
 ```python
-class MyModel(Model, FromConfig):
+class MyModel(TemplateModel):
     def forward(
         self,
         batch: dict[str, Tensor],
@@ -85,6 +85,24 @@ class MyModel(Model, FromConfig):
 `compute_loss()` returns a loss tensor with gradients and a metrics dictionary with
 at least a `"loss"` key. `compute_val_loss()` may reuse the training loss.
 
+`predict_action_chunk()` must return the model's complete native action tensor with
+shape `(batch_size, chunk_size, model_action_dim)`. It must not truncate the temporal
+axis to `n_action_steps` or trim padded action dimensions. Mixins such as real-time
+chunking need the full model chunk to revise, blend, or otherwise transform future
+actions before the external action contract is applied.
+
+Chunk and dimension adaptation belong outside the model:
+
+- the policy/postprocessor converts `model_action_dim` to the environment action
+    dimension, including unpadding or feature-based slicing;
+- runtime postprocessing trims the chunk to `n_action_steps` before the base action
+    queue consumes it;
+- exported pipelines add an `action_chunk_trimmer` when `n_action_steps != chunk_size`.
+
+This keeps `chunk_size` as the model prediction horizon and `n_action_steps` as the
+policy execution horizon. A model that returns only `n_action_steps` discards context
+before policy mixins can use it.
+
 The model also implements `observation_delta_indices`, `action_delta_indices`, and
 `reward_delta_indices`. Data loading uses these properties to select the temporal
 context required by the model.
@@ -102,8 +120,10 @@ context required by the model.
 - action queue management inherited from the base class;
 - optional export integration through `ExportablePolicyMixin`.
 
-A native policy implements at least `forward()`, `predict_action_chunk()`,
-`compute_val_loss()`, `training_step()`, and `configure_optimizers()`.
+`TemplatePolicy` implements the common `forward()`, `predict_action_chunk()`,
+`compute_val_loss()`, and `training_step()` flow, along with Lightning checkpoint
+serialization and restoration. A concrete native policy supplies config-driven
+initialization, processors, model, and `configure_optimizers()`.
 
 The base `Policy.select_action()` calls `predict_action_chunk()` when its action queue
 is empty, queues up to `n_action_steps`, and returns one action at a time. `reset()`
@@ -119,51 +139,47 @@ The base class also:
 
 ## Model Configuration
 
-The model config is a serializable description of the final model and its input and
-output contract. Features are ordered lists because order affects model inputs, action
-concatenation, postprocessing, and exported manifests.
+The model config is a serializable description owned by the policy, not the model.
+Features are ordered lists because order affects model inputs, action concatenation,
+postprocessing, and exported manifests.
 
 ```python
 @dataclass
 class MyModelConfig(Config):
     input_features: list[Feature]
     output_features: list[Feature]
+    action_dim: int
     hidden_size: int = 1024
     chunk_size: int = 32
     n_action_steps: int = 32
 ```
 
-Architecture fields stay flat so `FromConfig` can map them directly to matching model
-constructor arguments:
+`MyModel` never stores or exposes this config. Its constructor takes only the flat,
+plain-typed arguments it actually needs — no `Feature` objects, no `list[...]` of
+feature metadata — so the model stays fully described by its own signature and
+remains straightforward to instantiate from a config, CLI, or jsonargparse-style
+tooling:
 
 ```python
-class MyModel(Model, FromConfig):
+class MyModel(TemplateModel):
     def __init__(
         self,
-        input_features: list[Feature],
-        output_features: list[Feature],
         *,
         hidden_size: int = 1024,
         chunk_size: int = 32,
-        n_action_steps: int = 32,
+        action_dim: int = 32,
     ) -> None:
         super().__init__()
-        self._config = MyModelConfig(
-            input_features=input_features,
-            output_features=output_features,
-            hidden_size=hidden_size,
-            chunk_size=chunk_size,
-            n_action_steps=n_action_steps,
-        )
+        self._chunk_size = chunk_size
         ...
 
-    @property
-    def config(self) -> MyModelConfig:
-        return self._config
 ```
 
-Config defaults and constructor defaults should match. Avoid a second policy-specific
-mapping that manually expands every config field into a differently shaped model API.
+`TemplateModel` inherits `jsonargparse.FromConfigMixin` and makes its construction
+non-strict: `from_config()` accepts a dataclass or mapping, keeps only fields declared
+by the concrete model constructor, and delegates those values to jsonargparse. The
+policy can therefore pass its complete config directly; policy-only fields such as
+`input_features`, `output_features`, and `n_action_steps` never reach the model.
 
 Normalization parameters are optional data on each `Feature`. They do not define the
 feature contract. A feature still has a name, type, shape, and position when no
@@ -173,10 +189,10 @@ normalization statistics are available.
 
 | Owner | Responsibilities |
 | --- | --- |
-| Model config | Ordered features, architecture, chunk size, action horizon, and serializable model behavior |
+| Model config | Ordered features, architecture, chunk size, action horizon, and serializable model behavior — held and serialized by the policy |
 | Policy | Training lifecycle, optimizer settings, export settings, artifact selection, external weight loading, and model modifications |
 | Dataset | Training feature contract, feature order, and optional normalization statistics |
-| Model | Network construction, loss computation, temporal indices, and action prediction |
+| Model | Network construction, loss computation, temporal indices, and action prediction — constructed from plain scalar arguments, never from the config object itself |
 | Processors | Conversion and normalization before and after the model |
 | Pretrained resolver | Artifact lookup and translation of artifact metadata into a model config plus weight paths |
 
@@ -186,36 +202,37 @@ must not be inferred indirectly from optimizer settings or `dataset_stats`.
 
 ## One Materialization Path
 
-The policy resolves configuration separately from materializing model-dependent
-objects. All construction routes delegate to `_initialize_from_config()` after they
-have produced the final config.
+The policy resolves and materializes model-dependent objects in `configure_model()`.
+For Lightning-managed routes, this hook runs in the strategy and precision aware
+module-initialization context.
 
 ```python
-def _initialize_from_config(
-    self,
-    config: MyModelConfig,
-    *,
-    weights_path: Path | None = None,
-) -> None:
+def configure_model(self) -> None:
     if self.model is not None:
-        raise RuntimeError("Policy model is already initialized")
+        return
 
-    self._input_features = config.input_features
-    self._output_features = config.output_features
-    self._n_action_steps = config.n_action_steps
-    self._chunk_size = config.chunk_size
+    if self._config is not None:
+        config = self._config
+        weights_path = None
+    else:
+        config, weights_path = self._resolve_config_and_weights()
+
+    self._config = config
     self.model = MyModel.from_config(config)
     self._preprocessor, self._postprocessor = make_policy_processors(config)
 
     if weights_path is not None:
         self.model.load_weights(weights_path)
-
-    self._apply_model_modifications()
 ```
 
+Lightning may call this hook for fit, validation, testing, and prediction in the same
+process. The model guard makes repeated calls no-ops.
+
+```python
 The order is deliberate:
 
-1. Record the resolved feature and action contract.
+1. Record the resolved feature and action contract, and keep the config itself for
+   checkpointing and export (the model does not retain it).
 2. Construct the model from that complete config.
 3. Construct processors from the same config.
 4. Load compatible external weights into the final architecture.
@@ -240,51 +257,98 @@ def from_config(
     optimizer_lr: float = 1e-4,
 ) -> "MyPolicy":
     policy = cls(
+        pretrained_name_or_path=None,
         n_action_steps=config.n_action_steps,
         optimizer_lr=optimizer_lr,
     )
-    policy._initialize_from_config(config)
+    policy._config = config
+    policy.configure_model()
     return policy
 ```
 
-### Fresh eager construction
+### Constructor construction
 
-When the constructor receives complete input and output features, it can initialize
-immediately:
+When the constructor receives a pretrained path or complete input and output features,
+it calls `configure_model()` immediately:
 
 ```text
 policy constructor
+    -> configure_model
     -> resolve config from features and model defaults
-    -> _initialize_from_config
+    -> construct model and processors
 ```
 
-This route is useful when the feature contract is already known independently of a
-trainer or dataset.
+This keeps constructor-created policies ready for standalone use. Lightning may call
+`configure_model()` again inside its strategy-aware context, but the initialized-model
+guard makes that call a no-op. `from_config()` remains the direct explicit-config route.
 
 ### Lazy dataset construction
 
 When features are omitted, `setup("fit")` obtains ordered observation and action
-features from the training dataset, resolves the final config, and initializes once:
+features from the training dataset. Lightning then calls `configure_model()` once the
+strategy-aware initialization context is active:
 
 ```text
 Lightning setup
     -> training dataset input and output features
+    -> Lightning configure_model
     -> resolve fresh or pretrained config
-    -> _initialize_from_config
+    -> construct model and processors
 ```
 
 This is the primary training route. It uses dataset features directly rather than
 reconstructing feature identity, type, shape, and order from `dataset_stats`.
 
-If the policy was initialized eagerly, `setup()` validates its resolved feature
-contract against the dataset. A mismatch raises an error instead of rebuilding the
-model and losing its weights.
+If the policy was initialized through `from_config()`, `setup()` adopts the dataset feature contract
+through `set_features()`. This rebuilds processors and updates the policy-owned config
+without rebuilding the model or losing its weights. The replacement output features
+must retain the action width used to construct the model.
+
+### Feature adaptation
+
+An initialized policy may replace feature names, ordering, and normalization metadata
+without reconstructing the model:
+
+```python
+def set_features(
+    self,
+    input_features: list[Feature],
+    output_features: list[Feature],
+) -> None:
+    if self.model is None or self._config is None:
+        raise RuntimeError("Policy model is not initialized")
+
+    action_dim = resolve_action_dim(output_features)
+    if action_dim != self._config.action_dim:
+        raise ValueError("Replacement output features change the model action width")
+
+    self._config = replace(
+        self._config,
+        input_features=list(input_features),
+        output_features=list(output_features),
+        action_dim=action_dim,
+    )
+    self._preprocessor, self._postprocessor = make_policy_processors(self._config)
+    self.reset()
+```
+
+`rename_features(mapping)` validates source and replacement names, preserves feature
+metadata and order with `dataclasses.replace()`, and delegates installation to
+`set_features()`. Renaming applies to resolved input features; output changes should
+be supplied explicitly to `set_features()`.
 
 ### Pretrained construction
 
 A pretrained resolver returns a model config and weight artifacts separately. Dataset
 or constructor features may replace the artifact's feature metadata before model
 construction when the architecture supports that adaptation.
+
+`pretrained_name_or_path` remains a constructor argument because LightningCLI must be
+able to express this route in YAML. The same constructor is also the Python API; a
+second `from_pretrained()` method would duplicate behavior without adding a distinct
+construction path. Its default is `None`, and it is excluded from
+`save_hyperparameters()` because an artifact location is not part of a trained
+checkpoint's resolved architecture.
 
 ```python
 pretrained_config, weights_path = self._from_hf(pretrained_name_or_path)
@@ -294,7 +358,8 @@ config = replace(
     output_features=resolved_output_features,
     n_action_steps=self._n_action_steps,
 )
-self._initialize_from_config(config, weights_path=weights_path)
+self._config = config
+self.configure_model()
 ```
 
 The final feature-dependent architecture is constructed before weights are loaded.
@@ -307,34 +372,57 @@ The checkpoint stores the complete model config as structured data:
 
 ```python
 def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-    checkpoint["model_config"] = self._require_model().config.to_dict()
+    assert self._config is not None
+    checkpoint["model_config"] = self._config.to_dict()
 ```
 
 During restoration, the policy deserializes the config and initializes the
 architecture before Lightning restores the state dictionary:
 
 ```python
+@classmethod
+def load_from_checkpoint(cls, checkpoint_path, **kwargs):
+    kwargs["pretrained_name_or_path"] = None
+    return super().load_from_checkpoint(checkpoint_path, **kwargs)
+
 def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
     config_data = checkpoint.get("model_config")
-    if isinstance(config_data, Mapping):
-        self._restore_model_config(config_data)
+    if not isinstance(config_data, Mapping):
+        return
+
+    resolved_config = MyModelConfig.from_dict(config_data)
+    if self._config is not None:
+        if self._config != resolved_config:
+            raise ValueError("Checkpoint feature contract does not match the initialized policy")
+        return
+
+    self._config = resolved_config
+    self.configure_model()
 ```
 
 If the policy is already initialized, restoration verifies that the configs match.
-Otherwise it delegates to `_initialize_from_config()`. This route does not fetch or
+Otherwise it delegates to `configure_model()`. This route does not fetch or
 reload external pretrained weights; Lightning restores the checkpoint tensors.
+Lightning constructs the policy before calling `on_load_checkpoint()`, so clearing
+`pretrained_name_or_path` inside that hook would be too late. The classmethod override
+sets it to `None` before delegating to Lightning, overriding both checkpoint metadata
+and caller-provided kwargs. Excluding the path from `save_hyperparameters()` keeps new
+checkpoints clean; the explicit override also protects restoration of older or
+externally produced checkpoints that contain an artifact path.
 
 | Route | Config source | Weight source |
 | --- | --- | --- |
 | Explicit config | Caller-provided model config | None |
-| Fresh eager | Constructor features and defaults | None |
+| Constructor | Features and defaults resolved by `configure_model()` | None |
 | Fresh lazy | Training dataset features and policy model options | None |
 | Pretrained | Artifact config adapted to resolved features | External artifact |
 | Checkpoint | Serialized `model_config` | Lightning state dictionary |
 
 ## Processing and Runtime Flow
 
-The processors and model receive the same ordered feature contract:
+The policy-owned config is the feature-contract source of truth. Processors consume
+its ordered `Feature` lists, while the model receives preprocessed tensors and plain
+dimensions derived from that contract:
 
 ```text
 Observation
@@ -356,18 +444,18 @@ A typical policy delegates runtime behavior as follows:
 
 ```python
 def forward(self, batch: Observation):
-    model = self._require_model()
+    assert self.model is not None
     if self.training:
-        return model(self._prepare_batch(batch, require_actions=True))
+        return self.model(self._prepare_batch(batch, require_actions=True))
     return self.predict_action_chunk(batch)
 
 def compute_val_loss(self, batch: Observation):
-    model = self._require_model()
-    return model.compute_val_loss(self._prepare_batch(batch, require_actions=True))
+    assert self.model is not None
+    return self.model.compute_val_loss(self._prepare_batch(batch, require_actions=True))
 
 def predict_action_chunk(self, batch: Observation) -> Tensor:
-    model = self._require_model()
-    actions = model.predict_action_chunk(
+    assert self.model is not None
+    actions = self.model.predict_action_chunk(
         self._prepare_batch(batch, require_actions=False)
     )
     return self._postprocessor(actions)
@@ -412,10 +500,10 @@ chunk output. A VLA policy can append a language input as SmolVLA does.
 ```python
 @property
 def inputs_schema(self) -> list[InferenceFeature] | None:
-    if self.model is None:
+    if self._config is None:
         return None
 
-    config = self._require_model().config
+    config = self._config
     state_feature = next(
         feature for feature in config.input_features
         if feature.ftype == FeatureType.STATE
@@ -456,9 +544,9 @@ def inputs_schema(self) -> list[InferenceFeature] | None:
 
 @property
 def outputs_schema(self) -> list[InferenceFeature] | None:
-    if self.model is None:
+    if self._config is None:
         return None
-    config = self.model.config
+    config = self._config
     action_feature = config.output_features[0]
     return [
         InferenceFeature(
@@ -479,7 +567,7 @@ the predicted chunk and execution horizon adds a manifest postprocessor:
 ```python
 @property
 def extra_export_args(self) -> dict[str, ExportParameters]:
-    config = self._require_model().config
+    config = self._config
     output_names = [feature.name for feature in (self.outputs_schema or [])]
     postprocessors: list[ComponentSpec] = []
     if config.chunk_size != config.n_action_steps:
@@ -553,29 +641,43 @@ not be added to the model config merely to invoke an export.
 A native policy should maintain these invariants:
 
 1. A policy instance materializes its model at most once.
-2. Every model is constructed from a complete model config.
-3. Every construction route delegates to `_initialize_from_config()`.
-4. The model and processors receive the same ordered features.
+2. Every model is constructed from a complete model config, but never stores or
+   exposes that config itself — the policy is the sole owner.
+3. Every construction route delegates to `configure_model()`.
+4. Processors and export metadata use the policy-owned ordered features; the model
+    receives only the plain dimensions derived from them.
 5. External weights load only after the final architecture is constructed.
 6. Checkpoint restoration does not fetch external pretrained weights.
 7. `config.n_action_steps` agrees with the base policy action queue.
 8. Lazy training uses the dataset's ordered feature contract.
-9. Eager feature mismatches fail instead of silently rebuilding the model.
+9. Feature adaptation rebuilds processors but never silently rebuilds the model; the
+    configured action width remains unchanged.
 10. Export schema order matches model config and dataset feature order.
+11. `configure_model()` is idempotent so repeated Lightning stage calls are no-ops.
+12. `Model.predict_action_chunk()` returns the full `(B, chunk_size, model_action_dim)`
+    tensor; temporal and dimensional trimming happens afterward in policy-owned
+    processing.
 
 ## Author Checklist
 
 When adding or migrating a native policy:
 
-- Define one serializable model config with ordered input and output features.
-- Keep model config and model constructor fields flat and aligned.
-- Make the model constructible with `Model.from_config(config)`.
-- Build model and processors only in `_initialize_from_config()`.
+- Define one serializable model config, owned by the policy, with ordered input and
+  output features.
+- Keep the model's constructor flat, plain-typed, and free of `Feature` objects; the
+  policy reduces features (e.g. `output_features` -> `action_dim`) before constructing it.
+- Make the model constructible with `Model.from_config(config)`, and never store or
+  expose that config from the model itself.
+- Resolve configuration and build model and processors in `configure_model()`.
 - Keep pretrained config resolution separate from weight loading.
 - Read lazy training features directly from the dataset.
+- Route post-initialization feature changes through `set_features()` and reject output
+    widths that are incompatible with the initialized model.
 - Save and restore the complete model config in Lightning checkpoints.
 - Implement training, validation, and action prediction against `Observation`.
 - Keep `n_action_steps` synchronized across config, postprocessing, and the action queue.
+- Return the full native action chunk from the model; never apply `n_action_steps` or
+    environment-dimension trimming inside `Model.predict_action_chunk()`.
 - Derive export schemas from the same ordered feature contract when export is supported.
 
 ## See Also
