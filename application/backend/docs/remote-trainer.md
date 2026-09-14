@@ -23,6 +23,22 @@ Then:
 2. The backend polls progress, downloads the archive, and imports it as a model.
 3. The service deletes the uploaded dataset once the job finishes.
 
+> [!IMPORTANT]
+> A Hugging Face token is resolved once by the Studio backend (Settings page,
+> or a legacy `HF_TOKEN` in the Studio backend's own environment) and sent
+> per-job in the `POST /jobs` body (`hf_token`), cached in memory only for
+> that job (see `trainer.store.JobStore.stash_secret`/`take_secret`), and never
+> written to disk. This service's own `HF_TOKEN` environment variable (see
+> [Optional Hugging Face token](#optional-hugging-face-token) below) is only a
+> *fallback* used when the studio sends none for a job - it is left untouched
+> and used as-is whenever the studio doesn't send one, but is never itself
+> forwarded to the studio, and is overridden for the duration of any job the
+> studio *does* send a token for. **SSH-provisioned trainer containers never
+> receive any environment variables at launch at all** (see
+> `services.ssh.docker_ops.build_run_argv`), so that fallback does not exist
+> for them - the Studio Settings page is the *only* place a token can come
+> from for an SSH-provisioned job.
+
 ## Install
 
 ```bash
@@ -51,7 +67,7 @@ directory.
 
 | Variable                     | Required | Description                                  |
 | ---------------------------- | -------- | -------------------------------------------- |
-| `HF_TOKEN`                   | yes, if training a policy that downloads gated/private model weights | **Read** access to any gated/private model weights selected for training. |
+| `HF_TOKEN`                   | no       | Fallback used only when the studio sends no token for a job (see the [!IMPORTANT] note above); has no effect for SSH-provisioned trainers. |
 | `TRAINER_STORAGE_DIR`        | no       | Working directory for jobs and artifacts.    |
 | `TRAINER_MAX_CONCURRENT_JOBS`| no       | Queue concurrency (default 1).               |
 | `TRAINER_MAX_UNCOMPRESSED_BYTES` | no   | Cap on an uploaded dataset's uncompressed size. |
@@ -198,9 +214,13 @@ docker compose -f docker-compose.trainer.yaml --profile cuda down   # add -v to 
 Set `TRAINER_IMAGE_TAG` in `.env.trainer` to an immutable
 `<version>-dev-<short-sha>` tag or resolved digest before using this in
 anything but a throwaway environment; the default `main` tag moves (see
-[Container images](#container-images) for what each tag tracks). The XPU profile also needs
-`RENDER_NODE` and `RENDER_GID` set to the host's Intel GPU render node (see
-`.env.trainer.example`).
+[Container images](#container-images) for what each tag tracks). For the XPU
+profile, also uncomment the `devices`/`group_add` entries under
+`physicalai-trainer-xpu` in `docker-compose.trainer.yaml` and set
+`RENDER_NODE`/`RENDER_GID` to the host's Intel GPU render node (see
+`.env.trainer.example`). They're commented out by default because Docker
+Compose evaluates `${RENDER_GID:?...}` for every service in the file — left
+active, it would also block `--profile cuda` runs when `RENDER_GID` isn't set.
 
 The examples below use a Docker-managed volume so the image's non-root
 `trainer` user can persist its queue, uploaded datasets, and artifacts
@@ -272,6 +292,12 @@ docker run -d \
 Do not use `--privileged` or mount the Docker socket for either image.
 
 #### Optional Hugging Face token
+
+Only relevant for a manually-run/direct-URL trainer (see [Run a container
+manually](#run-a-container-manually)): SSH-provisioned trainer containers
+never receive this or any other environment variable at launch, so setting it
+there has no effect - use the Studio Settings page instead (see the
+[!IMPORTANT] note under [How it fits together](#how-it-fits-together)).
 
 Set `HF_TOKEN` only when you train a policy that downloads gated/private
 model weights. Place a read-only token in a host file with restrictive
