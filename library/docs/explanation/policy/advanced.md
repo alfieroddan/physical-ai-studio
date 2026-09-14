@@ -1,16 +1,12 @@
 # Advanced Patterns
 
-Add these patterns only after the minimal config, model, policy, and processor flow is
-working. Each capability has its own owner and ordering requirement; none should make
-the core policy difficult to skim.
+Add these after the minimal policy works. Keep each feature in its owning mixin.
 
 ## PEFT and LoRA
 
-PEFT crosses config, model, and policy boundaries. Use the existing cooperative mixins
-rather than adding policy-specific adapter logic.
+Use all three PEFT layers:
 
 ```python
-@dataclass(frozen=True, kw_only=True)
 class MyModelConfig(PeftConfigMixin, Config):
     ...
 
@@ -23,123 +19,80 @@ class MyPolicy(PeftPolicyMixin, TemplatePolicy):
     ...
 ```
 
-Order matters:
+Order:
 
-1. construct the base model;
-2. load pretrained base-model weights, when present;
-3. inject adapters when `config.use_lora` is enabled;
-4. let Lightning restore checkpoint tensors.
+1. Create the base model.
+2. Load pretrained base weights.
+3. Inject adapters.
+4. Load checkpoint tensors.
 
-Adapter injection changes state-dict keys, so PEFT configuration is reconstruction
-state and belongs in the serialized model config. The model supplies
-architecture-specific default target modules; the policy mixin owns lifecycle wiring.
+PEFT settings belong in the saved config. Default target modules belong on the model.
 
 ## Gradient Checkpointing
 
-Gradient checkpointing is a training-time model modification. Keep its setting on the
-policy unless it changes serialized architecture behavior.
+Keep enablement on the model. The policy only invokes it.
 
 ```python
-def _apply_model_modifications(self) -> None:
-    assert self.model is not None
-    if self.gradient_checkpointing:
-        self.model.gradient_checkpointing_enable()
+if self.gradient_checkpointing:
+    self.model.gradient_checkpointing_enable()
 ```
 
-Apply it after model construction and base-weight loading. Keep the model-specific
-enablement mechanism in the model; the policy only decides whether to invoke it.
+Apply it after model creation and base-weight loading.
 
 ## Real-Time Chunking
 
-RTC is runtime state rather than base architecture. Use `RTCPolicyMixin` for the
-policy lifecycle and checkpointed enabled flag, and `RTCModelMixin` for model-side
-behavior.
+Use `RTCPolicyMixin` and `RTCModelMixin`. Sync state after model creation.
 
-```python
-class MyModel(RTCModelMixin, TemplateModel):
-    ...
-
-class MyPolicy(RTCPolicyMixin, TemplatePolicy):
-    ...
-```
-
-Synchronize RTC after the model exists. The RTC transform consumes the model's full
-native action chunk before postprocessing trims it to `n_action_steps`. A model that
-returns only the execution horizon removes context RTC may need.
+RTC must receive the full action chunk. Trim to `n_action_steps` afterward.
 
 ## Checkpoint Restoration
 
-Checkpoint reconstruction follows the architecture invariant: build the final module
-structure before Lightning loads tensors.
+The shared policy base owns the normal hooks:
 
 ```python
-def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-    assert self._config is not None
-    checkpoint["model_config"] = self._config.to_dict()
+def on_save_checkpoint(self, checkpoint):
+    checkpoint["model_config"] = self.config.to_dict()
 
 @classmethod
-def load_from_checkpoint(cls, checkpoint_path, **kwargs):
+def load_from_checkpoint(cls, path, **kwargs):
     kwargs["pretrained_name_or_path"] = None
-    return super().load_from_checkpoint(checkpoint_path, **kwargs)
+    return super().load_from_checkpoint(path, **kwargs)
 
-def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-    config_data = checkpoint.get("model_config")
-    if not isinstance(config_data, Mapping):
-        return
-
-    restored = MyModelConfig.from_dict(config_data)
-    if self._config is not None and self._config != restored:
-        raise ValueError("Checkpoint config does not match the initialized policy")
-
-    self._config = restored
+def on_load_checkpoint(self, checkpoint):
+    self._config = MyModelConfig.from_dict(checkpoint["model_config"])
     self.configure_model()
 ```
 
-In production these cooperative hooks belong in the shared base policy. A concrete
-policy extends them only for policy-specific reconstruction state.
-
-The pretrained path must be cleared before Lightning invokes the constructor. Clearing
-it in `on_load_checkpoint()` is too late and can trigger an unnecessary artifact
-resolution. Restoration loads weights from the checkpoint state dictionary, never
-from the original artifact.
+Clear the pretrained path before construction. Build the final module structure before
+Lightning loads tensors. Extend these hooks only for policy-specific state.
 
 ## Feature Adaptation
 
-Support post-construction feature adaptation only when it does not change model
-architecture. Validate action width, replace the policy-owned feature contract,
-rebuild processors, and reset runtime queues. Never silently rebuild the model.
+Allow feature changes only when model architecture stays valid.
 
-Renaming preserves feature metadata and order. Normalization changes remain processor
-state changes; they do not redefine feature identity.
+1. Validate the action width.
+2. Replace the config feature lists.
+3. Rebuild processors.
+4. Reset runtime queues.
+5. Do not rebuild the model.
 
-## Exceptional Export Customization
+Renaming must preserve metadata and order.
 
-A concrete policy should not contain `to_onnx()`, `to_openvino()`, tracing, or manifest
-logic. Put export behavior in a dedicated mixin such as `MyPolicyExportMixin` so the
-main policy remains readable.
+## Export Exceptions
 
-Start with the public export properties described in [Export API](export.md): schemas,
-a raw sample, backend parameters, and supported backends. They cover ordinary policy
-customization.
+Keep export code in a dedicated policy export mixin.
 
-Some models need backend-specific preprocessing that the standard
-`ExportablePolicyMixin` flow cannot express. In that exceptional case, the dedicated
-export mixin may override `_get_default_export_input_sample()` or, as a last resort, a
-backend method. Keep the override narrow and delegate to `super()` after adapting the
-sample.
+Use schemas, samples, backend parameters, and supported backends first. Override
+`_get_default_export_input_sample()` only when those hooks cannot prepare tracing
+inputs. Override a backend method only as a last resort.
 
 ```python
 class MyPolicyExportMixin(ExportablePolicyMixin):
     def _get_default_export_input_sample(self):
         sample = super()._get_default_export_input_sample()
-        if sample is None:
-            return None
-        return adapt_trace_inputs(sample)
+        return None if sample is None else adapt_trace_inputs(sample)
 ```
 
-`_get_default_export_input_sample()` is private implementation plumbing, not a routine
-policy interface. An override accepts maintenance coupling to the base export flow and
-must have a focused export test. Do not add this override to the core policy class.
+Private-hook overrides need focused export tests.
 
-See [Export API Migration](export-api-migration.md) for moving existing policy-local
-export code into this ownership model.
+See [Policy Migration](migration.md) for migration order.

@@ -1,185 +1,106 @@
 # Required Interfaces
 
-This page separates the methods a policy author must implement from behavior inherited
-from the shared base classes. The distinction keeps concrete policies small and makes
-reviews focus on policy-specific decisions.
+A minimal policy needs a config, model, policy, and processors.
 
-## Minimal Working Policy
+## Config
 
-A new policy needs three pieces:
-
-1. a serializable model config;
-2. a model that computes loss and predicts a full action chunk;
-3. a policy that materializes the model and configures its optimizer.
-
-Processors are also required at runtime, but their implementation is a separate
-boundary. The policy creates them; it does not embed their normalization or conversion
-logic.
-
-## Config Requirements
-
-The config must describe everything needed to reconstruct the model and interpret its
-inputs and outputs:
+The serializable config contains:
 
 - ordered input and output features;
-- architecture dimensions and behavior;
-- `chunk_size`, the model prediction horizon;
-- `n_action_steps`, the execution horizon;
-- any state-dict-shaping capability configuration.
+- model architecture values;
+- `chunk_size`;
+- `n_action_steps`;
+- state-dict-shaping capability settings.
 
-The policy owns and serializes the config. The model receives only flat constructor
-arguments and does not retain the config object.
+The policy owns the config. The model receives flat constructor values.
 
-## Required Model Overrides
+## Model
 
-### `compute_loss(batch)`
+### Required
 
-Computes the differentiable training loss. It returns the loss tensor and a metrics
-dictionary containing at least `"loss"`.
+- A flat, config-free constructor.
+- `compute_loss(batch)` returns loss and metrics.
+- `predict_action_chunk(batch)` returns the full native action chunk.
 
-### `predict_action_chunk(batch)`
+Do not trim to `n_action_steps` or environment width in the model.
 
-Returns the complete native action prediction with shape
-`(batch_size, chunk_size, model_action_dim)`. It must not trim to `n_action_steps` or
-to the environment action width.
+### Usually Inherited
 
-### Flat constructor
-
-The model constructor declares the scalar and tensor-shape values needed to construct
-the network. It does not accept the policy config or `Feature` objects.
-
-## Inherited Model Flow
-
-The base model can provide `forward()`:
+`forward()` may dispatch by mode:
 
 ```text
-training mode  -> compute_loss(batch)
-evaluation mode -> predict_action_chunk(batch)
+training -> compute_loss(batch)
+evaluation -> predict_action_chunk(batch)
 ```
 
-A concrete model overrides `forward()` only when its dispatch or return contract is
-genuinely different. Repeating the standard branch is useful in explanatory docs but
-is not a required production override.
+`compute_val_loss()` may call `compute_loss()`.
 
-`compute_val_loss()` may default to `compute_loss()`. Override it only when validation
-uses different computation or metrics.
+### Temporal Indices
 
-## Temporal Delta Indices
+Override only the streams the model consumes:
 
-Temporal delta indices tell the data loader which time-relative samples the model
-consumes. Their values are part of the model's data contract, not an optimization.
+- `observation_delta_indices`: current or past observations;
+- `action_delta_indices`: supervised action steps;
+- `reward_delta_indices`: reward context.
 
-- `observation_delta_indices` selects current or historical observations;
-- `action_delta_indices` selects action targets, often the complete training chunk;
-- `reward_delta_indices` selects reward context when the model consumes rewards.
+Use empty defaults when no temporal context is needed. Extra indices change dataset
+sampling and batch shape.
 
-The base model should return empty/default indices. Override a property only when the
-model actually consumes that temporal stream. For example, a policy using two prior
-observations returns negative observation offsets; a chunk predictor returns action
-offsets matching its supervised horizon. Do not declare context merely because the
-dataset contains it: extra indices change sampling requirements and batch shape.
+## Policy
 
-## Required Policy Overrides
+### Required
 
-### `forward(batch)`
+- `setup(stage)`: read and validate dataset features.
+- `configure_model()`: create model and processors once.
+- `forward(batch)`: dispatch training and inference.
+- `predict_action_chunk(batch)`: preprocess, predict, and postprocess.
+- `training_step(batch, batch_idx)`: return loss and log metrics.
+- `configure_optimizers()`: create the optimizer and scheduler.
 
-Dispatches training batches to model loss computation and evaluation batches to
-action prediction.
+`configure_model()` must return when `self.model` already exists.
 
-### `predict_action_chunk(batch)`
+The base policy owns the public `config` property, checkpoint plumbing, device
+transfer, `select_action()`, and `reset()`.
 
-Preprocesses observations, invokes the model's full-chunk prediction, and applies
-policy postprocessing.
+`compute_val_loss()` and batch preparation stay on the concrete policy because they
+use its model and processor types.
 
-### `training_step(batch, batch_idx)`
-
-Runs the training forward path, validates the loss/metrics result, and logs the
-policy's training metrics.
-
-### `configure_model()`
-
-The sole idempotent materialization method. It resolves or consumes the complete
-config, constructs model and processors, loads optional base weights, and applies
-reconstruction-sensitive modifications in the required order.
-
-It must return without work when the model already exists.
-
-### `setup(stage)`
-
-Defines the interaction between the policy and its data source. During training setup,
-it reads the dataset's ordered observation and action features, validates them against
-an existing policy config, or records them for lazy materialization. It must use
-dataset features directly rather than reconstructing the feature contract from
-normalization statistics.
-
-Stages that do not require data-driven policy setup should return without work.
-
-### `configure_optimizers()`
-
-Creates the optimizer and optional scheduler from policy-owned training settings.
-Optimizer settings do not belong in the model config.
-
-## Additional Policy Methods
-
-The concrete policy also implements `compute_val_loss()` and its private batch
-preparation helper because those operations depend on its model and processor types.
-Feature adaptation methods such as `set_features()` and `rename_features()` are
-policy-specific and should exist only when that policy supports safe adaptation.
-
-The shared base policy continues to own:
-
-- checkpoint hooks persist and restore the resolved config;
-- `select_action()` fills and consumes the execution-horizon action queue;
-- `reset()` clears runtime state between episodes.
-
-Keep the concrete methods linear and explicit so the complete policy flow remains
-easy to audit. See the [implementation guide](how-to.md) for the minimal shape.
-
-## Processor Contract
+## Processors
 
 The preprocessor:
 
-- converts an `Observation` into model tensors;
+- converts `Observation` values to model tensors;
 - preserves configured feature order;
-- applies input normalization from processor or dataset state.
+- normalizes inputs and action targets.
 
 The postprocessor:
 
-- maps model outputs back to configured action features;
-- reverses output normalization;
-- removes padded model dimensions;
-- trims the runtime chunk to `n_action_steps` at the appropriate boundary.
+- restores action scale;
+- preserves output feature order;
+- removes padded dimensions;
+- trims to `n_action_steps`.
 
-Processor state does not define feature identity or model architecture.
+Processor state does not define features or model architecture.
 
 ## Optional Interfaces
 
-Implement these only when the policy supports the corresponding route or capability:
-
-| Interface | Implement when |
+| Interface | Use when |
 | --- | --- |
-| Pretrained config resolver | The policy loads an external pretrained artifact |
-| `set_features()` or feature rename support | A constructed model can safely adapt names/order without changing architecture |
-| Export mixin properties | The policy supports export tracing or manifest generation |
-| PEFT model targets | The architecture supports LoRA/PEFT adapters |
-| RTC model behavior | The model supports real-time chunking |
-| Gradient-checkpointing hook | The model exposes a supported activation-checkpointing mechanism |
-| Custom validation loss | Validation differs from training loss |
-| Temporal delta indices | The model consumes temporal observations, actions, or rewards |
+| Pretrained resolver | Loading external artifacts |
+| `set_features()` or rename support | Metadata can change without rebuilding the model |
+| Export properties | Supporting export |
+| PEFT targets | Supporting LoRA |
+| RTC behavior | Supporting real-time chunking |
+| Gradient-checkpointing hook | The model supports it |
+| Custom validation loss | Validation differs from training |
+| Temporal indices | The model consumes temporal context |
 
-Checkpoint restoration is shared lifecycle behavior, not a method every concrete
-policy reimplements. Policies with unusual reconstruction requirements extend the
-cooperative hooks described in [Advanced Patterns](advanced.md).
+## Checklist
 
-## Review Checklist
-
-A minimal policy is complete when:
-
-- the config can reconstruct the architecture without dataset statistics;
-- the model constructor is flat and config-free;
-- loss and full-chunk prediction are implemented;
-- every construction route reaches the same guarded `configure_model()`;
-- processors use the config's ordered features and separate normalization state;
-- optimizer construction is explicit;
-- policy runtime and training methods are linear and free of unrelated helpers;
-- temporal indices describe only context the model actually consumes.
+- Config reconstructs the model without `dataset_stats`.
+- Model constructor is flat and config-free.
+- Loss and full-chunk prediction are implemented.
+- Every route calls guarded `configure_model()`.
+- Processors use ordered features and separate normalization state.
+- Policy flow is short and explicit.
+- Temporal indices match the data the model consumes.
