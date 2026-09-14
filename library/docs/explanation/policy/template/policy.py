@@ -116,7 +116,7 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
         return self._config
 
     @staticmethod
-    def _from_hf(
+    def _resolve_config_from_hf(
         pretrained_name_or_path: str | Path,
     ) -> tuple[NewPolicyModelConfig, Path]:
         """Fake resolver standing in for downloading and parsing Hugging Face checkpoint artifacts."""
@@ -152,7 +152,7 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
             config = self._config
             weights_path = None
         elif self._pretrained_name_or_path is not None:
-            pretrained_config, weights_path = self._from_hf(self._pretrained_name_or_path)
+            pretrained_config, weights_path = self._resolve_config_from_hf(self._pretrained_name_or_path)
             resolved_output_features = (
                 self._output_features
                 if self._output_features is not None

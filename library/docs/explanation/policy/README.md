@@ -30,6 +30,26 @@ policy_name/
 Small policies may combine these files. The separation of responsibilities matters
 more than the file layout.
 
+### Lean policy implementations
+
+A concrete policy should be as lean as possible. A reader should be able to skim its
+constructor, config resolution, `configure_model()`, and optimizer setup and quickly
+understand every supported construction route and the order in which the model is
+materialized, weights are loaded, and optional capabilities are applied.
+
+The policy is an orchestration layer, not the place to reimplement shared mechanics:
+
+- common Lightning steps, checkpoint hooks, and action-queue behavior belong in the
+    base policy;
+- tensor computation and loss logic belong in the model;
+- normalization and runtime input/output adaptation belong in processors;
+- artifact parsing belongs in a focused resolver;
+- reusable optional behavior belongs in capability mixins.
+
+The concrete policy should mainly declare policy-specific choices and connect those
+owners. If understanding it requires tracing duplicated lifecycle code or unpacking
+model internals, responsibility has probably landed at the wrong layer.
+
 ```mermaid
 graph TD
     D[Dataset features] --> R[Resolve complete model config]
@@ -123,7 +143,9 @@ context required by the model.
 `TemplatePolicy` implements the common `forward()`, `predict_action_chunk()`,
 `compute_val_loss()`, and `training_step()` flow, along with Lightning checkpoint
 serialization and restoration. A concrete native policy supplies config-driven
-initialization, processors, model, and `configure_optimizers()`.
+initialization, processors, model, and `configure_optimizers()`. It should not override
+shared lifecycle methods merely to repeat the base flow; keeping that flow centralized
+is what makes each concrete policy short enough to audit by inspection.
 
 The base `Policy.select_action()` calls `predict_action_chunk()` when its action queue
 is empty, queues up to `n_action_steps`, and returns one action at a time. `reset()`
@@ -393,7 +415,7 @@ construction path. Its default is `None`, and it is excluded from
 checkpoint's resolved architecture.
 
 ```python
-pretrained_config, weights_path = self._from_hf(pretrained_name_or_path)
+pretrained_config, weights_path = self._resolve_config_from_hf(pretrained_name_or_path)
 config = replace(
     pretrained_config,
     input_features=resolved_input_features,
