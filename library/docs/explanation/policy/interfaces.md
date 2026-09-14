@@ -81,6 +81,21 @@ dataset contains it: extra indices change sampling requirements and batch shape.
 
 ## Required Policy Overrides
 
+### `forward(batch)`
+
+Dispatches training batches to model loss computation and evaluation batches to
+action prediction.
+
+### `predict_action_chunk(batch)`
+
+Preprocesses observations, invokes the model's full-chunk prediction, and applies
+policy postprocessing.
+
+### `training_step(batch, batch_idx)`
+
+Runs the training forward path, validates the loss/metrics result, and logs the
+policy's training metrics.
+
 ### `configure_model()`
 
 The sole idempotent materialization method. It resolves or consumes the complete
@@ -89,27 +104,36 @@ reconstruction-sensitive modifications in the required order.
 
 It must return without work when the model already exists.
 
+### `setup(stage)`
+
+Defines the interaction between the policy and its data source. During training setup,
+it reads the dataset's ordered observation and action features, validates them against
+an existing policy config, or records them for lazy materialization. It must use
+dataset features directly rather than reconstructing the feature contract from
+normalization statistics.
+
+Stages that do not require data-driven policy setup should return without work.
+
 ### `configure_optimizers()`
 
 Creates the optimizer and optional scheduler from policy-owned training settings.
 Optimizer settings do not belong in the model config.
 
-## Inherited Policy Flow
+## Additional Policy Methods
 
-The base policy owns these methods for the standard lifecycle:
+The concrete policy also implements `compute_val_loss()` and its private batch
+preparation helper because those operations depend on its model and processor types.
+Feature adaptation methods such as `set_features()` and `rename_features()` are
+policy-specific and should exist only when that policy supports safe adaptation.
 
-- `forward()` preprocesses training/evaluation batches and delegates to the model;
-- `predict_action_chunk()` preprocesses observations, invokes the model, applies
-  capability transforms, and postprocesses the full chunk;
-- `training_step()` computes loss and logs metrics;
-- `compute_val_loss()` dispatches validation loss;
+The shared base policy continues to own:
+
 - checkpoint hooks persist and restore the resolved config;
 - `select_action()` fills and consumes the execution-horizon action queue;
 - `reset()` clears runtime state between episodes.
 
-Concrete policies should not override these methods merely to repeat the shared flow.
-The [implementation guide](how-to.md) shows illustrative wrappers so authors can see
-what is inherited.
+Keep the concrete methods linear and explicit so the complete policy flow remains
+easy to audit. See the [implementation guide](how-to.md) for the minimal shape.
 
 ## Processor Contract
 
@@ -157,5 +181,5 @@ A minimal policy is complete when:
 - every construction route reaches the same guarded `configure_model()`;
 - processors use the config's ordered features and separate normalization state;
 - optimizer construction is explicit;
-- inherited lifecycle methods are not duplicated;
+- policy runtime and training methods are linear and free of unrelated helpers;
 - temporal indices describe only context the model actually consumes.

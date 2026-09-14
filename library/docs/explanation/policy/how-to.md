@@ -146,6 +146,12 @@ normalization state.
 
 ## 5. Configure the Optimizer
 
+Before optimizer construction, implement `setup(stage)` as the explicit data-policy
+boundary. For `"fit"`, obtain ordered observation and action features from the
+training dataset and validate them against the resolved config, or retain them for
+lazy `configure_model()` materialization. Do not infer feature identity from
+`dataset_stats`.
+
 ```python
 def configure_optimizers(self):
     assert self.model is not None
@@ -154,35 +160,31 @@ def configure_optimizers(self):
 
 Training settings remain policy-owned because they do not reconstruct the network.
 
-## 6. Understand the Inherited Flow
+## 6. Implement the Policy Flow
 
-The concrete policy normally inherits these methods. The wrappers below are
-illustrative: they make the runtime order explicit but should not be copied unless a
-policy truly changes the contract.
+Keep the runtime and training methods explicit and linear in the concrete policy:
 
 ```python
-# Illustrative only: supplied by the base policy.
 def forward(self, batch: Observation):
     prepared = self._preprocessor(batch)
     if self.training:
         return self.model.compute_loss(prepared)
     return self.predict_action_chunk(batch)
 
-# Illustrative only: supplied by the base policy.
 def predict_action_chunk(self, batch: Observation) -> Tensor:
     prepared = self._preprocessor(batch)
     chunk = self.model.predict_action_chunk(prepared)
     return self._postprocessor(chunk)
 
-# Illustrative only: supplied by the base policy.
 def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
     loss, metrics = self.forward(batch)
     self.log_dict(metrics)
     return loss
 ```
 
-This is why the concrete policy can remain short: the base class owns stable lifecycle
-mechanics while the policy exposes construction choices.
+These methods make the policy-specific processor and model flow visible without
+pulling their implementation details into the policy. The base class still owns
+checkpoint plumbing and action-queue behavior.
 
 ## 7. Add a Pretrained Route When Needed
 

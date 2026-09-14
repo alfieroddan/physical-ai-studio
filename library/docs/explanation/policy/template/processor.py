@@ -18,7 +18,12 @@ from .config import NewPolicyModelConfig
 
 
 class NewPolicyPreprocessor(nn.Module):
-    """Preprocessor - handles normlaization from feature and defaults if None"""
+    """Convert raw observations and action targets into model tensors.
+
+    A preprocessor owns input conversion, configured feature ordering, and input or
+    target normalization. It consumes normalization state but does not define the
+    policy's feature contract or model architecture.
+    """
     def __init__(self, input_features: list[Feature], output_features: list[Feature]) -> None:
         super().__init__()
         self.input_features = input_features
@@ -67,7 +72,12 @@ class NewPolicyPreprocessor(nn.Module):
 
 
 class NewPolicyPostprocessor(nn.Module):
-    """Postprocessor - handles denormalization from feature and defaults if None"""
+    """Convert a full native model chunk into the external action contract.
+
+    A postprocessor reverses output normalization, preserves configured output
+    feature order, removes model-only padding when present, and applies the execution
+    horizon after model and runtime capabilities have consumed the full chunk.
+    """
     def __init__(self, output_features: list[Feature], n_action_steps: int) -> None:
         super().__init__()
         self.output_features = output_features
@@ -100,6 +110,7 @@ class NewPolicyPostprocessor(nn.Module):
 def make_policy_processors(
     config: NewPolicyModelConfig,
 ) -> tuple[NewPolicyPreprocessor, NewPolicyPostprocessor]:
+    """Build matching processors from the resolved policy-owned feature contract."""
     return (
         NewPolicyPreprocessor(config.input_features, config.output_features),
         NewPolicyPostprocessor(config.output_features, config.n_action_steps),

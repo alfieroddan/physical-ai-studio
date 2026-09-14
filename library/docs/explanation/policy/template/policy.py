@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import torch
+from torch import Tensor
 
-from physicalai.data import Feature, FeatureType
+from physicalai.data import Feature, FeatureType, Observation
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import STATE
 from physicalai.policies.mixins import PeftPolicyMixin, RTCPolicyMixin
@@ -23,7 +26,13 @@ from .processor import NewPolicyPostprocessor, NewPolicyPreprocessor, make_polic
 
 
 class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
-    """Policy design, fake transormer-based model, and training loop for demonstration purposes."""
+    """Orchestrate config resolution, model lifecycle, processing, and training.
+
+    A concrete policy must expose its construction inputs, implement ``setup()`` as
+    the data-policy boundary, materialize model and processors only through guarded
+    ``configure_model()``, define the runtime/training flow, and configure its
+    optimizer. Optional capabilities and export behavior remain in their mixins.
+    """
     def __init__(
         self,
         # input and output features are eager init
@@ -53,6 +62,7 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
 
         # initialize Policy with n_action_steps for action queue
         super().__init__(n_action_steps=n_action_steps)
+        self.model: NewPolicyModel | None = None
 
         # Checkpoints restore the resolved config, never mutable features or artifact locations.
         self.save_hyperparameters(ignore=["input_features", "output_features", "pretrained_name_or_path"])
@@ -64,8 +74,7 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
         self.optimizer_lr = optimizer_lr
         self.optimizer_weight_decay = optimizer_weight_decay
 
-        # model is initialized to None by the base Policy.__init__ above
-        self._config = None
+        self._config: NewPolicyModelConfig | None = None
 
         # processors
         self._preprocessor: NewPolicyPreprocessor | None = None
@@ -108,12 +117,6 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
             self._inject_lora()
 
         self._sync_rtc_to_model()
-
-    @property
-    def config(self) -> NewPolicyModelConfig:
-        if self._config is None:
-            raise RuntimeError("Policy config is not initialized")
-        return self._config
 
     @staticmethod
     def _resolve_config_from_hf(
@@ -198,6 +201,100 @@ class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplateP
             self.model.load_weights(weights_path)
 
         self._apply_model_modifications()
+
+    def set_features(
+        self,
+        input_features: list[Feature],
+        output_features: list[Feature],
+    ) -> None:
+        """Replace the feature contract and rebuild processors without rebuilding the model."""
+        if self.model is None or self._config is None:
+            raise RuntimeError("Policy model is not initialized")
+
+        action_dim = resolve_action_dim(output_features)
+        if action_dim != self._config.action_dim:
+            raise ValueError(
+                f"Output width {action_dim} does not match model action width {self._config.action_dim}"
+            )
+
+        config = replace(
+            self._config,
+            input_features=list(input_features),
+            output_features=list(output_features),
+            action_dim=action_dim,
+        )
+        self._config = config
+        self._input_features = config.input_features
+        self._output_features = config.output_features
+        self._preprocessor, self._postprocessor = make_policy_processors(config)  # type: ignore[assignment]
+        self.reset()
+
+    def rename_features(self, mapping: Mapping[str, str]) -> None:
+        """Rename resolved input features without changing their metadata or order."""
+        if self._config is None:
+            raise RuntimeError("Policy config is not initialized")
+        if not mapping:
+            return
+        if any(not isinstance(name, str) or not name for name in mapping):
+            raise ValueError("Source feature names must be non-empty strings")
+        if any(not isinstance(name, str) or not name for name in mapping.values()):
+            raise ValueError("Replacement feature names must be non-empty strings")
+
+        current_names = {feature.name for feature in self._config.input_features}
+        unknown_names = sorted(set(mapping) - current_names)
+        if unknown_names:
+            raise ValueError(f"Cannot rename unknown input features: {unknown_names}")
+
+        input_features = [
+            replace(feature, name=mapping[feature.name])
+            if feature.name is not None and feature.name in mapping
+            else feature
+            for feature in self._config.input_features
+        ]
+        names = [feature.name for feature in input_features]
+        if len(names) != len(set(names)):
+            raise ValueError(f"Feature renaming creates duplicate input names: {names}")
+
+        self.set_features(input_features, self._config.output_features)
+
+    def _prepare_batch(self, batch: Observation, *, require_actions: bool) -> dict[str, Tensor]:
+        if self._preprocessor is None:
+            raise RuntimeError("Policy is not initialized")
+        processed = self._preprocessor(batch.to_dict())
+        if require_actions:
+            if not isinstance(batch.action, Tensor):
+                raise TypeError("Expected Observation.action to contain action targets")
+            processed["action"] = self._preprocessor.normalize_actions(batch.action)
+        return processed
+
+    def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
+        if not isinstance(self.model, NewPolicyModel):
+            raise RuntimeError("Policy model is not initialized")
+        if self.training:
+            return self.model(self._prepare_batch(batch, require_actions=True))
+        return self.predict_action_chunk(batch)
+
+    def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
+        if not isinstance(self.model, NewPolicyModel):
+            raise RuntimeError("Policy model is not initialized")
+        return self.model.compute_val_loss(self._prepare_batch(batch, require_actions=True))
+
+    def predict_action_chunk(self, batch: Observation) -> Tensor:
+        if not isinstance(self.model, NewPolicyModel) or self._postprocessor is None:
+            raise RuntimeError("Policy is not initialized")
+        actions = cast("Any", self.model).predict_action_chunk(
+            self._prepare_batch(batch, require_actions=False)
+        )
+        return self._postprocessor(actions)
+
+    def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
+        del batch_idx
+        result = self(batch)
+        if not isinstance(result, tuple):
+            raise RuntimeError("Training forward must return loss and metrics")
+        loss, metrics = result
+        self.log("train/loss", metrics["loss"], prog_bar=True)
+        return loss
 
     def setup(self, stage: str) -> None:
         """Set up the model from the training dataset."""

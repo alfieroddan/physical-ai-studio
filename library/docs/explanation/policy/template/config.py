@@ -15,7 +15,14 @@ from physicalai.policies.mixins import PeftConfigMixin
 
 @dataclass(frozen=True, kw_only=True)
 class NewPolicyModelConfig(PeftConfigMixin, Config):
-    """Resolved config owned by the policy."""
+    """Serializable feature and architecture contract owned by the policy.
+
+    A policy config must contain the ordered input/output features, every value
+    required to reconstruct the model, and the prediction/execution horizons. It
+    must not contain optimizer settings, artifact locations, or runtime processor
+    state. The model is constructed from its matching fields but does not retain
+    this config object.
+    """
     input_features: list[Feature]
     output_features: list[Feature]
     action_dim: int

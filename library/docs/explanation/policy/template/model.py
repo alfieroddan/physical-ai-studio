@@ -55,7 +55,14 @@ class TransformerModule(nn.Module):
 
 
 class NewPolicyModel(PeftModelMixin, RTCModelMixin, TemplateModel):
-    """Fully described by its constructor args; the policy owns NewPolicyModelConfig."""
+    """Flat PyTorch model implementing loss and full-chunk prediction.
+
+    A policy model must be fully described by plain constructor arguments, implement
+    ``compute_loss()`` and ``predict_action_chunk()``, and declare temporal delta
+    indices consumed by data loading. It returns the complete native action chunk;
+    processors own normalization and external shape adaptation. The policy, not the
+    model, retains ``NewPolicyModelConfig``.
+    """
     def __init__(
         self,
         *,

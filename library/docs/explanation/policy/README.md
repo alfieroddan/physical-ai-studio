@@ -11,8 +11,8 @@ processing, export, and optional capabilities to their owning abstractions.
    materialization, runtime flow, and the checkpoint reconstruction invariant.
 2. [Required Interfaces](interfaces.md) identifies the minimum config, model, policy,
    processor, and temporal-context contracts.
-3. [Implement a Policy](how-to.md) builds the minimal policy path and shows the shared
-   flow inherited from the base classes.
+3. [Implement a Policy](how-to.md) builds the minimal policy path and shows its
+   explicit runtime and training flow.
 4. [Advanced Patterns](advanced.md) adds PEFT/LoRA, gradient checkpointing, RTC,
    checkpoint details, feature adaptation, and exceptional export customization.
 5. [Export API](export.md) documents export-only properties, backend entry points,
