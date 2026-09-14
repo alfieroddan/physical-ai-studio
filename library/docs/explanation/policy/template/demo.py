@@ -25,6 +25,7 @@ from physicalai.export.backends import (
     TorchExportParameters,
 )
 from physicalai.inference.data import InferenceFeatureDtype, InferenceFeatureType
+from physicalai.policies.mixins.peft import is_lora_injected
 from physicalai.train import Trainer
 
 from .config import NewPolicyModelConfig
@@ -201,6 +202,32 @@ if __name__ == "__main__":
     else:
         raise AssertionError("set_features must reject an incompatible action width")
     print("Feature contract updated without rebuilding the model")
+
+    lora_policy = NewPolicy.from_config(replace(tiny_config, lora_enabled=True, lora_rank=2))
+    assert lora_policy.model is not None and is_lora_injected(lora_policy.model)
+    lora_checkpoint: dict[str, object] = {}
+    lora_policy.on_save_checkpoint(lora_checkpoint)
+    restored_lora_policy = NewPolicy(n_action_steps=2)
+    restored_lora_policy.on_load_checkpoint(lora_checkpoint)
+    assert restored_lora_policy.model is not None
+    assert is_lora_injected(restored_lora_policy.model)
+
+    rtc_policy = NewPolicy.from_config(replace(tiny_config, n_action_steps=chunk_size))
+    assert isinstance(rtc_policy.model, NewPolicyModel)
+    rtc_policy.rtc_enabled = True
+    assert rtc_policy.model.enable_rtc
+    rtc_prediction = rtc_policy.model.predict_action_chunk(
+        rtc_policy._prepare_batch(batch, require_actions=False)
+    )
+    assert rtc_prediction.shape == (2, chunk_size, action_dim)
+    rtc_checkpoint: dict[str, object] = {}
+    rtc_policy.on_save_checkpoint(rtc_checkpoint)
+    restored_rtc_policy = NewPolicy(n_action_steps=chunk_size)
+    restored_rtc_policy.on_load_checkpoint(rtc_checkpoint)
+    assert restored_rtc_policy.rtc_enabled
+    assert isinstance(restored_rtc_policy.model, NewPolicyModel)
+    assert restored_rtc_policy.model.enable_rtc
+    print("PEFT and RTC mixins applied through their real policy/model contracts")
 
     cli_policy = NewPolicy(pretrained_name_or_path="fake/repository", n_action_steps=2)
     assert cli_policy.model is not None

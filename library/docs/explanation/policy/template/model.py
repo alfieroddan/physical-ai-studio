@@ -10,6 +10,7 @@ from pathlib import Path
 
 import torch
 from torch import Tensor, nn
+from physicalai.policies.mixins import PeftModelMixin, RTCModelMixin
 
 from .base import TemplateModel
 
@@ -53,7 +54,7 @@ class TransformerModule(nn.Module):
         return hidden_states
 
 
-class NewPolicyModel(TemplateModel):
+class NewPolicyModel(PeftModelMixin, RTCModelMixin, TemplateModel):
     """Fully described by its constructor args; the policy owns NewPolicyModelConfig."""
     def __init__(
         self,
@@ -67,11 +68,10 @@ class NewPolicyModel(TemplateModel):
         vocab_size: int = 256_000,
         chunk_size: int = 32,
         action_dim: int = 32,
-        lora_config: dict[str, int | float] | None = None,
     ) -> None:
         super().__init__()
         self._chunk_size = chunk_size
-        self._lora_settings = lora_config or {"rank": 64, "alpha": 16, "dropout": 0.05}
+        self._max_action_dim = action_dim
 
         self.text_model = TextModule(vocab_size=vocab_size, hidden_size=hidden_size)
         self.transformer = TransformerModule(
@@ -84,7 +84,6 @@ class NewPolicyModel(TemplateModel):
         )
         self.action_head = nn.Linear(hidden_size, action_dim * chunk_size)
         self.gradient_checkpointing_enabled = False
-        self.lora_config: tuple[int, int, float] | None = None
         self.weights_load_count = 0
 
     def load_weights(self, weights_path: str | Path) -> None:
@@ -96,12 +95,9 @@ class NewPolicyModel(TemplateModel):
     def gradient_checkpointing_enable(self) -> None:
         self.gradient_checkpointing_enabled = True
 
-    def enable_lora(self) -> None:
-        self.lora_config = (
-            int(self._lora_settings["rank"]),
-            int(self._lora_settings["alpha"]),
-            float(self._lora_settings["dropout"]),
-        )
+    @classmethod
+    def get_default_peft_targets(cls) -> tuple[str, ...]:
+        return ("action_head",)
 
     def _predict_actions(self, batch: Mapping[str, Tensor]) -> Tensor:
         hidden_states = self.text_model(batch["input_ids"])
@@ -122,7 +118,10 @@ class NewPolicyModel(TemplateModel):
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
         """Return the full ``(batch, chunk_size, action_dim)`` model output."""
-        return self._predict_actions(batch)
+        actions = self._predict_actions(batch)
+        if self.enable_rtc:
+            actions = 0.5 * actions + 0.5 * actions[:, :1]
+        return actions
 
     @property
     def reward_delta_indices(self) -> None:

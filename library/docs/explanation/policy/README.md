@@ -195,10 +195,53 @@ normalization statistics are available.
 | Model | Network construction, loss computation, temporal indices, and action prediction — constructed from plain scalar arguments, never from the config object itself |
 | Processors | Conversion and normalization before and after the model |
 | Pretrained resolver | Artifact lookup and translation of artifact metadata into a model config plus weight paths |
+| Capability mixins | Cross-cutting config, policy lifecycle, and model behavior for optional capabilities |
 
 Optimizer settings, training lifecycle controls, and artifact locations are not model
 configuration. Conversely, feature-dependent architecture and output interpretation
 must not be inferred indirectly from optimizer settings or `dataset_stats`.
+
+## Capability Mixins
+
+Capabilities that cross config, policy, and model boundaries use the existing mixin
+families rather than policy-specific flags:
+
+```python
+@dataclass(frozen=True, kw_only=True)
+class MyModelConfig(PeftConfigMixin, Config):
+    ...
+
+class MyModel(PeftModelMixin, RTCModelMixin, TemplateModel):
+    @classmethod
+    def get_default_peft_targets(cls) -> tuple[str, ...]:
+        return ("action_head",)
+
+class MyPolicy(
+    PeftPolicyMixin,
+    RTCPolicyMixin,
+    ExportablePolicyMixin,
+    TemplatePolicy,
+):
+    ...
+```
+
+The order during model construction is significant:
+
+1. Construct the base model.
+2. Load pretrained base-model weights, when present.
+3. Call `PeftPolicyMixin._inject_lora()` when `config.use_lora` is enabled.
+4. Call `RTCPolicyMixin._sync_rtc_to_model()` after the model exists.
+
+PEFT is reconstruction state because adapter injection changes state-dict keys.
+`PeftConfigMixin` therefore stores the LoRA settings in the checkpointed model config,
+and reconstruction injects adapters before Lightning restores checkpoint tensors. The
+model owns architecture-specific default targets through
+`PeftModelMixin.get_default_peft_targets()`.
+
+RTC is runtime state rather than model architecture. `RTCPolicyMixin` owns and
+checkpoints the enabled flag, while `RTCModelMixin` supplies model-side RTC behavior.
+The policy synchronizes the flag after model construction. RTC operates on the full
+native action chunk, before policy postprocessing trims it to the execution horizon.
 
 ## One Materialization Path
 

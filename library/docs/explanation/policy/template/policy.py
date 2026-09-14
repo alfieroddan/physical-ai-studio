@@ -13,6 +13,7 @@ import torch
 from physicalai.data import Feature, FeatureType
 from physicalai.data.dataset import Dataset
 from physicalai.data.observation import STATE
+from physicalai.policies.mixins import PeftPolicyMixin, RTCPolicyMixin
 
 from .base import TemplatePolicy
 from .config import NewPolicyModelConfig, resolve_action_dim
@@ -21,7 +22,7 @@ from .model import NewPolicyModel
 from .processor import NewPolicyPostprocessor, NewPolicyPreprocessor, make_policy_processors
 
 
-class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
+class NewPolicy(PeftPolicyMixin, RTCPolicyMixin, NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
     """Policy design, fake transormer-based model, and training loop for demonstration purposes."""
     def __init__(
         self,
@@ -36,7 +37,8 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
         chunk_size: int = 32,
         # weights args
         gradient_checkpointing: bool = False,
-        use_lora: bool = False,
+        lora_enabled: bool = False,
+        rtc_enabled: bool = False,
         # training args
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.01,
@@ -57,7 +59,8 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
 
         # training params
         self.gradient_checkpointing = gradient_checkpointing
-        self.use_lora = use_lora
+        self.lora_enabled = lora_enabled
+        self.rtc_enabled = rtc_enabled
         self.optimizer_lr = optimizer_lr
         self.optimizer_weight_decay = optimizer_weight_decay
 
@@ -79,7 +82,6 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
         config: NewPolicyModelConfig,
         *,
         gradient_checkpointing: bool = False,
-        use_lora: bool = False,
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.01,
     ) -> "NewPolicy":
@@ -87,7 +89,6 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
             pretrained_name_or_path=None,
             n_action_steps=config.n_action_steps,
             gradient_checkpointing=gradient_checkpointing,
-            use_lora=use_lora,
             optimizer_lr=optimizer_lr,
             optimizer_weight_decay=optimizer_weight_decay,
         )
@@ -102,8 +103,17 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
         if self.gradient_checkpointing:
             self.model.gradient_checkpointing_enable()
 
-        if self.use_lora:
-            self.model.enable_lora()
+        assert self._config is not None
+        if self._config.use_lora:
+            self._inject_lora()
+
+        self._sync_rtc_to_model()
+
+    @property
+    def config(self) -> NewPolicyModelConfig:
+        if self._config is None:
+            raise RuntimeError("Policy config is not initialized")
+        return self._config
 
     @staticmethod
     def _from_hf(
@@ -158,6 +168,7 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
                 output_features=resolved_output_features,
                 action_dim=resolve_action_dim(resolved_output_features),
                 n_action_steps=self._n_action_steps,
+                lora_enabled=self.lora_enabled,
             )
         else:
             if self._input_features is None or self._output_features is None:
@@ -172,6 +183,7 @@ class NewPolicy(NewPolicyExportMixin, TemplatePolicy):  # type: ignore[misc]
                 action_dim=resolve_action_dim(self._output_features),
                 chunk_size=self._chunk_size,
                 n_action_steps=self._n_action_steps,
+                lora_enabled=self.lora_enabled,
             )
 
         self._config = config

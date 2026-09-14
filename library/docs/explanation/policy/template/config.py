@@ -5,15 +5,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from math import prod
 
 from physicalai.config import Config
 from physicalai.data import Feature
+from physicalai.policies.mixins import PeftConfigMixin
 
 
-@dataclass
-class NewPolicyModelConfig(Config):
+@dataclass(frozen=True, kw_only=True)
+class NewPolicyModelConfig(PeftConfigMixin, Config):
     """Resolved config owned by the policy."""
     input_features: list[Feature]
     output_features: list[Feature]
@@ -29,9 +30,6 @@ class NewPolicyModelConfig(Config):
     n_action_steps: int = 32
     image_size: tuple[int, int] = (224, 224)
     tokenizer_max_length: int = 48
-    lora_config: dict[str, int | float] = field(
-        default_factory=lambda: {"rank": 64, "alpha": 16, "dropout": 0.05}
-    )
 
 
 def resolve_action_dim(output_features: list[Feature]) -> int:
