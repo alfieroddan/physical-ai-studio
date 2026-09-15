@@ -295,8 +295,7 @@ class SO101NexusGym(GymnasiumGym):
         )
         state = self._dataset_to_runtime(dataset_state)
         images: dict[str, torch.Tensor | np.ndarray] = {
-            policy_key: self._convert_image(raw_obs[raw_key])
-            for raw_key, policy_key in self._camera_key_map.items()
+            policy_key: self._convert_image(raw_obs[raw_key]) for raw_key, policy_key in self._camera_key_map.items()
         }
         batch_size = int(state.shape[0])
         return Observation(
@@ -385,9 +384,7 @@ class SO101NexusGym(GymnasiumGym):
             if name == "gripper":
                 ticks[..., index] = np.rint(
                     calibration["range_min"]
-                    + dataset[..., index]
-                    / 100.0
-                    * (calibration["range_max"] - calibration["range_min"]),
+                    + dataset[..., index] / 100.0 * (calibration["range_max"] - calibration["range_min"]),
                 )
             else:
                 midpoint = (calibration["range_min"] + calibration["range_max"]) / 2.0
