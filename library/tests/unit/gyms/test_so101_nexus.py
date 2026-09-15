@@ -62,8 +62,8 @@ def _install_fake_so101(monkeypatch) -> None:
         values[..., 5] = low + values[..., 5] / 100.0 * (high - low)
         return values
 
-    module.sim_qpos_to_dataset_row = to_dataset
-    module.dataset_row_to_sim_qpos = to_sim
+    setattr(module, "sim_qpos_to_dataset_row", to_dataset)
+    setattr(module, "dataset_row_to_sim_qpos", to_sim)
     monkeypatch.setitem(sys.modules, "so101_nexus", module)
     monkeypatch.setattr(adapter_module, "so101_nexus", module)
     monkeypatch.setattr(adapter_module, "_SO101_NEXUS_AVAILABLE", True)
@@ -83,13 +83,17 @@ def _make_adapter() -> SO101NexusGym:
     return adapter
 
 
-def _replace_gymnasium_init(monkeypatch) -> None:
+def _replace_gymnasium_init(monkeypatch) -> dict:
+    captured_kwargs = {}
+
     def fake_init(adapter, **_kwargs) -> None:
+        captured_kwargs.update(_kwargs)
         adapter._env = _FakeEnv()
         adapter._device = torch.device("cpu")
         adapter._is_vectorized = False
 
     monkeypatch.setattr(adapter_module.GymnasiumGym, "__init__", fake_init)
+    return captured_kwargs
 
 
 def test_converts_visual_observation_to_runtime_contract(monkeypatch) -> None:
@@ -173,6 +177,26 @@ def test_constructor_infers_cameras_from_custom_visual_config(monkeypatch) -> No
     adapter = SO101NexusGym(gym_id="MuJoCoTouch-v1", config=config)
 
     assert adapter._camera_key_map == {"overhead_camera": "overhead"}
+
+
+def test_constructor_forwards_explicit_render_mode(monkeypatch) -> None:
+    """An explicit render mode must not collide with the adapter default."""
+    captured_kwargs = _replace_gymnasium_init(monkeypatch)
+    monkeypatch.setattr(adapter_module, "_get_so101_nexus", lambda: SimpleNamespace())
+    config = SimpleNamespace(
+        obs_mode="visual",
+        observations=[SimpleNamespace(name="wrist_camera", modalities=("rgb",))],
+    )
+
+    SO101NexusGym(config=config, render_mode=None)
+
+    assert captured_kwargs["render_mode"] is None
+
+
+def test_vectorization_is_rejected() -> None:
+    """The adapter must not inherit unsupported vectorized construction."""
+    with pytest.raises(NotImplementedError, match="does not support vectorized"):
+        SO101NexusGym.vectorize("MuJoCoPickLift-v1", num_envs=2)
 
 
 def test_missing_dependency_has_install_guidance(monkeypatch) -> None:

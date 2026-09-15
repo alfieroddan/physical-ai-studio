@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 _SO101_NEXUS_AVAILABLE = False
 _SO101_NEXUS_IMPORT_ERROR: str | None = None
+# A 4096-position encoder spans inclusive tick values 0 through 4095.
 _SO101_ENCODER_MAX_TICK = 4095.0
 _SO101_JOINT_ORDER = (
     "shoulder_pan",
@@ -118,6 +119,7 @@ class SO101NexusGym(GymnasiumGym):
         observation_width: int = 378,
         observation_height: int = 378,
         device: str | torch.device = "cpu",
+        render_mode: str | None = "rgb_array",
         task_description: str | None = None,
         init_pose: str | None = None,
         config: Any | None = None,  # noqa: ANN401
@@ -132,6 +134,7 @@ class SO101NexusGym(GymnasiumGym):
             observation_width: Default camera width in pixels.
             observation_height: Default camera height in pixels.
             device: Torch device used for returned tensors.
+            render_mode: Rendering mode passed to the SO101-Nexus environment.
             task_description: Optional fixed task text replacing the
                 environment instruction.
             init_pose: Named initial pose for the default config. Set the pose
@@ -198,7 +201,7 @@ class SO101NexusGym(GymnasiumGym):
         super().__init__(
             gym_id=gym_id,
             device=device,
-            render_mode="rgb_array",
+            render_mode=render_mode,
             config=config,
             **gym_kwargs,
         )
@@ -207,6 +210,17 @@ class SO101NexusGym(GymnasiumGym):
         low = np.asarray(simulator_action_space.low)
         high = np.asarray(simulator_action_space.high)
         self._gripper_limits_rad = (float(low[-1]), float(high[-1]))
+
+    @classmethod
+    def vectorize(cls, *args: Any, **kwargs: Any) -> SO101NexusGym:  # noqa: ANN401
+        """Reject vectorization, which this adapter does not support.
+
+        Raises:
+            NotImplementedError: Always; SO101-Nexus conversion is currently
+                implemented only for single environments.
+        """
+        message = "SO101NexusGym does not support vectorized environments"
+        raise NotImplementedError(message)
 
     @property
     def task_description(self) -> str:
