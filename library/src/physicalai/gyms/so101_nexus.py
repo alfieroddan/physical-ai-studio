@@ -24,6 +24,14 @@ if TYPE_CHECKING:
 _SO101_NEXUS_AVAILABLE = False
 _SO101_NEXUS_IMPORT_ERROR: str | None = None
 _SO101_ENCODER_MAX_TICK = 4095.0
+_SO101_JOINT_ORDER = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
 _SO101_RUNTIME_CALIBRATION = {
     "shoulder_pan": {"id": 1, "drive_mode": 0, "homing_offset": 2048, "range_min": 746, "range_max": 3412},
     "shoulder_lift": {"id": 2, "drive_mode": 0, "homing_offset": 2048, "range_min": 885, "range_max": 3198},
@@ -36,8 +44,6 @@ _SO101_RUNTIME_CALIBRATION = {
 try:
     import so101_nexus
     import so101_nexus.mujoco
-    from physicalai.robot.so101.calibration import SO101Calibration
-    from physicalai.robot.so101.so101 import SO101
 
     _SO101_NEXUS_AVAILABLE = True
 except ImportError as error:
@@ -189,8 +195,6 @@ class SO101NexusGym(GymnasiumGym):
             raise ValueError(message)
 
         self._task_description_override = task_description
-        self._runtime_calibration = SO101Calibration.from_dict(_SO101_RUNTIME_CALIBRATION)
-        self._runtime_robot = SO101(port="", calibration=self._runtime_calibration)
         super().__init__(
             gym_id=gym_id,
             device=device,
@@ -310,10 +314,7 @@ class SO101NexusGym(GymnasiumGym):
         ticks = self._dataset_to_ticks(values)
         flat_ticks = ticks.reshape(-1, ticks.shape[-1])
         normalized = np.stack(
-            [
-                self._runtime_robot._ticks_to_normalized(row)  # noqa: SLF001
-                for row in flat_ticks
-            ],
+            [self._ticks_to_runtime(row) for row in flat_ticks],
         )
         return normalized.reshape(ticks.shape)
 
@@ -326,14 +327,52 @@ class SO101NexusGym(GymnasiumGym):
         normalized = np.asarray(values, dtype=np.float32)
         flat_normalized = normalized.reshape(-1, normalized.shape[-1])
         ticks = np.stack(
-            [
-                self._runtime_robot._normalized_to_ticks(row)  # noqa: SLF001
-                for row in flat_normalized
-            ],
+            [self._runtime_to_ticks(row) for row in flat_normalized],
         ).reshape(normalized.shape)
         return self._ticks_to_dataset(ticks)
 
-    def _dataset_to_ticks(self, values: NDArray) -> NDArray:
+    @staticmethod
+    def _ticks_to_runtime(ticks: NDArray) -> NDArray:
+        """Convert encoder ticks to PhysicalAI Runtime coordinates.
+
+        Returns:
+            Runtime-normalized joint values.
+        """
+        result = np.empty(len(_SO101_JOINT_ORDER), dtype=np.float32)
+        for index, name in enumerate(_SO101_JOINT_ORDER):
+            calibration = _SO101_RUNTIME_CALIBRATION[name]
+            range_min = calibration["range_min"]
+            range_max = calibration["range_max"]
+            tick = int(np.clip(ticks[index], range_min, range_max))
+            if name == "gripper":
+                result[index] = (tick - range_min) / (range_max - range_min) * 100.0
+            else:
+                result[index] = (tick - range_min) / (range_max - range_min) * 200.0 - 100.0
+        return result
+
+    @staticmethod
+    def _runtime_to_ticks(values: NDArray) -> NDArray:
+        """Convert PhysicalAI Runtime coordinates to encoder ticks.
+
+        Returns:
+            Calibrated integer encoder positions.
+        """
+        result = np.empty(len(_SO101_JOINT_ORDER), dtype=np.int32)
+        for index, name in enumerate(_SO101_JOINT_ORDER):
+            calibration = _SO101_RUNTIME_CALIBRATION[name]
+            range_min = calibration["range_min"]
+            range_max = calibration["range_max"]
+            if name == "gripper":
+                value = float(np.clip(values[index], 0.0, 100.0))
+                tick = round(range_min + value / 100.0 * (range_max - range_min))
+            else:
+                value = float(np.clip(values[index], -100.0, 100.0))
+                tick = round(range_min + (value + 100.0) / 200.0 * (range_max - range_min))
+            result[index] = int(np.clip(tick, range_min, range_max))
+        return result
+
+    @staticmethod
+    def _dataset_to_ticks(values: NDArray) -> NDArray:
         """Convert LeRobot degree/percent rows to encoder ticks.
 
         Returns:
@@ -341,21 +380,24 @@ class SO101NexusGym(GymnasiumGym):
         """
         dataset = np.asarray(values, dtype=np.float32)
         ticks = np.empty_like(dataset, dtype=np.int32)
-        for index, name in enumerate(self._runtime_robot.JOINT_ORDER):
-            calibration = self._runtime_calibration.joints[name]
+        for index, name in enumerate(_SO101_JOINT_ORDER):
+            calibration = _SO101_RUNTIME_CALIBRATION[name]
             if name == "gripper":
                 ticks[..., index] = np.rint(
-                    calibration.range_min
-                    + dataset[..., index] / 100.0 * (calibration.range_max - calibration.range_min),
+                    calibration["range_min"]
+                    + dataset[..., index]
+                    / 100.0
+                    * (calibration["range_max"] - calibration["range_min"]),
                 )
             else:
-                midpoint = (calibration.range_min + calibration.range_max) / 2.0
+                midpoint = (calibration["range_min"] + calibration["range_max"]) / 2.0
                 ticks[..., index] = np.rint(
                     midpoint + dataset[..., index] * _SO101_ENCODER_MAX_TICK / 360.0,
                 )
         return ticks
 
-    def _ticks_to_dataset(self, values: NDArray) -> NDArray:
+    @staticmethod
+    def _ticks_to_dataset(values: NDArray) -> NDArray:
         """Convert encoder ticks to LeRobot degree/percent rows.
 
         Returns:
@@ -363,16 +405,16 @@ class SO101NexusGym(GymnasiumGym):
         """
         ticks = np.asarray(values, dtype=np.float32)
         dataset = np.empty_like(ticks, dtype=np.float32)
-        for index, name in enumerate(self._runtime_robot.JOINT_ORDER):
-            calibration = self._runtime_calibration.joints[name]
+        for index, name in enumerate(_SO101_JOINT_ORDER):
+            calibration = _SO101_RUNTIME_CALIBRATION[name]
             if name == "gripper":
                 dataset[..., index] = (
-                    (ticks[..., index] - calibration.range_min)
-                    / (calibration.range_max - calibration.range_min)
+                    (ticks[..., index] - calibration["range_min"])
+                    / (calibration["range_max"] - calibration["range_min"])
                     * 100.0
                 )
             else:
-                midpoint = (calibration.range_min + calibration.range_max) / 2.0
+                midpoint = (calibration["range_min"] + calibration["range_max"]) / 2.0
                 dataset[..., index] = (ticks[..., index] - midpoint) * 360.0 / _SO101_ENCODER_MAX_TICK
         return dataset
 

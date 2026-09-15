@@ -107,7 +107,6 @@ smolvla = [
 # SO101-Nexus simulation and rollout video recording
 so101-nexus = [
     "imageio[ffmpeg]>=2.37.0,<3.0.0",
-    "physicalai[so101]>=0.1.0",
     "so101-nexus>=0.6.0,<0.7.0",
 ]
 

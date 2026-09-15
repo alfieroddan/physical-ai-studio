@@ -1558,15 +1558,6 @@ wheels = [
 ]
 
 [[package]]
-name = "feetech-servo-sdk"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pyserial" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/8e/c53d6f9a8bf3a86a635b58eeb675723f1b040f1665a0681467756c8989aa/feetech-servo-sdk-1.0.0.tar.gz", hash = "sha256:d4d3832e4b1b22a8222133a414db9f868224c2fb639426a1b11d96ddfe84e69c", size = 8392, upload-time = "2022-11-08T03:44:45.269Z" }
-
-[[package]]
 name = "filelock"
 version = "3.32.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3924,11 +3915,6 @@ dependencies = [
     { name = "typing-extensions" },
 ]
 
-[package.optional-dependencies]
-so101 = [
-    { name = "feetech-servo-sdk" },
-]
-
 [[package]]
 name = "physicalai-train"
 version = "0.1.0"
@@ -4056,7 +4042,6 @@ smolvla = [
 ]
 so101-nexus = [
     { name = "imageio", extra = ["ffmpeg"] },
-    { name = "physicalai", extra = ["so101"] },
     { name = "so101-nexus" },
 ]
 tests = [
@@ -4110,7 +4095,6 @@ requires-dist = [
     { name = "peft", specifier = ">=0.20.0,<1.0.0" },
     { name = "peft", marker = "extra == 'rldx1'", specifier = ">=0.13.0,<1.0.0" },
     { name = "physicalai", git = "https://github.com/openvinotoolkit/physicalai.git?rev=89a6faff37e2be91ae2f4c34746ec6dbeadb9f1d" },
-    { name = "physicalai", extras = ["so101"], marker = "extra == 'so101-nexus'", git = "https://github.com/openvinotoolkit/physicalai.git?rev=89a6faff37e2be91ae2f4c34746ec6dbeadb9f1d" },
     { name = "physicalai-train", extras = ["diffusion"], marker = "extra == 'policies'" },
     { name = "physicalai-train", extras = ["groot"], marker = "extra == 'policies'" },
     { name = "physicalai-train", extras = ["libero"], marker = "extra == 'all'" },
@@ -4646,15 +4630,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/37/de/b7ee1ab2392c36945738246fba7524439810befa3cfcc03cb6157567fc10/pyrefly-1.1.1-py3-none-win32.whl", hash = "sha256:5ffd8a8ed62fe4e6bf0afe1837d1bad149bb3b9f80e928ef248c96b836db3742", size = 12608469, upload-time = "2026-06-18T23:45:35.419Z" },
     { url = "https://files.pythonhosted.org/packages/a6/9c/a0f5b52934bf80e9c7eff08222e7caf318287b9aef76acb8d9ac5740581b/pyrefly-1.1.1-py3-none-win_amd64.whl", hash = "sha256:4e0430f3ef69c8ac73505fd6584db70ed504665a9f0816fef7f723de510f26cb", size = 13502172, upload-time = "2026-06-18T23:45:38.375Z" },
     { url = "https://files.pythonhosted.org/packages/42/3d/4c6bcb3d456835f51445d3662a428f56c3ea5643ec798c577030ae34298c/pyrefly-1.1.1-py3-none-win_arm64.whl", hash = "sha256:83baf0db71e172665db1fca0ced50b8f7773f5192ca57e8ac6773a772b6d2fc5", size = 12895979, upload-time = "2026-06-18T23:45:41.026Z" },
-]
-
-[[package]]
-name = "pyserial"
-version = "3.5"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125, upload-time = "2020-11-23T03:59:15.045Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585, upload-time = "2020-11-23T03:59:13.41Z" },
 ]
 
 [[package]]

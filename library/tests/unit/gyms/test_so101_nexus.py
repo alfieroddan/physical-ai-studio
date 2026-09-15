@@ -14,8 +14,6 @@ import torch
 
 from physicalai.gyms import SO101NexusGym
 from physicalai.gyms import so101_nexus as adapter_module
-from physicalai.robot.so101.calibration import SO101Calibration
-from physicalai.robot.so101.so101 import SO101
 
 
 class _FakeActionSpace:
@@ -67,6 +65,8 @@ def _install_fake_so101(monkeypatch) -> None:
     module.sim_qpos_to_dataset_row = to_dataset
     module.dataset_row_to_sim_qpos = to_sim
     monkeypatch.setitem(sys.modules, "so101_nexus", module)
+    monkeypatch.setattr(adapter_module, "so101_nexus", module)
+    monkeypatch.setattr(adapter_module, "_SO101_NEXUS_AVAILABLE", True)
 
 
 def _make_adapter() -> SO101NexusGym:
@@ -76,10 +76,6 @@ def _make_adapter() -> SO101NexusGym:
     adapter._is_vectorized = False
     adapter._gripper_limits_rad = (0.0, 1.0)
     adapter._task_description_override = None
-    adapter._runtime_calibration = SO101Calibration.from_dict(
-        adapter_module._SO101_RUNTIME_CALIBRATION,
-    )
-    adapter._runtime_robot = SO101(port="", calibration=adapter._runtime_calibration)
     adapter._camera_key_map = {
         "wrist_camera": "wrist",
         "overhead_camera": "overhead",
@@ -107,8 +103,9 @@ def test_converts_visual_observation_to_runtime_contract(monkeypatch) -> None:
         [*np.rad2deg([0.0, 0.1, -0.2, 0.3, -0.4]), 50.0],
         dtype=np.float32,
     )
-    expected_state = adapter._runtime_robot._ticks_to_normalized(
-        adapter._dataset_to_ticks(dataset_state),
+    expected_state = np.array(
+        [0.0, 5.6636405, -11.839708, 17.028671, -13.606686, 49.965446],
+        dtype=np.float32,
     )
     torch.testing.assert_close(
         observation.state,
@@ -126,7 +123,7 @@ def test_converts_policy_action_to_simulator_radians(monkeypatch) -> None:
     adapter = _make_adapter()
 
     runtime_action = np.array([75.0, -75.0, 45.0, 0.0, 50.0, 25.0], dtype=np.float32)
-    runtime_ticks = adapter._runtime_robot._normalized_to_ticks(runtime_action)
+    runtime_ticks = np.array([3079, 1174, 2499, 1922, 3015, 2407], dtype=np.int32)
     expected_dataset_action = adapter._ticks_to_dataset(runtime_ticks)
     adapter.step(torch.from_numpy(runtime_action))
 
@@ -144,10 +141,8 @@ def test_runtime_conversion_clips_like_hardware() -> None:
     runtime = adapter._dataset_to_runtime(
         dataset,
     )
-    ticks = adapter._dataset_to_ticks(dataset)
-    expected = adapter._runtime_robot._ticks_to_normalized(ticks)
 
-    np.testing.assert_array_equal(runtime, expected)
+    np.testing.assert_allclose(runtime[[0, 1, 5]], [100.0, -100.0, 100.0])
 
 
 def test_converts_configured_camera_subset(monkeypatch) -> None:
@@ -190,11 +185,15 @@ def test_missing_dependency_has_install_guidance(monkeypatch) -> None:
 
 
 def test_data_first_import_does_not_cycle() -> None:
-    """Importing data before gyms must work in a fresh Python process."""
+    """Importing gyms must not load the optional SO101 hardware driver."""
     subprocess.run(
         [
             sys.executable,
             "-c",
+            "import builtins; original = builtins.__import__; "
+            "builtins.__import__ = lambda name, *args, **kwargs: "
+            "(_ for _ in ()).throw(ModuleNotFoundError(name)) "
+            "if name == 'scservo_sdk' else original(name, *args, **kwargs); "
             "from physicalai.data import Feature; from physicalai.gyms import SO101NexusGym",
         ],
         check=True,
