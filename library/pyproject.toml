@@ -76,7 +76,7 @@ diffusion = ["diffusers>=0.38.0"]
 # Requires PaliGemma backbone + Gemma action expert
 # Supports LoRA fine-tuning for efficient adaptation
 pi0 = [
-    "transformers>=5.5.0,<5.6.0",
+    "transformers>=5.15.1,<5.16.0",
     "safetensors>=0.4.3,<1.0.0",
     "Pillow>=10.0.0,<13.0.0",
     "sentencepiece<=0.2.1",
@@ -87,7 +87,7 @@ pi05 = ["physicalai-train[pi0]"]
 # Requires ~24GB+ GPU memory for training, supports LoRA fine-tuning
 # Note: transformers>=4.54.0 required for _prepare_image_like_inputs fix
 groot = [
-    "transformers>=5.5.0,<5.6.0",
+    "transformers>=5.15.1,<5.16.0",
     "diffusers>=0.38.0",
     "dm-tree>=0.1.8,<1.0.0",
     "timm>=1.0.0,<1.1.0",
@@ -99,7 +99,7 @@ groot = [
 
 # SmolVLA foundation model
 smolvla = [
-    "transformers>=5.5.0,<5.6.0",
+    "transformers>=5.15.1,<5.16.0",
     "num2words>=0.5.14,<0.6.0",
     "safetensors>=0.4.3,<1.0.0",
 ]
@@ -107,14 +107,14 @@ smolvla = [
 # MolmoAct2
 # Supports LoRA fine-tuning for efficient adaptation
 molmoact2 = [
-    "transformers>=5.5.0,<5.6.0",
+    "transformers>=5.15.1,<5.16.0",
     "peft>=0.13.0,<1.0.0",
     "safetensors>=0.4.3,<1.0.0",
 ]
 
 # RLWRLD RLDX-1
 rldx1 = [
-    "transformers>=5.3.0,<5.6.0",
+    "transformers>=5.15.1,<5.16.0",
     "safetensors>=0.4.3,<1.0.0",
     "Pillow>=10.0.0,<13.0.0",
     "scipy>=1.11.0,<2.0.0",
@@ -185,6 +185,9 @@ override-dependencies = [
     # Safe to override because executorch
     # production code does not import pytest at runtime.
     "pytest>=9.0.3",
+    # The pinned physicalai runtime currently caps Transformers below the
+    # policy requirements; enforce the policy-compatible version range.
+    "transformers>=5.15.1,<5.16.0",
     # LeRobot 0.6.0 keeps diffusers in optional extras; keep an explicit floor for CVE-2026-44827 fix
     "diffusers>=0.38.0",
 ]
