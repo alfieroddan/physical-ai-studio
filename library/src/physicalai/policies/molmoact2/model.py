@@ -468,6 +468,7 @@ class MolmoAct2Model(Model):
             images=batch.get("images"),
             token_pooling=batch.get("token_pooling"),
             actions=batch[ACTION],
+            action_horizon_is_pad=batch.get("action_horizon_is_pad"),
             action_dim_is_pad=batch.get("action_dim_is_pad"),
             freeze_encoder=self._vlm_frozen,
         )

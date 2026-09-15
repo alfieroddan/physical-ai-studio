@@ -907,15 +907,29 @@ def test_configure_optimizers_uses_training_length_when_decay_steps_are_none(
     assert scheduler.lr_lambdas[0](3_000) == pytest.approx(1e-6 / 1e-5)
 
 
-def test_optimizer_defaults_match_so101_finetuning_recipe() -> None:
+def test_optimizer_defaults_match_lerobot_recipe() -> None:
     policy = MolmoAct2(pretrained_name_or_path=None)
+
+    assert policy.optimizer_lr == 5e-5
+    assert policy.optimizer_vit_lr == 5e-5
+    assert policy.optimizer_connector_lr == 5e-5
+    assert policy.optimizer_action_expert_lr == 5e-5
+    assert policy.scheduler_warmup_steps == 200
+    assert policy.scheduler_decay_steps is None
+
+
+def test_lora_optimizer_explicit_learning_rates_take_precedence() -> None:
+    policy = MolmoAct2(
+        pretrained_name_or_path=None,
+        use_lora=True,
+        optimizer_lr=1e-5,
+        optimizer_vit_lr=5e-6,
+        optimizer_connector_lr=5e-6,
+    )
 
     assert policy.optimizer_lr == 1e-5
     assert policy.optimizer_vit_lr == 5e-6
     assert policy.optimizer_connector_lr == 5e-6
-    assert policy.optimizer_action_expert_lr == 5e-5
-    assert policy.scheduler_warmup_steps == 200
-    assert policy.scheduler_decay_steps is None
 
 
 @pytest.mark.parametrize("policy_config", [None, "invalid"])

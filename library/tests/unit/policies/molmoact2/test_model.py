@@ -69,6 +69,94 @@ def test_masked_action_mse_excludes_padding_and_preserves_gradients() -> None:
     torch.testing.assert_close(predicted.grad, torch.tensor([[[[4.0, 0.0], [0.0, 0.0]]]]))
 
 
+def test_action_expert_context_metadata_masks_padded_horizon(model: MolmoAct2Model) -> None:
+    action_expert = model._unwrapped_backbone.model.action_expert
+    assert action_expert is not None
+    horizon_mask = torch.tensor([[False, False, True, True], [False, True, True, True]])
+
+    cross_mask, self_mask, valid_action, _ = action_expert.prepare_context_metadata(
+        encoder_attention_mask=torch.ones(2, 3, dtype=torch.bool),
+        seq_len=4,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        action_horizon_is_pad=horizon_mask,
+    )
+
+    assert cross_mask is not None
+    assert self_mask is not None
+    assert valid_action is not None
+    expected_self_mask = horizon_mask[:, None, None, :].float() * torch.finfo(torch.float32).min
+    torch.testing.assert_close(self_mask, expected_self_mask)
+    torch.testing.assert_close(valid_action, (~horizon_mask).float().unsqueeze(-1))
+
+
+def test_predict_flow_velocity_forwards_horizon_mask(
+    model: MolmoAct2Model,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backbone = model._unwrapped_backbone.model
+    horizon_mask = torch.tensor([[False, False, True, True], [False, True, True, True]])
+    captured: dict[str, object] = {}
+
+    def predict_per_layer(**kwargs: object) -> torch.Tensor:
+        captured.update(kwargs)
+        return torch.zeros_like(kwargs["x_t"])
+
+    monkeypatch.setattr(backbone, "_predict_flow_velocity_per_layer", predict_per_layer)
+    predicted, target = backbone.predict_flow_velocity(
+        input_ids=torch.zeros(2, 1, dtype=torch.long),
+        attention_mask=torch.ones(2, 1, dtype=torch.bool),
+        token_type_ids=None,
+        images=None,
+        token_pooling=None,
+        actions=torch.zeros(2, 4, 4),
+        action_horizon_is_pad=horizon_mask,
+        action_dim_is_pad=None,
+        freeze_encoder=False,
+    )
+
+    assert captured["action_horizon_is_pad"] is horizon_mask
+    assert predicted.shape == target.shape == (2, backbone.num_flow_timesteps, 4, 4)
+
+
+def test_flow_prediction_ignores_padded_action_tail(
+    model: MolmoAct2Model,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backbone = model._unwrapped_backbone.model
+    backbone.num_flow_timesteps = 1
+    horizon_mask = torch.tensor([[False, False, True, True]])
+
+    def deterministic_interpolation(
+        actions: torch.Tensor,
+        _action_dim_is_pad: torch.Tensor | None,
+        _dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        return actions, torch.zeros(actions.shape[0]), torch.zeros_like(actions)
+
+    monkeypatch.setattr(backbone, "_flow_interpolation", deterministic_interpolation)
+    inputs = {
+        "input_ids": torch.zeros(1, 2, dtype=torch.long),
+        "attention_mask": torch.ones(1, 2, dtype=torch.bool),
+        "token_type_ids": None,
+        "images": None,
+        "token_pooling": None,
+        "action_horizon_is_pad": horizon_mask,
+        "action_dim_is_pad": None,
+        "freeze_encoder": False,
+    }
+    actions = torch.zeros(1, 4, 4)
+    padded_tail_changed = actions.clone()
+    padded_tail_changed[:, 2:] = 100.0
+
+    predicted, _ = backbone.predict_flow_velocity(actions=actions, **inputs)
+    changed, _ = backbone.predict_flow_velocity(actions=padded_tail_changed, **inputs)
+
+    torch.testing.assert_close(predicted[:, :, :2], changed[:, :, :2])
+    torch.testing.assert_close(predicted[:, :, 2:], torch.zeros_like(predicted[:, :, 2:]))
+    torch.testing.assert_close(changed[:, :, 2:], torch.zeros_like(changed[:, :, 2:]))
+
+
 def test_forward_dispatches_by_mode(model: MolmoAct2Model, monkeypatch: pytest.MonkeyPatch) -> None:
     loss = torch.tensor(1.0)
     actions = torch.ones(1, 2, 4)

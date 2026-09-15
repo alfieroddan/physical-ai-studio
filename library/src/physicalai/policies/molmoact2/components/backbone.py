@@ -375,6 +375,7 @@ class MolmoAct2Backbone(nn.Module):
         x_t: torch.Tensor,
         timesteps: torch.Tensor,
         action_horizon: int,
+        action_horizon_is_pad: torch.Tensor | None,
         num_flow_timesteps: int,
         freeze_encoder: bool,
     ) -> torch.Tensor:
@@ -392,17 +393,25 @@ class MolmoAct2Backbone(nn.Module):
             position_embeddings = self.transformer.rotary_emb(hidden_states, position_ids)
 
         encoder_mask = self._encoder_attention_mask(input_ids, attention_mask)
-        cross_mask, self_mask, rope_cache = action_expert.prepare_context_metadata(
+        cross_mask, self_mask, valid_action, rope_cache = action_expert.prepare_context_metadata(
             encoder_attention_mask=encoder_mask,
             seq_len=action_horizon,
             device=x_t.device,
             dtype=dtype,
+            action_horizon_is_pad=action_horizon_is_pad,
         )
         if cross_mask is not None and num_flow_timesteps != 1:
             cross_mask = cross_mask.repeat_interleave(num_flow_timesteps, dim=0)
+        if action_horizon_is_pad is not None and num_flow_timesteps != 1:
+            if self_mask is not None:
+                self_mask = self_mask.repeat_interleave(num_flow_timesteps, dim=0)
+            if valid_action is not None:
+                valid_action = valid_action.repeat_interleave(num_flow_timesteps, dim=0)
 
         conditioning = action_expert.time_conditioning(timesteps)
         action_hidden = action_expert.action_embed(x_t)
+        if valid_action is not None:
+            action_hidden = action_hidden * valid_action  # noqa: PLR6104
         use_gradient_checkpointing = (
             self.transformer.gradient_checkpointing
             and action_expert.gradient_checkpointing
@@ -442,6 +451,8 @@ class MolmoAct2Backbone(nn.Module):
                 is_causal=action_expert.causal_attn,
                 rope_cache=rope_cache,
             )
+            if valid_action is not None:
+                next_action_hidden = next_action_hidden * valid_action  # noqa: PLR6104
             return next_hidden, next_action_hidden
 
         for layer_idx in range(len(self.transformer.blocks)):
@@ -458,7 +469,8 @@ class MolmoAct2Backbone(nn.Module):
                 )
             else:
                 hidden_states, action_hidden = run_layer(layer_idx, hidden_states, action_hidden)
-        return action_expert.final_layer(action_hidden, conditioning)
+        predicted_velocity = action_expert.final_layer(action_hidden, conditioning)
+        return predicted_velocity if valid_action is None else predicted_velocity * valid_action
 
     def predict_flow_velocity(
         self,
@@ -469,6 +481,7 @@ class MolmoAct2Backbone(nn.Module):
         images: torch.Tensor | None,
         token_pooling: torch.Tensor | None,
         actions: torch.Tensor,
+        action_horizon_is_pad: torch.Tensor | None,
         action_dim_is_pad: torch.Tensor | None,
         freeze_encoder: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -503,6 +516,7 @@ class MolmoAct2Backbone(nn.Module):
             x_t=x_t,
             timesteps=timesteps,
             action_horizon=horizon,
+            action_horizon_is_pad=action_horizon_is_pad,
             num_flow_timesteps=num_flow_timesteps,
             freeze_encoder=freeze_encoder,
         )

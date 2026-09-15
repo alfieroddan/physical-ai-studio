@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 KVContext = tuple[torch.Tensor, torch.Tensor]
+_ACTION_HORIZON_MASK_RANK = 2
 
 
 def _round_up_multiple(value: int, multiple_of: int) -> int:
@@ -477,11 +478,20 @@ class ActionExpert(nn.Module):
         seq_len: int,
         device: torch.device,
         dtype: torch.dtype,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, tuple[torch.Tensor, torch.Tensor] | None]:
+        action_horizon_is_pad: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        tuple[torch.Tensor, torch.Tensor] | None,
+    ]:
         """Build the masks and rotary cache shared by all action-expert layers.
 
         Returns:
-            Cross-attention mask, self-attention mask, and rotary cache.
+            Cross-attention mask, self-attention mask, valid action gate, and rotary cache.
+
+        Raises:
+            ValueError: If the action horizon mask has an invalid shape or batch size.
         """
         cross_mask = None
         if encoder_attention_mask is not None:
@@ -493,13 +503,26 @@ class ActionExpert(nn.Module):
             causal = torch.ones(seq_len, seq_len, device=device, dtype=torch.bool).triu(1)
             self_mask = causal[None, None].to(dtype) * torch.finfo(dtype).min
 
+        valid_action = None
+        if action_horizon_is_pad is not None:
+            horizon_mask = action_horizon_is_pad.to(device=device, dtype=torch.bool)
+            if horizon_mask.ndim != _ACTION_HORIZON_MASK_RANK or horizon_mask.shape[1] != seq_len:
+                msg = "action_horizon_is_pad must have shape [batch, action_horizon]."
+                raise ValueError(msg)
+            if encoder_attention_mask is not None and horizon_mask.shape[0] != encoder_attention_mask.shape[0]:
+                msg = "action_horizon_is_pad batch size must match the encoder batch size."
+                raise ValueError(msg)
+            valid_action = (~horizon_mask).to(dtype=dtype).unsqueeze(-1)
+            padding_mask = horizon_mask[:, None, None, :].to(dtype) * torch.finfo(dtype).min
+            self_mask = padding_mask if self_mask is None else self_mask + padding_mask
+
         rope_cache = None
         if len(self.blocks) > 0:
             first_block = cast("ActionExpertBlock", self.blocks[0])
             rope = first_block.self_attn.rope
             if rope is not None:
                 rope_cache = rope.build_cache(seq_len=seq_len, device=device, dtype=dtype)
-        return cross_mask, self_mask, rope_cache
+        return cross_mask, self_mask, valid_action, rope_cache
 
     @staticmethod
     def expand_context_for_flow_timesteps(
@@ -567,7 +590,7 @@ class ActionExpert(nn.Module):
         kv_contexts: list[KVContext] = []
         for block, (k_in, v_in) in zip(self.blocks, encoder_kv_states, strict=False):
             kv_contexts.append(self.project_kv_context(cast("ActionExpertBlock", block), k_in, v_in))
-        cross_mask, self_mask, rope_cache = self.prepare_context_metadata(
+        cross_mask, self_mask, valid_action, rope_cache = self.prepare_context_metadata(
             encoder_attention_mask=encoder_attention_mask,
             seq_len=seq_len,
             device=device,
@@ -578,7 +601,7 @@ class ActionExpert(nn.Module):
             kv_contexts=kv_contexts,
             cross_mask=cross_mask,
             self_mask=self_mask,
-            valid_action=None,
+            valid_action=valid_action,
             rope_cache=rope_cache,
         )
 
@@ -596,6 +619,8 @@ class ActionExpert(nn.Module):
         """
         conditioning = self.time_conditioning(timesteps)
         x = self.action_embed(actions)
+        if context.valid_action is not None:
+            x = x * context.valid_action  # noqa: PLR6104
         use_gradient_checkpointing = self.gradient_checkpointing and self.training and torch.is_grad_enabled()
         for block, kv_context in zip(self.blocks, context.kv_contexts, strict=False):
             if use_gradient_checkpointing:
@@ -620,4 +645,7 @@ class ActionExpert(nn.Module):
                     is_causal=self.causal_attn,
                     rope_cache=context.rope_cache,
                 )
-        return self.final_layer(x, conditioning)
+            if context.valid_action is not None:
+                x = x * context.valid_action  # noqa: PLR6104
+        output = self.final_layer(x, conditioning)
+        return output if context.valid_action is None else output * context.valid_action
