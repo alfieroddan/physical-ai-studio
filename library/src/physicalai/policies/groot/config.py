@@ -13,7 +13,7 @@ The configuration inherits from the base `Config` class, enabling:
 
 For CLI usage, use the YAML config in `configs/groot/groot.yaml`:
 
-    physicalai fit --config configs/physicalai/groot.yaml
+    physicalai fit --config configs/physicalai/groot/aloha/default.yaml
 
 Example (API):
     >>> from physicalai.policies.groot import GrootConfig
