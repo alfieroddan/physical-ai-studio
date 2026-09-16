@@ -194,9 +194,6 @@ override-dependencies = [
     # Safe to override because executorch
     # production code does not import pytest at runtime.
     "pytest>=9.0.3",
-    # The pinned physicalai runtime currently caps Transformers below the
-    # policy requirements; enforce the policy-compatible version range.
-    "transformers>=5.15.1,<5.16.0",
     # LeRobot 0.6.0 keeps diffusers in optional extras; keep an explicit floor for CVE-2026-44827 fix
     "diffusers>=0.38.0",
     # LeRobot pulls in setuptools with no upper bound; 83.0.0 fixes CVE-2026-59890
