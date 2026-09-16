@@ -29,7 +29,8 @@
 # its own earlier checkpoint).
 #
 # Single-run alternative (recommended):
-#   Add SnapFlowPhaseCallback to smolvla.yaml trainer.callbacks with a
+#   Add SnapFlowPhaseCallback to trainer.callbacks in
+#   configs/physicalai/smolvla/pusht/default.yaml with a
 #   start_epoch (or start_step) boundary and run a single `physicalai fit`.
 #   See configs/physicalai/pi05/so101/snapflow.yaml for a
 #   worked example.
