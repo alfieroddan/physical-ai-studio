@@ -1,0 +1,57 @@
+# MolmoAct2 PushT Training Configuration
+#
+# Usage:
+#   physicalai fit --config configs/physicalai/molmoact2/pusht.yaml
+model:
+  class_path: physicalai.policies.MolmoAct2
+  init_args:
+    # Initialize weights, tokenizer, and image processor from the released base checkpoint.
+    pretrained_name_or_path: allenai/MolmoAct2
+
+    # Use one observation to predict a 10-step chunk, but execute only its first
+    # action before observing the environment and replanning.
+    n_obs_steps: 1
+    chunk_size: 10
+    n_action_steps: 1
+
+    # Sample fresh Gaussian action noise for each flow-matching training example.
+    use_random_input_noise: true
+
+    # Fine-tune the VLM and action expert through low-rank adapters instead of
+    # updating their full parameter matrices.
+    use_lora: true
+    enable_lora_action_expert: true
+
+    # Text inserted into the model prompt to describe the embodiment and action space.
+    setup_type: "single 2D point-mass pusher robot in the PushT block-pushing simulation"
+    control_mode: "absolute planar end-effector position"
+
+    # Independent learning rates for the text backbone, vision encoder, image
+    # connector, and action expert respectively.
+    optimizer_lr: 1e-5
+    optimizer_vit_lr: 5e-6
+    optimizer_connector_lr: 5e-6
+    optimizer_action_expert_lr: 5e-5
+
+    # Reach the final cosine-decay learning rate after 24,000 optimizer steps.
+    # Warmup and final learning rate use the MolmoAct2 defaults (200 and 1e-6).
+    scheduler_decay_steps: 24000
+
+data:
+  class_path: physicalai.data.lerobot.LeRobotDataModule
+  init_args:
+    # Convert LeRobot samples into PhysicalAI Observation/Action objects.
+    repo_id: lerobot/pusht
+    train_batch_size: 8
+    data_format: physicalai
+    # Worker processes decode and prepare samples in parallel.
+    num_workers: 8
+
+trainer:
+  # Train for the same eight epochs as the reference PushT experiment.
+  max_epochs: 8
+  accelerator: gpu
+  devices: 1
+  # Mixed bfloat16 reduces memory use while retaining float32-like range.
+  precision: bf16-mixed
+  log_every_n_steps: 20
