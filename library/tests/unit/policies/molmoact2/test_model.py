@@ -70,7 +70,7 @@ def test_masked_action_mse_excludes_padding_and_preserves_gradients() -> None:
 
 
 def test_action_expert_context_metadata_masks_padded_horizon(model: MolmoAct2Model) -> None:
-    action_expert = model._unwrapped_backbone.model.action_expert
+    action_expert = model.backbone.model.action_expert
     assert action_expert is not None
     horizon_mask = torch.tensor([[False, False, True, True], [False, True, True, True]])
 
@@ -94,7 +94,7 @@ def test_predict_flow_velocity_forwards_horizon_mask(
     model: MolmoAct2Model,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    backbone = model._unwrapped_backbone.model
+    backbone = model.backbone.model
     horizon_mask = torch.tensor([[False, False, True, True], [False, True, True, True]])
     captured: dict[str, object] = {}
 
@@ -123,7 +123,7 @@ def test_flow_prediction_ignores_padded_action_tail(
     model: MolmoAct2Model,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    backbone = model._unwrapped_backbone.model
+    backbone = model.backbone.model
     backbone.num_flow_timesteps = 1
     horizon_mask = torch.tensor([[False, False, True, True]])
 
@@ -181,7 +181,7 @@ def test_predict_action_chunk_returns_full_chunk(
         calls.update(kwargs)
         return generated
 
-    monkeypatch.setattr(model._unwrapped_backbone.model, "generate_actions_from_inputs", generate)
+    monkeypatch.setattr(model.backbone.model, "generate_actions_from_inputs", generate)
     actions = model.predict_action_chunk({"input_ids": torch.zeros(1, 1, dtype=torch.long)})
 
     assert actions.shape == (1, tiny_molmoact2_config.chunk_size, 4)
@@ -206,7 +206,7 @@ def test_validation_reports_action_and_flow_losses(
 
 
 def test_gradient_checkpointing_and_freezing(model: MolmoAct2Model) -> None:
-    backbone = model._unwrapped_backbone.model
+    backbone = model.backbone.model
     model.enable_gradient_checkpointing()
 
     assert backbone.transformer.gradient_checkpointing is True
@@ -238,9 +238,8 @@ def test_enable_compile_wraps_inference_entrypoint(
     assert compiled == ["predict_action_chunk"]
 
 
-def test_enable_lora_creates_trainable_adapters(model: MolmoAct2Model) -> None:
-    pytest.importorskip("peft")
+def test_default_peft_targets_include_vlm_and_action_expert() -> None:
+    targets = MolmoAct2Model.get_default_peft_targets()
 
-    model.enable_lora()
-
-    assert any("lora_" in name and parameter.requires_grad for name, parameter in model.named_parameters())
+    assert "vision_backbone" in targets
+    assert "action_expert" in targets

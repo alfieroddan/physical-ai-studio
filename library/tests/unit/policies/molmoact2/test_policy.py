@@ -57,10 +57,10 @@ def test_model_methods_require_initialization(method: str) -> None:
 
 
 def test_invalid_lora_options() -> None:
-    with pytest.raises(ValueError, match="requires use_lora"):
-        MolmoAct2(pretrained_name_or_path=None, enable_lora_action_expert=True)
     with pytest.raises(ValueError, match="incompatible"):
-        MolmoAct2(pretrained_name_or_path=None, use_lora=True, train_action_head_only=True)
+        MolmoAct2(pretrained_name_or_path=None, lora_enabled=True, train_action_head_only=True)
+    with pytest.raises(ValueError, match="lora_rank"):
+        MolmoAct2(pretrained_name_or_path=None, lora_enabled=True, lora_rank=0)
 
 
 @pytest.mark.parametrize(
@@ -921,7 +921,7 @@ def test_optimizer_defaults_match_lerobot_recipe() -> None:
 def test_lora_optimizer_explicit_learning_rates_take_precedence() -> None:
     policy = MolmoAct2(
         pretrained_name_or_path=None,
-        use_lora=True,
+        lora_enabled=True,
         optimizer_lr=1e-5,
         optimizer_vit_lr=5e-6,
         optimizer_connector_lr=5e-6,
@@ -1156,22 +1156,48 @@ def test_openvino_export_uses_corrected_pretrained_so101_statistics(
     }
 
 
-def test_model_modifications_are_applied_in_order(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_modifications_apply_shared_peft(monkeypatch: pytest.MonkeyPatch) -> None:
     policy = MolmoAct2(
         pretrained_name_or_path=None,
         compile_model=True,
         gradient_checkpointing=True,
-        use_lora=True,
+        lora_enabled=True,
         train_action_head_only=False,
     )
     model = Mock()
     monkeypatch.setattr(policy, "_require_model", lambda: model)
+    monkeypatch.setattr(policy, "_inject_lora", Mock())
+    policy.config = MolmoAct2Config(lora_enabled=True)
 
     policy._apply_model_modifications()
 
     model.enable_gradient_checkpointing.assert_called_once_with()
-    model.enable_lora.assert_called_once_with(enable_action_expert=False)
+    policy._inject_lora.assert_called_once_with()
     model.enable_compile.assert_called_once_with()
+
+
+def test_shared_peft_trains_adapters_throughout_model(tiny_molmoact2_config: MolmoAct2Config) -> None:
+    pytest.importorskip("peft")
+    from physicalai.policies.mixins.peft import is_lora_injected
+
+    config = replace(
+        tiny_molmoact2_config,
+        lora_enabled=True,
+        lora_rank=2,
+        lora_alpha=2,
+        lora_dropout=0.0,
+    )
+
+    policy = MolmoAct2.from_config(config)
+    model = policy._require_model()
+    trainable = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+
+    assert is_lora_injected(model)
+    assert trainable
+    assert all("lora_" in name for name in trainable)
+    assert any("transformer" in name for name in trainable)
+    assert any("vision_backbone" in name for name in trainable)
+    assert any("action_expert" in name for name in trainable)
 
 
 def test_supported_export_backends() -> None:

@@ -16,6 +16,11 @@ def test_defaults_match_pretrained_architecture() -> None:
     assert (config.hidden_size, config.num_hidden_layers, config.num_attention_heads) == (2560, 36, 32)
     assert (config.chunk_size, config.n_action_steps, config.max_action_dim) == (30, 30, 32)
     assert config.tokenizer_name_or_path == "allenai/MolmoAct2"
+    assert config.lora_enabled is False
+    assert (config.lora_rank, config.lora_alpha, config.lora_dropout) == (64, 16, 0.05)
+    assert config.lora_target_modules is None
+    assert config.lora_adapter_dtype == "float32"
+    assert config.lora_use_dora is False
 
 
 def test_custom_fields() -> None:
@@ -25,11 +30,19 @@ def test_custom_fields() -> None:
 
 
 def test_serialization_round_trip() -> None:
-    config = MolmoAct2Config(chunk_size=8, n_action_steps=4, tokenizer_config={"pad_token": ""})
+    config = MolmoAct2Config(
+        chunk_size=8,
+        n_action_steps=4,
+        tokenizer_config={"pad_token": ""},
+        lora_enabled=True,
+        lora_target_modules=("q_proj", "v_proj"),
+        lora_adapter_dtype="auto",
+        lora_use_dora=True,
+    )
     restored = MolmoAct2Config.from_dict(config.to_dict())
 
     assert isinstance(restored, Config)
-    assert (restored.chunk_size, restored.n_action_steps) == (8, 4)
+    assert restored == config
     assert restored.tokenizer_config == {"pad_token": ""}
 
 
@@ -61,6 +74,7 @@ def test_policy_runtime_options_are_not_model_config() -> None:
         "optimizer_lr",
         "use_lora",
     }.isdisjoint(data)
+    assert "lora_enabled" in data
 
 
 def test_rollout_settings_validation() -> None:
@@ -74,3 +88,12 @@ def test_rollout_settings_validation() -> None:
         MolmoAct2Config(n_obs_steps=0)
     with pytest.raises(ValueError, match="max_action_dim"):
         MolmoAct2Config(max_action_dim=0)
+
+
+def test_peft_settings_validation() -> None:
+    with pytest.raises(ValueError, match="lora_rank"):
+        MolmoAct2Config(lora_enabled=True, lora_rank=0)
+    with pytest.raises(ValueError, match="lora_alpha"):
+        MolmoAct2Config(lora_enabled=True, lora_alpha=0)
+    with pytest.raises(ValueError, match="lora_dropout"):
+        MolmoAct2Config(lora_dropout=1.0)

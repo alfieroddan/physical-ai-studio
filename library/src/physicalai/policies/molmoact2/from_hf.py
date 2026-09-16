@@ -72,10 +72,13 @@ class MolmoAct2FromHFMixin:
     adapt_to_so101: bool
     convert_pretrained_so101_stats: bool
     use_random_input_noise: bool
+    lora_enabled: bool
     lora_rank: int
-    lora_alpha: int
+    lora_alpha: int | None
     lora_dropout: float
-    lora_bias: Literal["all", "lora_only", "none"]
+    lora_target_modules: str | tuple[str, ...] | None
+    lora_adapter_dtype: Literal["float32", "auto"]
+    lora_use_dora: bool
 
     @classmethod
     def _normalization_parameters(
@@ -372,10 +375,13 @@ class MolmoAct2FromHFMixin:
             tokenizer_config=tokenizer_config,
             tokenizer_name_or_path=str(snapshot_dir),
             use_random_input_noise=self.use_random_input_noise,
+            lora_enabled=self.lora_enabled,
             lora_rank=self.lora_rank,
             lora_alpha=self.lora_alpha,
             lora_dropout=self.lora_dropout,
-            lora_bias=self.lora_bias,
+            lora_target_modules=self.lora_target_modules,
+            lora_adapter_dtype=self.lora_adapter_dtype,
+            lora_use_dora=self.lora_use_dora,
         )
 
     @staticmethod

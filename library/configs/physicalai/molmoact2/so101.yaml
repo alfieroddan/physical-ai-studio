@@ -18,8 +18,7 @@ model:
     use_random_input_noise: true
 
     # Fine-tune the VLM and action expert through low-rank adapters.
-    use_lora: true
-    enable_lora_action_expert: true
+    lora_enabled: true
 
     # Recompute intermediate activations during backward passes to save GPU memory.
     gradient_checkpointing: true

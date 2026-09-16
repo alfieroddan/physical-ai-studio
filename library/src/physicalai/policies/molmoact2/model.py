@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Self, override
+from typing import TYPE_CHECKING, Any, Self, override
 
 import torch
 from safetensors.torch import load_file as load_safetensors_file
@@ -18,6 +18,7 @@ from torch.nn import functional
 
 from physicalai.data.observation import ACTION, FeatureType
 from physicalai.policies.base import Model
+from physicalai.policies.mixins.peft import PeftModelMixin
 
 from .components import (
     ActionExpert,
@@ -91,10 +92,10 @@ def _lora_target_modules(*, enable_action_expert: bool) -> str:
     Returns:
         A regex matching VLM linears and, optionally, action-expert linears.
     """
-    vlm_targets = rf"model\.(transformer|vision_backbone)\.(?:.*\.)?({_VLM_LORA_LINEAR_LEAVES})$"
+    vlm_targets = rf"backbone\.model\.(transformer|vision_backbone)\.(?:.*\.)?({_VLM_LORA_LINEAR_LEAVES})$"
     if not enable_action_expert:
         return vlm_targets
-    return f"({vlm_targets}|model\\.action_expert\\.(?:{_ACTION_EXPERT_LORA_LINEAR_LEAVES})$)"
+    return f"({vlm_targets}|backbone\\.model\\.action_expert\\.(?:{_ACTION_EXPERT_LORA_LINEAR_LEAVES})$)"
 
 
 def _resolve_weights_path(weights_path: str | Path) -> Path:
@@ -121,7 +122,7 @@ def _resolve_weights_path(weights_path: str | Path) -> Path:
     raise FileNotFoundError(msg)
 
 
-class MolmoAct2Model(Model):
+class MolmoAct2Model(PeftModelMixin, Model):
     """Native MolmoAct2 architecture assembled from explicit model arguments."""
 
     def __init__(  # noqa: PLR0913
@@ -198,18 +199,9 @@ class MolmoAct2Model(Model):
         chunk_size: int = 30,
         action_dim: int | None = None,
         use_random_input_noise: bool = False,
-        # LoRA
-        lora_rank: int = 64,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_bias: Literal["all", "lora_only", "none"] = "none",
     ) -> None:
         """Construct the text, vision, and action components."""
         super().__init__()
-        self._lora_rank = lora_rank
-        self._lora_alpha = lora_alpha
-        self._lora_dropout = lora_dropout
-        self._lora_bias: Literal["all", "lora_only", "none"] = lora_bias
         self._chunk_size = chunk_size
         self._action_dim = action_dim or max_action_dim
         self._use_random_input_noise = use_random_input_noise
@@ -343,51 +335,14 @@ class MolmoAct2Model(Model):
             msg = "MolmoAct2 sharded checkpoint did not load every model parameter."
             raise RuntimeError(msg)
 
-    @property
-    def _unwrapped_backbone(self) -> MolmoAct2ForConditionalGeneration:
-        """Checkpoint-root model, unwrapped from PEFT when necessary."""
-        base_model = getattr(self.backbone, "base_model", None)
-        if base_model is not None and hasattr(base_model, "model"):
-            return base_model.model  # type: ignore[no-any-return]
-        return self.backbone  # type: ignore[return-value]
-
-    def enable_lora(self, *, enable_action_expert: bool = False) -> None:
-        """Attach PEFT LoRA adapters to configured MolmoAct2 linear layers.
-
-        Raises:
-            ImportError: If PEFT is not installed.
-            RuntimeError: If adapters are already enabled or no action expert exists
-                when full action-expert training is requested.
-        """
-        if getattr(self.backbone, "base_model", None) is not None:
-            msg = "MolmoAct2 LoRA adapters are already enabled."
-            raise RuntimeError(msg)
-        try:
-            from peft import LoraConfig, get_peft_model  # noqa: PLC0415
-        except ImportError as error:
-            msg = "MolmoAct2 LoRA requires peft. Install with: pip install 'physicalai-train[molmoact2]'"
-            raise ImportError(msg) from error
-
-        lora_config = LoraConfig(
-            r=self._lora_rank,
-            lora_alpha=self._lora_alpha,
-            lora_dropout=self._lora_dropout,
-            target_modules=_lora_target_modules(enable_action_expert=enable_action_expert),
-            bias=self._lora_bias,
-        )
-        self.backbone = get_peft_model(self.backbone, lora_config)  # type: ignore[assignment, arg-type]  # pyrefly: ignore[bad-assignment]
-        if not enable_action_expert:
-            action_expert = self._unwrapped_backbone.model.action_expert
-            if action_expert is None:
-                msg = "LoRA without action-expert adapters requires an action expert to train."
-                raise RuntimeError(msg)
-            for parameter in action_expert.parameters():
-                parameter.requires_grad = True
-        self.train(self.training)
+    @classmethod
+    def get_default_peft_targets(cls) -> str:
+        """Return the default adapter targets for the VLM and action expert."""
+        return _lora_target_modules(enable_action_expert=True)
 
     def enable_gradient_checkpointing(self) -> None:
         """Enable activation checkpointing on text, vision, and action stacks."""
-        model = self._unwrapped_backbone.model
+        model = self.backbone.model
         model.transformer.gradient_checkpointing = True
         model.vision_backbone.gradient_checkpointing = True
         if model.action_expert is not None:
@@ -403,7 +358,7 @@ class MolmoAct2Model(Model):
 
     def gradient_checkpointing_disable(self) -> None:
         """Disable activation checkpointing on all component stacks."""
-        model = self._unwrapped_backbone.model
+        model = self.backbone.model
         model.transformer.gradient_checkpointing = False
         model.vision_backbone.gradient_checkpointing = False
         if model.action_expert is not None:
@@ -415,7 +370,7 @@ class MolmoAct2Model(Model):
         Raises:
             RuntimeError: If the model has no action expert.
         """
-        action_expert = self._unwrapped_backbone.model.action_expert
+        action_expert = self.backbone.model.action_expert
         if action_expert is None:
             msg = "Cannot freeze the VLM because MolmoAct2 has no action expert to train."
             raise RuntimeError(msg)
@@ -435,7 +390,7 @@ class MolmoAct2Model(Model):
         """
         super().train(mode)
         if self._vlm_frozen:
-            checkpoint_root = self._unwrapped_backbone
+            checkpoint_root = self.backbone
             checkpoint_root.eval()
             action_expert = checkpoint_root.model.action_expert
             if action_expert is not None:
@@ -460,7 +415,7 @@ class MolmoAct2Model(Model):
         Returns:
             The differentiable loss and detached metrics.
         """
-        predicted, target = self._unwrapped_backbone.model.predict_flow_velocity(
+        predicted, target = self.backbone.model.predict_flow_velocity(
             input_ids=batch["input_ids"],
             attention_mask=batch.get("attention_mask"),
             token_type_ids=batch.get("token_type_ids"),
@@ -475,9 +430,7 @@ class MolmoAct2Model(Model):
             predicted,
             target,
             action_horizon_is_pad=batch.get("action_horizon_is_pad"),
-            action_dim_is_pad=batch.get("action_dim_is_pad")
-            if self._unwrapped_backbone.model.mask_action_dim_padding
-            else None,
+            action_dim_is_pad=batch.get("action_dim_is_pad") if self.backbone.model.mask_action_dim_padding else None,
         )
         metric = loss.detach()
         return loss, {"action_flow_loss": metric, "loss": metric}
@@ -496,7 +449,7 @@ class MolmoAct2Model(Model):
             Normalized actions trimmed to the configured horizon and action dimension.
         """
         model_inputs = {key: batch[key] for key in _MODEL_INPUT_KEYS if key in batch}
-        actions = self._unwrapped_backbone.model.generate_actions_from_inputs(
+        actions = self.backbone.model.generate_actions_from_inputs(
             **model_inputs,
             action_horizon=self._chunk_size,
             sample_noise=self._use_random_input_noise if sample_noise is None else sample_noise,
@@ -643,8 +596,4 @@ class MolmoAct2Model(Model):
             chunk_size=config.chunk_size,
             action_dim=action_dim,
             use_random_input_noise=config.use_random_input_noise,
-            lora_rank=config.lora_rank,
-            lora_alpha=config.lora_alpha,
-            lora_dropout=config.lora_dropout,
-            lora_bias=config.lora_bias,
         )

@@ -24,10 +24,11 @@ from typing import Any, Literal
 from physicalai.config import Config
 
 from physicalai.data import Feature  # noqa: TC001
+from physicalai.policies.mixins.peft import PeftConfigMixin
 
 
-@dataclass
-class MolmoAct2Config(Config):
+@dataclass(frozen=True)
+class MolmoAct2Config(PeftConfigMixin, Config):
     """Flat configuration for the native MolmoAct2 model and policy."""
 
     # Policy arguments
@@ -142,11 +143,14 @@ class MolmoAct2Config(Config):
     # Checkpoint
     checkpoint_path: str | None = None
 
-    # LoRA parameters
+    # PEFT overrides
+    lora_enabled: bool = False
     lora_rank: int = 64
-    lora_alpha: int = 16
+    lora_alpha: int | None = 16
     lora_dropout: float = 0.05
-    lora_bias: Literal["all", "lora_only", "none"] = "none"
+    lora_target_modules: str | tuple[str, ...] | None = None
+    lora_adapter_dtype: Literal["float32", "auto"] = "float32"
+    lora_use_dora: bool = False
 
     # Tokenizer
     tokenizer_name_or_path: str = "allenai/MolmoAct2"
@@ -172,6 +176,7 @@ class MolmoAct2Config(Config):
 
     def __post_init__(self) -> None:
         """Validate configuration parameters after initialization."""
+        super().__post_init__()
         self._validate_rollout_settings()
 
     def _validate_rollout_settings(self) -> None:
@@ -189,13 +194,4 @@ class MolmoAct2Config(Config):
             raise ValueError(msg)
         if self.max_action_dim < 1:
             msg = f"max_action_dim must be >= 1, got {self.max_action_dim}"
-            raise ValueError(msg)
-        if self.lora_rank < 1:
-            msg = f"MolmoAct2 lora_rank must be >= 1, got {self.lora_rank}."
-            raise ValueError(msg)
-        if not 0.0 <= self.lora_dropout < 1.0:
-            msg = f"MolmoAct2 lora_dropout must be in [0.0, 1.0), got {self.lora_dropout}."
-            raise ValueError(msg)
-        if self.lora_bias not in {"none", "all", "lora_only"}:
-            msg = f"MolmoAct2 lora_bias must be one of 'none', 'all', 'lora_only', got {self.lora_bias!r}."
             raise ValueError(msg)

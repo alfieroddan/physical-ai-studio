@@ -23,6 +23,7 @@ from physicalai.data.observation import (
     Observation,
 )
 from physicalai.policies.base import Policy
+from physicalai.policies.mixins.peft import PeftConfigMixin, PeftPolicyMixin
 from physicalai.policies.utils import JointFrameTransform
 from physicalai.policies.utils.features import get_feature_by_type
 
@@ -89,7 +90,7 @@ def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureT
     ]
 
 
-class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
+class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
     """MolmoAct2 policy wrapper for loading pretrained checkpoints and configs."""
 
     def __init__(  # noqa: PLR0913, PLR0915
@@ -115,12 +116,13 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
         use_random_input_noise: bool = False,
-        use_lora: bool = False,
-        enable_lora_action_expert: bool = False,
+        lora_enabled: bool = False,
         lora_rank: int = 64,
-        lora_alpha: int = 16,
+        lora_alpha: int | None = 16,
         lora_dropout: float = 0.05,
-        lora_bias: Literal["all", "lora_only", "none"] = "none",
+        lora_target_modules: str | tuple[str, ...] | None = None,
+        lora_adapter_dtype: Literal["float32", "auto"] = "float32",
+        lora_use_dora: bool = False,
         train_action_head_only: bool = False,
         # optimization
         optimizer_lr: float = 5e-5,
@@ -161,12 +163,14 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_random_input_noise: Whether action generation starts from Gaussian noise.
-            use_lora: Whether to enable LoRA adapters on the model.
-            enable_lora_action_expert: Whether LoRA adapters also target the action expert.
+            lora_enabled: Whether to enable LoRA or DoRA adapters on the model.
             lora_rank: LoRA rank.
             lora_alpha: LoRA scaling value.
             lora_dropout: LoRA dropout probability.
-            lora_bias: LoRA bias training mode.
+            lora_target_modules: Optional target regex or module-name suffixes. When omitted,
+                MolmoAct2 adds adapters to both the VLM and action expert.
+            lora_adapter_dtype: Adapter precision, independent of base-model precision.
+            lora_use_dora: Whether to use DoRA instead of LoRA.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
@@ -185,18 +189,18 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         Raises:
             ValueError: If LoRA options are inconsistent or invalid.
         """
-        if enable_lora_action_expert and not use_lora:
-            msg = "enable_lora_action_expert requires use_lora=True."
+        if lora_enabled and train_action_head_only:
+            msg = "lora_enabled is incompatible with train_action_head_only."
             raise ValueError(msg)
-        if use_lora and train_action_head_only:
-            msg = "use_lora is incompatible with train_action_head_only."
-            raise ValueError(msg)
-        if lora_rank < 1:
-            msg = "lora_rank must be positive."
-            raise ValueError(msg)
-        if not 0.0 <= lora_dropout < 1.0:
-            msg = "lora_dropout must be in [0, 1)."
-            raise ValueError(msg)
+        PeftConfigMixin(
+            lora_enabled=lora_enabled,
+            lora_rank=lora_rank,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=lora_target_modules,
+            lora_adapter_dtype=lora_adapter_dtype,
+            lora_use_dora=lora_use_dora,
+        )
 
         resolved_adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
         if convert_pretrained_so101_stats and not resolved_adapt_to_so101:
@@ -223,12 +227,13 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         self.openvino_compress_to_fp16 = openvino_compress_to_fp16
         self.gradient_checkpointing = gradient_checkpointing
         self.use_random_input_noise = use_random_input_noise
-        self.use_lora = use_lora
-        self.enable_lora_action_expert = enable_lora_action_expert
+        self.lora_enabled = lora_enabled
         self.lora_rank = lora_rank
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
-        self.lora_bias: Literal["all", "lora_only", "none"] = lora_bias
+        self.lora_target_modules = lora_target_modules
+        self.lora_adapter_dtype: Literal["float32", "auto"] = lora_adapter_dtype
+        self.lora_use_dora = lora_use_dora
         self.train_action_head_only = train_action_head_only
         self.optimizer_lr = optimizer_lr
         self.optimizer_vit_lr = optimizer_vit_lr
@@ -270,8 +275,6 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         compile_model: bool = False,
         openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
-        use_lora: bool = False,
-        enable_lora_action_expert: bool = False,
         train_action_head_only: bool = False,
         optimizer_lr: float = 5e-5,
         optimizer_vit_lr: float = 5e-5,
@@ -295,8 +298,6 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             compile_model: Whether to compile model action generation. Training remains eager.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
-            use_lora: Whether to enable LoRA adapters on the model.
-            enable_lora_action_expert: Whether LoRA adapters also target the action expert.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
@@ -330,12 +331,13 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             openvino_compress_to_fp16=openvino_compress_to_fp16,
             gradient_checkpointing=gradient_checkpointing,
             use_random_input_noise=config.use_random_input_noise,
-            use_lora=use_lora,
-            enable_lora_action_expert=enable_lora_action_expert,
+            lora_enabled=config.lora_enabled,
             lora_rank=config.lora_rank,
             lora_alpha=config.lora_alpha,
             lora_dropout=config.lora_dropout,
-            lora_bias=config.lora_bias,
+            lora_target_modules=config.lora_target_modules,
+            lora_adapter_dtype=config.lora_adapter_dtype,
+            lora_use_dora=config.lora_use_dora,
             train_action_head_only=train_action_head_only,
             optimizer_lr=optimizer_lr,
             optimizer_vit_lr=optimizer_vit_lr,
@@ -458,10 +460,13 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
                 adapt_to_so101=self.adapt_to_so101,
                 convert_pretrained_so101_stats=self.convert_pretrained_so101_stats,
                 use_random_input_noise=self.use_random_input_noise,
+                lora_enabled=self.lora_enabled,
                 lora_rank=self.lora_rank,
                 lora_alpha=self.lora_alpha,
                 lora_dropout=self.lora_dropout,
-                lora_bias=self.lora_bias,
+                lora_target_modules=self.lora_target_modules,
+                lora_adapter_dtype=self.lora_adapter_dtype,
+                lora_use_dora=self.lora_use_dora,
             )
 
         # init model
@@ -647,11 +652,11 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
         if self.gradient_checkpointing:
             model.enable_gradient_checkpointing()
 
-        if self.use_lora:
-            model.enable_lora(enable_action_expert=self.enable_lora_action_expert)
-
         if self.train_action_head_only:
             model.freeze_vlm()
+
+        if self._require_config().use_lora:
+            self._inject_lora()
 
         if self.compile_model:
             model.enable_compile()

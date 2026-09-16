@@ -9,12 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import Tensor
-from torch.optim.lr_scheduler import LambdaLR
 
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
+
+    from torch.optim.lr_scheduler import LambdaLR
 
 
 def molmoact2_cosine_with_warmup_scheduler(

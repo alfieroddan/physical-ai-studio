@@ -19,8 +19,7 @@ model:
 
     # Fine-tune the VLM and action expert through low-rank adapters instead of
     # updating their full parameter matrices.
-    use_lora: true
-    enable_lora_action_expert: true
+    lora_enabled: true
 
     # Text inserted into the model prompt to describe the embodiment and action space.
     setup_type: "single 2D point-mass pusher robot in the PushT block-pushing simulation"
