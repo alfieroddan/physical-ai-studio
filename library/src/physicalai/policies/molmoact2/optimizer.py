@@ -54,13 +54,16 @@ def molmoact2_cosine_with_warmup_scheduler(
         msg = f"decay_lr must be in [0, peak_lr), got decay_lr={decay_lr}, peak_lr={peak_lr}."
         raise ValueError(msg)
 
+    if num_training_steps < num_decay_steps:
+        num_warmup_steps = int(num_warmup_steps * num_training_steps / num_decay_steps)
+        num_decay_steps = num_training_steps
+
     return cosine_decay_with_warmup_scheduler(
         optimizer,
         peak_lr=peak_lr,
         decay_lr=decay_lr,
         num_warmup_steps=num_warmup_steps,
         num_decay_steps=num_decay_steps,
-        num_training_steps=num_training_steps,
     )
 
 

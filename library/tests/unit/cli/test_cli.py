@@ -124,7 +124,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=MagicMock(trainer=trainer, model=model, data=datamodule),
         ):
             exit_code = fit_module.run(cast(ArgumentParser, parser), cast(Namespace, cfg))
@@ -142,7 +142,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=Namespace(
                 trainer=trainer,
                 model=model,
@@ -163,7 +163,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=Namespace(
                 trainer=trainer,
                 model=object(),
@@ -200,7 +200,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=Namespace(trainer=trainer, model=discarded_model, data=datamodule),
         ):
             exit_code = fit_module.run(cast(ArgumentParser, parser), cast(Namespace, cfg))
@@ -246,7 +246,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=Namespace(trainer=trainer, model=_FakePolicy(), data=datamodule),
         ):
             exit_code = fit_module.run(cast(ArgumentParser, parser), cast(Namespace, cfg))
@@ -271,7 +271,7 @@ class TestDispatch:
 
         with patch.object(
             parser,
-            "instantiate_classes",
+            "instantiate",
             return_value=Namespace(trainer=trainer, model=model, data=datamodule),
         ):
             exit_code = fit_module.run(cast(ArgumentParser, parser), cast(Namespace, cfg))
@@ -296,7 +296,7 @@ class TestDispatch:
         fake_benchmark.gyms = [MagicMock(), MagicMock()]
 
         with (
-            patch.object(parser, "instantiate_classes", return_value=MagicMock(benchmark=fake_benchmark)),
+            patch.object(parser, "instantiate", return_value=MagicMock(benchmark=fake_benchmark)),
             patch("physicalai.cli.benchmark.load_policy", return_value=(fake_policy, "cpu")),
             patch("builtins.print"),
         ):
