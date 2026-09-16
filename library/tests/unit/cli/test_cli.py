@@ -46,7 +46,7 @@ def _act_config_path() -> Path:
 
 
 def _molmoact2_config_path() -> Path:
-    return _library_root() / "configs" / "physicalai" / "molmoact2.yaml"
+    return _library_root() / "configs" / "physicalai" / "molmoact2" / "pusht.yaml"
 
 
 def _libero_config_path() -> Path:
