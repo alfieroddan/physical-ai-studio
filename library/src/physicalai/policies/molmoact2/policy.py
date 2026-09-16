@@ -157,7 +157,7 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
                 normalization from an initialized pretrained policy when adopting the training
                 dataset's feature contract. This does not affect explicit ``set_features`` calls.
-            compile_model: Whether to compile model training and inference entrypoints.
+            compile_model: Whether to compile model action generation. Training remains eager.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_random_input_noise: Whether action generation starts from Gaussian noise.
@@ -292,7 +292,7 @@ class MolmoAct2(MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Policy):
             preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
                 normalization from the supplied configuration when adopting the training
                 dataset's feature contract. This does not affect explicit ``set_features`` calls.
-            compile_model: Whether to compile model training and inference entrypoints.
+            compile_model: Whether to compile model action generation. Training remains eager.
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             use_lora: Whether to enable LoRA adapters on the model.

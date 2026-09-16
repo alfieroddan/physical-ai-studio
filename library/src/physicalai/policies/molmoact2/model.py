@@ -394,9 +394,8 @@ class MolmoAct2Model(Model):
             model.action_expert.gradient_checkpointing = True
 
     def enable_compile(self) -> None:
-        """Compile model training and inference entrypoints."""
+        """Compile the inference entrypoint while keeping training eager."""
         torch.set_float32_matmul_precision("high")
-        self.forward = torch.compile(self.forward, mode="default")  # type: ignore[method-assign]
         self.predict_action_chunk = torch.compile(
             self.predict_action_chunk,
             mode="default",

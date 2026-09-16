@@ -219,7 +219,7 @@ def test_gradient_checkpointing_and_freezing(model: MolmoAct2Model) -> None:
     assert not any(parameter.requires_grad for parameter in backbone.transformer.parameters())
 
 
-def test_enable_compile_wraps_public_entrypoints(
+def test_enable_compile_wraps_inference_entrypoint(
     model: MolmoAct2Model,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -235,7 +235,7 @@ def test_enable_compile_wraps_public_entrypoints(
 
     model.enable_compile()
 
-    assert compiled == ["forward", "predict_action_chunk"]
+    assert compiled == ["predict_action_chunk"]
 
 
 def test_enable_lora_creates_trainable_adapters(model: MolmoAct2Model) -> None:
