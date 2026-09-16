@@ -64,7 +64,7 @@ Expected behavior:
 Expected behavior:
 
 - Finds the latest `.ckpt` under `experiments/` matching the experiment name.
-- Shows `Trainer(...).fit(model=policy, datamodule=datamodule, ckpt_path=<path>)` and `physicalai fit --config configs/physicalai/act.yaml --ckpt_path <path>`.
+- Shows `Trainer(...).fit(model=policy, datamodule=datamodule, ckpt_path=<path>)` and `physicalai fit --config configs/physicalai/act/pusht/default.yaml --ckpt_path <path>`.
 - Preserves logger version / experiment name so metrics continue in the same run.
 
 ### Scenario 6: Tune a hyperparameter safely
