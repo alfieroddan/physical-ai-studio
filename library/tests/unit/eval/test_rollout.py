@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 import torch
 
@@ -83,6 +85,16 @@ class TestRollout:
 
         assert isinstance(result["episode_length"], int)
         assert isinstance(result["sum_reward"], (float, torch.Tensor))
+
+    def test_video_recorder_uses_its_frame_key(self, env_pusht, dummy_policy) -> None:
+        """Video recording selects the camera configured by its owner callback."""
+        policy = _policy_from_env(env_pusht, dummy_policy)
+        video_recorder = MagicMock(frame_key="top", caption=None)
+
+        with patch("physicalai.eval.rollout.functional._collect_frame", return_value=None) as collect_frame:
+            rollout(env=env_pusht, policy=policy, seed=42, max_steps=1, video_recorder=video_recorder)
+
+        assert collect_frame.call_args.args[1] == "top"
 
 
 # ============================================================================ #

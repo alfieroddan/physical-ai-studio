@@ -51,8 +51,13 @@ data:
     repo_id: lerobot/pusht
     train_batch_size: 8
     data_format: physicalai
+    val_gym:
+      class_path: physicalai.gyms.pusht.PushTGym
+      init_args:
+        task_description: "Push the T-shaped block onto the T-shaped target."
+    num_rollouts_val: 10
     # Worker processes decode and prepare samples in parallel.
-    num_workers: 8
+    num_workers: 0
 
 trainer:
   max_epochs: 30
@@ -61,3 +66,14 @@ trainer:
   # Mixed bfloat16 reduces memory use while retaining float32-like range.
   precision: bf16-mixed
   log_every_n_steps: 20
+  # Run gym rollouts every 500 optimizer steps, including across epoch boundaries.
+  val_check_interval: 500
+  check_val_every_n_epoch: null
+  callbacks:
+    - class_path: physicalai.train.RolloutVideoRecorderCallback
+      init_args:
+        output_dir: val_videos_pushT
+        fps: 10
+        record_mode: all
+        frame_key: top
+        caption: "Push the T-shaped block onto the T-shaped target."

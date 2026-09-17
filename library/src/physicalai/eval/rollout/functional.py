@@ -330,7 +330,7 @@ def run_rollout_loop(  # noqa: PLR0914
 
         # Record frame for video (happens DURING the loop, not after)
         if video_recorder is not None:
-            frame = _collect_frame(observation, frame_key)
+            frame = _collect_frame(observation, video_recorder.frame_key)
             if frame is not None:
                 video_recorder.record_frame(frame)
 

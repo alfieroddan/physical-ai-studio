@@ -103,7 +103,15 @@ class TestConfigParsing:
         assert cfg.model.init_args.scheduler_decay_steps == 15_000
         assert cfg.model.init_args.setup_type.startswith("single 2D point-mass pusher")
         assert cfg.model.init_args.control_mode == "absolute planar end-effector position"
+        assert cfg.data.init_args.val_gym.class_path == "physicalai.gyms.pusht.PushTGym"
+        assert cfg.data.init_args.num_rollouts_val == 10
         assert cfg.trainer.max_epochs == 30
+        assert cfg.trainer.val_check_interval == 500
+        assert cfg.trainer.check_val_every_n_epoch is None
+        video_callback = cfg.trainer.callbacks[0]
+        assert video_callback["class_path"] == "physicalai.train.RolloutVideoRecorderCallback"
+        assert video_callback["init_args"]["frame_key"] == "top"
+        assert video_callback["init_args"]["fps"] == 10
 
     def test_fit_parser_accepts_molmoact2_so101_config(self) -> None:
         parser = fit_module.register().parser
