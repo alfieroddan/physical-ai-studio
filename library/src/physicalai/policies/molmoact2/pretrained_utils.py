@@ -90,14 +90,15 @@ TOP_LEVEL_CONFIG_MAP = {
     "flow_matching_num_steps": "flow_matching_num_steps",
     "flow_matching_time_offset": "flow_matching_time_offset",
     "flow_matching_time_scale": "flow_matching_time_scale",
-    "frame_end_token_id": "frame_end_token_id",
-    "frame_start_token_id": "frame_start_token_id",
+    # These are tokenizer config field names, not credentials.
+    "frame_end_token_id": "frame_end_token_id",  # nosec B105
+    "frame_start_token_id": "frame_start_token_id",  # nosec B105
     "image_col_id": "image_col_id",
-    "image_end_token_id": "image_end_token_id",
+    "image_end_token_id": "image_end_token_id",  # nosec B105
     "image_low_res_id": "image_low_res_id",
     "image_patch_id": "image_patch_id",
-    "image_start_token_id": "image_start_token_id",
-    "low_res_image_start_token_id": "low_res_image_start_token_id",
+    "image_start_token_id": "image_start_token_id",  # nosec B105
+    "low_res_image_start_token_id": "low_res_image_start_token_id",  # nosec B105
     "mask_action_dim_padding": "mask_action_dim_padding",
     "max_action_dim": "max_action_dim",
     "n_action_steps": "n_action_steps",
