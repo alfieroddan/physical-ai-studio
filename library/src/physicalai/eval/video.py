@@ -145,7 +145,7 @@ class VideoRecorder:
         codec: str = "h264",
         record_mode: RecordMode = "all",
         caption: str | None = None,
-        frame_key: str | Sequence[str] = "image",
+        frame_key: str | Sequence[str] | None = None,
     ) -> None:
         """Initialize video recorder.
 
@@ -155,7 +155,8 @@ class VideoRecorder:
             codec: Video codec for encoding.
             record_mode: When to save videos.
             caption: Optional text burned into a bar at the bottom of every frame.
-            frame_key: Observation image key or keys to record.
+            frame_key: Observation image key or keys to record. Uses the rollout's
+                frame key when omitted.
         """
         _check_imageio_available()
 
