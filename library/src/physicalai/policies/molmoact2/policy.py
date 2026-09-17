@@ -168,7 +168,8 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             lora_alpha: LoRA scaling value.
             lora_dropout: LoRA dropout probability.
             lora_target_modules: Optional target regex or module-name suffixes. When omitted,
-                MolmoAct2 adds adapters to both the VLM and action expert.
+                MolmoAct2 adds adapters to the VLM and keeps the full action expert trainable.
+                Explicit targets use the shared PEFT adapter-only behavior.
             lora_adapter_dtype: Adapter precision, independent of base-model precision.
             lora_use_dora: Whether to use DoRA instead of LoRA.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
@@ -655,8 +656,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if self.train_action_head_only:
             model.freeze_vlm()
 
-        if self._require_config().use_lora:
+        config = self._require_config()
+        if config.use_lora:
             self._inject_lora()
+            if config.lora_target_modules is None:
+                model.unfreeze_action_expert()
 
         if self.compile_model:
             model.enable_compile()

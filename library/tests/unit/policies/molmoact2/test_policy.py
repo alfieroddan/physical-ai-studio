@@ -4,6 +4,7 @@
 """Tests for the MolmoAct2 policy wrapper."""
 
 from dataclasses import replace
+from inspect import Parameter, signature
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -907,15 +908,47 @@ def test_configure_optimizers_uses_training_length_when_decay_steps_are_none(
     assert scheduler.lr_lambdas[0](3_000) == pytest.approx(1e-6 / 1e-5)
 
 
-def test_optimizer_defaults_match_lerobot_recipe() -> None:
-    policy = MolmoAct2(pretrained_name_or_path=None)
+def test_training_defaults_match_verified_optimizer_recipe() -> None:
+    policy = MolmoAct2()
 
+    assert policy.pretrained_name_or_path == "allenai/MolmoAct2"
+    assert policy.norm_tag is None
+    assert policy.n_obs_steps == 1
+    assert policy.chunk_size == 30
+    assert policy.n_action_steps == 30
+    assert policy.setup_type is None
+    assert policy.control_mode is None
+    assert policy.adapt_to_so101 is False
+    assert policy.convert_pretrained_so101_stats is False
+    assert policy.preserve_pretrained_normalization_in_training is False
+    assert policy.gradient_checkpointing is False
+    assert policy.use_random_input_noise is False
+    assert policy.lora_enabled is False
+    assert policy.lora_rank == 64
+    assert policy.lora_alpha == 16
+    assert policy.lora_dropout == pytest.approx(0.05)
+    assert policy.lora_target_modules is None
     assert policy.optimizer_lr == 5e-5
     assert policy.optimizer_vit_lr == 5e-5
     assert policy.optimizer_connector_lr == 5e-5
     assert policy.optimizer_action_expert_lr == 5e-5
+    assert policy.optimizer_betas == (0.9, 0.95)
+    assert policy.optimizer_eps == 1e-6
+    assert policy.optimizer_weight_decay == 0.0
+    assert policy.optimizer_grad_clip_norm == 1.0
     assert policy.scheduler_warmup_steps == 200
     assert policy.scheduler_decay_steps is None
+
+
+def test_from_config_defaults_match_init_defaults() -> None:
+    init_parameters = signature(MolmoAct2.__init__).parameters
+    from_config_parameters = signature(MolmoAct2.from_config).parameters
+
+    for name, parameter in from_config_parameters.items():
+        if parameter.default is Parameter.empty:
+            continue
+        assert name in init_parameters
+        assert parameter.default == init_parameters[name].default
 
 
 def test_lora_optimizer_explicit_learning_rates_take_precedence() -> None:
@@ -1173,10 +1206,11 @@ def test_model_modifications_apply_shared_peft(monkeypatch: pytest.MonkeyPatch) 
 
     model.enable_gradient_checkpointing.assert_called_once_with()
     policy._inject_lora.assert_called_once_with()
+    model.unfreeze_action_expert.assert_called_once_with()
     model.enable_compile.assert_called_once_with()
 
 
-def test_shared_peft_trains_adapters_throughout_model(tiny_molmoact2_config: MolmoAct2Config) -> None:
+def test_shared_peft_trains_vlm_adapters_and_full_action_expert(tiny_molmoact2_config: MolmoAct2Config) -> None:
     pytest.importorskip("peft")
     from physicalai.policies.mixins.peft import is_lora_injected
 
@@ -1191,13 +1225,17 @@ def test_shared_peft_trains_adapters_throughout_model(tiny_molmoact2_config: Mol
     policy = MolmoAct2.from_config(config)
     model = policy._require_model()
     trainable = [name for name, parameter in model.named_parameters() if parameter.requires_grad]
+    action_expert = [
+        (name, parameter) for name, parameter in model.named_parameters() if "action_expert" in name
+    ]
 
     assert is_lora_injected(model)
     assert trainable
-    assert all("lora_" in name for name in trainable)
-    assert any("transformer" in name for name in trainable)
-    assert any("vision_backbone" in name for name in trainable)
-    assert any("action_expert" in name for name in trainable)
+    assert any("transformer" in name and "lora_" in name for name in trainable)
+    assert any("vision_backbone" in name and "lora_" in name for name in trainable)
+    assert action_expert
+    assert all(parameter.requires_grad for _, parameter in action_expert)
+    assert not any("lora_" in name for name, _ in action_expert)
 
 
 def test_supported_export_backends() -> None:

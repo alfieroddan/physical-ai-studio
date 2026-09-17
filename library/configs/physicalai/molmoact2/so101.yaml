@@ -14,10 +14,10 @@ model:
     chunk_size: 30
     n_action_steps: 30
 
-    # Sample fresh Gaussian action noise for each flow-matching training example.
+    # Start each generated action trajectory from fresh Gaussian noise.
     use_random_input_noise: true
 
-    # Fine-tune the VLM and action expert through low-rank adapters.
+    # Add low-rank adapters to the VLM while fully training the action expert.
     lora_enabled: true
 
     # Recompute intermediate activations during backward passes to save GPU memory.
@@ -33,25 +33,35 @@ model:
     setup_type: "single so100/so101 robotic arm in molmoact2"
     control_mode: "absolute joint pose"
 
-    # Fit cosine decay to the complete 10-epoch optimizer-step budget.
-    scheduler_decay_steps: null
+    # Use the shared optimizer recipe validated on PushT.
+    optimizer_lr: 5e-5
+    optimizer_vit_lr: 5e-5
+    optimizer_connector_lr: 5e-5
+    optimizer_action_expert_lr: 5e-5
+    optimizer_betas: [0.9, 0.95]
+    optimizer_eps: 1e-6
+    optimizer_weight_decay: 0.0
+    optimizer_grad_clip_norm: 1.0
+    scheduler_warmup_steps: 200
+    scheduler_decay_steps: 15000
+    scheduler_decay_lr: 1e-6
 
 data:
   class_path: physicalai.data.lerobot.LeRobotDataModule
   init_args:
     # Convert the SO101 LeRobot dataset into PhysicalAI Observation/Action objects.
     repo_id: Daankrol/pick-and-place-multi-obj
-    train_batch_size: 32
-    val_batch_size: 32
+    train_batch_size: 16
+    val_batch_size: 16
     # Hold out 10% of episodes reproducibly for validation-loss evaluation.
     val_split: 0.1
     val_split_seed: 42
     data_format: physicalai
     # Worker processes decode and prepare samples in parallel.
-    num_workers: 4
+    num_workers: 8
 
 trainer:
-  max_epochs: 10
+  max_epochs: 8
   accelerator: gpu
   devices: 1
   # Mixed bfloat16 reduces memory use while retaining float32-like range.

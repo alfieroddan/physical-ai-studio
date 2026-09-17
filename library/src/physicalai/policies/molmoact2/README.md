@@ -170,9 +170,10 @@ transforming dataset statistics should be retrained. Their normalized action
 targets may have been clamped, so changing only the exported manifest cannot
 recover the lost training signal.
 
-With `lora_enabled=True`, MolmoAct2 adds adapters throughout both the VLM and
-action expert while freezing their base weights. Use `lora_target_modules` to
-override the default target regex, `lora_adapter_dtype="auto"` to inherit base
+With `lora_enabled=True`, MolmoAct2 adds adapters to the VLM while keeping the
+full action expert trainable. This matches the recommended small-dataset
+fine-tuning recipe. Use `lora_target_modules` to opt into adapter-only training
+with an explicit target selection, `lora_adapter_dtype="auto"` to inherit base
 layer precision, or `lora_use_dora=True` to use DoRA. Export merges adapters
 into a disposable model copy and leaves the live training model unchanged.
 

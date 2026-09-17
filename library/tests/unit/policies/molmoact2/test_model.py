@@ -238,8 +238,8 @@ def test_enable_compile_wraps_inference_entrypoint(
     assert compiled == ["predict_action_chunk"]
 
 
-def test_default_peft_targets_include_vlm_and_action_expert() -> None:
+def test_default_peft_targets_include_vlm_only() -> None:
     targets = MolmoAct2Model.get_default_peft_targets()
 
     assert "vision_backbone" in targets
-    assert "action_expert" in targets
+    assert "action_expert" not in targets

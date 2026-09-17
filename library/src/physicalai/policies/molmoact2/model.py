@@ -337,8 +337,8 @@ class MolmoAct2Model(PeftModelMixin, Model):
 
     @classmethod
     def get_default_peft_targets(cls) -> str:
-        """Return the default adapter targets for the VLM and action expert."""
-        return _lora_target_modules(enable_action_expert=True)
+        """Return the default adapter targets for the VLM."""
+        return _lora_target_modules(enable_action_expert=False)
 
     def enable_gradient_checkpointing(self) -> None:
         """Enable activation checkpointing on text, vision, and action stacks."""
@@ -380,6 +380,19 @@ class MolmoAct2Model(PeftModelMixin, Model):
             parameter.requires_grad = True
         self._vlm_frozen = True
         self.train(self.training)
+
+    def unfreeze_action_expert(self) -> None:
+        """Make the full action expert trainable after PEFT freezes base weights.
+
+        Raises:
+            RuntimeError: If the model has no action expert.
+        """
+        action_expert = self.backbone.model.action_expert
+        if action_expert is None:
+            msg = "Cannot unfreeze the action expert because MolmoAct2 has no action expert."
+            raise RuntimeError(msg)
+        for parameter in action_expert.parameters():
+            parameter.requires_grad = True
 
     @override
     def train(self, mode: bool = True) -> MolmoAct2Model:
