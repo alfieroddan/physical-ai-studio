@@ -18,7 +18,7 @@ model:
 
     # Add low-rank adapters to the VLM while fully training the action expert.
     lora_enabled: true
-    gradient_checkpointing: false
+    gradient_checkpointing: true
 
     # PushT uses the base embodiment frame and dataset-owned normalization.
     adapt_to_so101: false
