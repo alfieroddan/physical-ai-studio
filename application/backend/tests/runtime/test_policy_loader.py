@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from itertools import pairwise
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -136,6 +137,33 @@ def test_warmup_runs_on_the_loader_thread(tmp_path, monkeypatch: pytest.MonkeyPa
     after_play = len(warmup_threads)
     source.update(follower.get_observation(), {}, 4)
     assert len(warmup_threads) == after_play
+    source.shutdown_policy()
+
+
+def test_language_model_warmup_uses_empty_task(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model_id = uuid4()
+    _export_dir(tmp_path, model_id)
+    models: list[FakeInferenceModel] = []
+
+    class LanguageModel(FakeInferenceModel):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.input_features = [SimpleNamespace(name="task")]
+            models.append(self)
+
+    monkeypatch.setattr("physicalai.inference.InferenceModel", LanguageModel)
+    source, mailbox, _events, follower = _source(models_dir=tmp_path)
+    source.update(follower.get_observation(), {}, 0)
+    mailbox.apply(LoadModelCommand(model_id=model_id, inference_device=_DEVICE))
+    source.update(follower.get_observation(), {}, 1)
+
+    _wait_until(lambda: source._policy is not None and source._model_loaded)
+    assert models[0].predict_calls[0]["task"] == [""]
+
+    mailbox.apply(StartTaskCommand(task="pick"))
+    source.update(follower.get_observation(), {}, 2)
+    _wait_until(lambda: len(models[0].predict_calls) > 1)
+    assert models[0].predict_calls[1]["task"] == ["pick"]
     source.shutdown_policy()
 
 
