@@ -13,7 +13,14 @@ from physicalai.inference.constants import IMAGES, STATE
 
 from exceptions import ModelCameraMismatchError
 from runtime.action_source import StudioActionSource
-from runtime.contract import ErrorEvent, InMemoryCommandMailbox, LoadModelCommand, QueueEventSink, StartTaskCommand
+from runtime.contract import (
+    ErrorEvent,
+    InMemoryCommandMailbox,
+    LoadModelCommand,
+    QueueEventSink,
+    SetFollowerSourceCommand,
+    StartTaskCommand,
+)
 from runtime.policy_loader import check_camera_keys
 from schemas import InferenceBackend, InferenceDevice
 
@@ -160,10 +167,15 @@ def test_language_model_warmup_uses_empty_task(tmp_path, monkeypatch: pytest.Mon
     _wait_until(lambda: source._policy is not None and source._model_loaded)
     assert models[0].predict_calls[0]["task"] == [""]
 
-    mailbox.apply(StartTaskCommand(task="pick"))
+    mailbox.apply(SetFollowerSourceCommand(follower_source="policy"))
     source.update(follower.get_observation(), {}, 2)
-    _wait_until(lambda: len(models[0].predict_calls) > 1)
-    assert models[0].predict_calls[1]["task"] == ["pick"]
+    _wait_until(lambda: source.follower_source == "policy")
+    source.update(follower.get_observation(), {}, 3)
+    assert all(call["task"] == [""] for call in models[0].predict_calls)
+
+    mailbox.apply(StartTaskCommand(task="pick"))
+    source.update(follower.get_observation(), {}, 4)
+    _wait_until(lambda: models[0].predict_calls[-1].get("task") == ["pick"])
     source.shutdown_policy()
 
 

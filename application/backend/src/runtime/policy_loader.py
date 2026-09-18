@@ -118,13 +118,12 @@ class PolicyLoader:
         try:
             source = self._build_source(command)
             source.connect(bus=bus, session_id=session_id)  # type: ignore[arg-type]
+            if requires_task(source._model):
+                source.set_task("")
             snapshot = observation_provider()
             if snapshot is not None:
                 robot_state, camera_frames = snapshot
-                model_input = source.to_model_input(robot_state, camera_frames)
-                if requires_task(source._model) and TASK not in model_input:
-                    model_input[TASK] = [""]
-                source.warmup(model_input)
+                source.warmup(source.to_model_input(robot_state, camera_frames))
             self._handover(generation, source, model_identity(command))
         except Exception as exc:
             if source is not None:
