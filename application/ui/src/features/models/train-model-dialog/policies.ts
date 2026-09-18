@@ -34,7 +34,7 @@ export const MODELS: ReadonlyArray<{
     {
         id: 'molmoact2',
         name: 'MolmoAct2',
-        description: 'Vision-Language-Action model with flow-matching action generation',
+        description: 'Vision-Language-Action model with flow-matching action generation (Apache 2.0 license)',
         minVRAM: 80 * GB,
     },
     {
