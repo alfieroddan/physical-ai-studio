@@ -24,7 +24,7 @@ from physicalai.data.observation import (
     Observation,
 )
 from physicalai.policies.base import Policy
-from physicalai.policies.mixins.peft import PeftConfigMixin, PeftPolicyMixin, is_lora_injected
+from physicalai.policies.mixins.peft import PeftPolicyMixin, is_lora_injected
 from physicalai.policies.utils import JointFrameTransform
 from physicalai.policies.utils.features import get_feature_by_type
 
@@ -194,15 +194,6 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if lora_enabled and train_action_head_only:
             msg = "lora_enabled is incompatible with train_action_head_only."
             raise ValueError(msg)
-        PeftConfigMixin(
-            lora_enabled=lora_enabled,
-            lora_rank=lora_rank,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            lora_target_modules=lora_target_modules,
-            lora_adapter_dtype=lora_adapter_dtype,
-            lora_use_dora=lora_use_dora,
-        )
 
         resolved_adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
         if convert_pretrained_so101_stats and not resolved_adapt_to_so101:

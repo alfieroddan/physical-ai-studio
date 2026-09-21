@@ -59,11 +59,9 @@ def test_model_methods_require_initialization(method: str) -> None:
         getattr(policy, method)(Observation(state=torch.zeros(1, 4)))
 
 
-def test_invalid_lora_options() -> None:
+def test_lora_is_incompatible_with_action_head_only() -> None:
     with pytest.raises(ValueError, match="incompatible"):
         MolmoAct2(pretrained_name_or_path=None, lora_enabled=True, train_action_head_only=True)
-    with pytest.raises(ValueError, match="lora_rank"):
-        MolmoAct2(pretrained_name_or_path=None, lora_enabled=True, lora_rank=0)
 
 
 @pytest.mark.parametrize(
