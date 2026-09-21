@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal, override
 
 import torch
@@ -40,8 +41,6 @@ from .processors import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
     from physicalai.gyms import Gym
@@ -124,6 +123,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         lora_adapter_dtype: Literal["float32", "auto"] = "float32",
         lora_use_dora: bool = False,
         train_action_head_only: bool = False,
+        tokenizer_json_path: str | Path | None = None,
         # optimization
         optimizer_lr: float = 5e-5,
         optimizer_vit_lr: float = 5e-5,
@@ -173,6 +173,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             lora_adapter_dtype: Adapter precision, independent of base-model precision.
             lora_use_dora: Whether to use DoRA instead of LoRA.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
+            tokenizer_json_path: Optional local tokenizer.json file or directory containing it.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
             optimizer_connector_lr: Learning rate for image connector parameters.
@@ -236,6 +237,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         self.lora_adapter_dtype: Literal["float32", "auto"] = lora_adapter_dtype
         self.lora_use_dora = lora_use_dora
         self.train_action_head_only = train_action_head_only
+        self.tokenizer_json_path = tokenizer_json_path
         self.optimizer_lr = optimizer_lr
         self.optimizer_vit_lr = optimizer_vit_lr
         self.optimizer_connector_lr = optimizer_connector_lr
@@ -277,6 +279,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
         train_action_head_only: bool = False,
+        tokenizer_json_path: str | Path | None = None,
         optimizer_lr: float = 5e-5,
         optimizer_vit_lr: float = 5e-5,
         optimizer_connector_lr: float = 5e-5,
@@ -300,6 +303,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
+            tokenizer_json_path: Optional local tokenizer.json file or directory containing it.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
             optimizer_connector_lr: Learning rate for image connector parameters.
@@ -340,6 +344,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             lora_adapter_dtype=config.lora_adapter_dtype,
             lora_use_dora=config.lora_use_dora,
             train_action_head_only=train_action_head_only,
+            tokenizer_json_path=tokenizer_json_path,
             optimizer_lr=optimizer_lr,
             optimizer_vit_lr=optimizer_vit_lr,
             optimizer_connector_lr=optimizer_connector_lr,
@@ -471,6 +476,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
                 lora_target_modules=self.lora_target_modules,
                 lora_adapter_dtype=self.lora_adapter_dtype,
                 lora_use_dora=self.lora_use_dora,
+                tokenizer_name_or_path=(
+                    str(Path(self.tokenizer_json_path).expanduser().resolve())
+                    if self.tokenizer_json_path is not None
+                    else MolmoAct2Config.tokenizer_name_or_path
+                ),
             )
 
         # init model
@@ -485,6 +495,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if self.model is not None:
             msg = "Policy model is already initialized"
             raise RuntimeError(msg)
+        if self.tokenizer_json_path is not None:
+            config = replace(
+                config,
+                tokenizer_name_or_path=str(Path(self.tokenizer_json_path).expanduser().resolve()),
+            )
 
         self.config = config
         self._weights_path = weights_path

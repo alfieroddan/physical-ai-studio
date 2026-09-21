@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 from huggingface_hub import hf_hub_download
+from huggingface_hub.errors import LocalEntryNotFoundError
 
 from physicalai.policies.molmoact2.processors.tokenizers import MolmoAct2Tokenizers
 
@@ -43,6 +44,47 @@ def test_loads_local_tokenizer_once(tokenizer_dir: Path, monkeypatch: pytest.Mon
     loader.assert_called_once_with(str(tokenizer_dir), local_files_only=True)
 
 
+def test_accepts_explicit_tokenizer_json_path(tokenizer_dir: Path) -> None:
+    tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(tokenizer_dir / "tokenizer.json"))
+
+    assert tokenizers._tokenizer_dir == str(tokenizer_dir)
+
+
+def test_downloads_pinned_default_when_local_tokenizer_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    downloaded_path = tmp_path / "download" / "tokenizer.json"
+    downloaded_path.parent.mkdir()
+    downloaded_path.write_text("{}", encoding="utf-8")
+    download = Mock(return_value=str(downloaded_path))
+    monkeypatch.setattr("physicalai.policies.molmoact2.processors.tokenizers.hf_hub_download", download)
+
+    tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(tmp_path / "missing"))
+
+    assert tokenizers._tokenizer_dir == str(downloaded_path.parent)
+    download.assert_called_once_with(
+        repo_id=_MOLMOACT2_REPOSITORY,
+        filename="tokenizer.json",
+        revision=_MOLMOACT2_REVISION,
+    )
+    assert "downloading the pinned default tokenizer" in caplog.text
+
+
+def test_missing_tokenizer_reports_local_override_when_download_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "physicalai.policies.molmoact2.processors.tokenizers.hf_hub_download",
+        Mock(side_effect=LocalEntryNotFoundError("offline")),
+    )
+
+    with pytest.raises(FileNotFoundError, match="Supply a valid tokenizer_json_path"):
+        MolmoAct2Tokenizers(tokenizer_name_or_path=str(tmp_path / "missing"))
+
+
 @pytest.mark.parametrize(("padding", "width"), [("max_length", 6), ("longest", 3)])
 def test_tokenization_inserts_bos(
     tokenizer_dir: Path,
@@ -60,11 +102,6 @@ def test_tokenization_inserts_bos(
 
     assert input_ids.shape == attention_mask.shape == (1, width)
     assert input_ids[0, 0].item() == 9
-
-
-def test_requires_local_tokenizer_assets(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match="tokenizer.json"):
-        MolmoAct2Tokenizers(tokenizer_name_or_path=str(tmp_path))
 
 
 @pytest.fixture(scope="module")

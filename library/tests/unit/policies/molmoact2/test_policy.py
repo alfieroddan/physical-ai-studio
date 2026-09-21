@@ -859,6 +859,33 @@ def test_lora_checkpoint_exports_loadable_merged_torch_model(
     assert inference_model.backend == "torch"
 
 
+def test_torch_export_loads_with_downloaded_tokenizer(
+    tiny_molmoact2_config: MolmoAct2Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MolmoAct2, "_openvino_token_ids", lambda _self: (1, 0, [10, 11, 12]))
+    policy = MolmoAct2.from_config(tiny_molmoact2_config).eval()
+    export_dir = tmp_path / "molmoact2-torch"
+    policy.export(export_dir, backend="torch")
+
+    fallback_path = tmp_path / "fallback" / "tokenizer.json"
+    fallback_path.parent.mkdir()
+    fallback_path.write_text("{}", encoding="utf-8")
+    Path(tiny_molmoact2_config.tokenizer_name_or_path, "tokenizer.json").unlink()
+    download = Mock(return_value=str(fallback_path))
+    monkeypatch.setattr("physicalai.policies.molmoact2.processors.tokenizers.hf_hub_download", download)
+
+    inference_model = InferenceModel.from_pretrained(export_dir, backend="torch", device="cpu")
+
+    assert inference_model.backend == "torch"
+    download.assert_called_once_with(
+        repo_id="allenai/MolmoAct2",
+        filename="tokenizer.json",
+        revision="e432d85f6e039edca44afb93c262f3084ab72a9c",
+    )
+
+
 def test_load_from_checkpoint_preserves_normalization_and_training_arguments(
     tiny_molmoact2_config: MolmoAct2Config,
     tmp_path: Path,
@@ -1004,6 +1031,20 @@ def test_from_config_defaults_match_init_defaults() -> None:
             continue
         assert name in init_parameters
         assert parameter.default == init_parameters[name].default
+
+
+def test_from_config_uses_explicit_tokenizer_json_path(
+    tiny_molmoact2_config: MolmoAct2Config,
+    tmp_path: Path,
+) -> None:
+    tokenizer_path = tmp_path / "override" / "tokenizer.json"
+    tokenizer_path.parent.mkdir()
+    tokenizer_path.write_text("{}", encoding="utf-8")
+
+    policy = MolmoAct2.from_config(tiny_molmoact2_config, tokenizer_json_path=tokenizer_path)
+
+    assert policy.config is not None
+    assert policy.config.tokenizer_name_or_path == str(tokenizer_path.resolve())
 
 
 def test_lora_optimizer_explicit_learning_rates_take_precedence() -> None:
