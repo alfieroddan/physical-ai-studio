@@ -15,8 +15,10 @@ import torch
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.data.dataset import Dataset
 from physicalai.export import ExportablePolicyMixin, ExportBackend
+from physicalai.inference import InferenceModel
 from physicalai.policies import get_policy
 from physicalai.policies.molmoact2 import MolmoAct2, MolmoAct2Config
+from physicalai.policies.mixins.peft import is_lora_injected
 from physicalai.policies.molmoact2.constants import (
     SO101_DEGREES_PER_NORMALIZED_UNIT,
     SO101_JOINT_OFFSETS,
@@ -802,6 +804,59 @@ def test_load_from_checkpoint_restores_config_and_weights(
     assert restored.preserve_pretrained_normalization_in_training is True
     for name, value in policy.state_dict().items():
         torch.testing.assert_close(restored.state_dict()[name], value)
+
+
+def test_lora_checkpoint_exports_loadable_merged_torch_model(
+    tiny_molmoact2_config: MolmoAct2Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(MolmoAct2, "_openvino_token_ids", lambda _self: (1, 0, [10, 11, 12]))
+    config = replace(
+        tiny_molmoact2_config,
+        lora_enabled=True,
+        lora_rank=2,
+        lora_alpha=2,
+        lora_dropout=0.0,
+    )
+    policy = MolmoAct2.from_config(config)
+    checkpoint = {
+        "state_dict": policy.state_dict(),
+        "pytorch-lightning_version": lightning.__version__,
+        "hyper_parameters": dict(policy.hparams),
+    }
+    policy.on_save_checkpoint(checkpoint)
+    checkpoint_path = tmp_path / "molmoact2-lora.ckpt"
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only trusted data.
+    torch.save(checkpoint, checkpoint_path)
+
+    restored = MolmoAct2.load_from_checkpoint(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert restored.config is not None and restored.config.lora_enabled is True
+    assert is_lora_injected(restored._require_model())
+
+    export_dir = tmp_path / "molmoact2-lora-torch"
+    restored.eval().export(export_dir, backend="torch")
+
+    exported_checkpoint_path = export_dir / "molmoact2.pt"
+    exported_checkpoint = torch.load(exported_checkpoint_path, map_location="cpu", weights_only=True)
+    assert exported_checkpoint["policy_config"]["lora_enabled"] is False
+    assert not any(
+        "base_layer" in name or "lora_A" in name or "lora_B" in name
+        for name in exported_checkpoint["state_dict"]
+    )
+    assert is_lora_injected(restored._require_model())
+
+    inference_model = InferenceModel.from_pretrained(
+        export_dir,
+        backend="torch",
+        device="cpu",
+    )
+    assert inference_model.backend == "torch"
 
 
 def test_load_from_checkpoint_preserves_normalization_and_training_arguments(

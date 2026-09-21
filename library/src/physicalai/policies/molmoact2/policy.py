@@ -23,7 +23,7 @@ from physicalai.data.observation import (
     Observation,
 )
 from physicalai.policies.base import Policy
-from physicalai.policies.mixins.peft import PeftConfigMixin, PeftPolicyMixin
+from physicalai.policies.mixins.peft import PeftConfigMixin, PeftPolicyMixin, is_lora_injected
 from physicalai.policies.utils import JointFrameTransform
 from physicalai.policies.utils.features import get_feature_by_type
 
@@ -383,8 +383,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             **kwargs,
         )
 
-    def _policy_config_for_checkpoint(self) -> dict[str, object]:
-        return self._require_config().to_dict()
+    def _policy_config_for_checkpoint(self) -> MolmoAct2Config:
+        return replace(
+            self._require_config(),
+            lora_enabled=is_lora_injected(self._require_model()),
+        )
 
     def _restore_policy_config(self, config_data: Mapping[str, object]) -> None:
         config = MolmoAct2Config.from_dict(config_data)
@@ -397,7 +400,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Save the resolved policy config alongside Lightning's state dict."""
-        checkpoint["policy_config"] = self._policy_config_for_checkpoint()
+        checkpoint["policy_config"] = self._policy_config_for_checkpoint().to_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Rebuild the policy from its resolved checkpoint config.
