@@ -8,8 +8,6 @@
 from __future__ import annotations
 
 import logging
-import re
-from copy import copy
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,25 +21,8 @@ from physicalai.policies.molmoact2.constants import MOLMOACT2_TOKENIZER_REPO_ID,
 
 _TOKENIZER_JSON_FILENAME = "tokenizer.json"
 _MIN_TOKEN_LEN = 2
-_OUTPUT_ONLY_TOKEN = re.compile(r"^<(?:action|extra)_\d+>$")
 
 logger = logging.getLogger(__name__)
-
-
-def _drop_output_only_added_tokens(tokenizer: Qwen2Tokenizer) -> Qwen2Tokenizer:
-    """Return a conversion view without decoder-only action and extra tokens."""
-    kept_tokens = {
-        token_id: token
-        for token_id, token in tokenizer.added_tokens_decoder.items()
-        if not _OUTPUT_ONLY_TOKEN.match(token.content)
-    }
-    trimmed = copy(tokenizer)
-    trimmed.__class__ = type(
-        f"OpenVINO{type(tokenizer).__name__}",
-        (type(tokenizer),),
-        {"added_tokens_decoder": property(lambda _self: kept_tokens)},
-    )
-    return trimmed
 
 
 class MolmoAct2Tokenizers:
@@ -52,7 +33,7 @@ class MolmoAct2Tokenizers:
         2. Lazily load the Qwen tokenizer when first needed.
         3. Tokenize, truncate, and pad prompt text.
         4. Insert BOS while preserving valid-token attention masks.
-        5. Expose an export-safe tokenizer without output-only tokens.
+        5. Expose the tokenizer for OpenVINO conversion.
     """
 
     def __init__(
@@ -78,7 +59,6 @@ class MolmoAct2Tokenizers:
         self.padding = padding
         self.tokenizer_config = tokenizer_config or {}
         self._tokenizer: Qwen2Tokenizer | None = None
-        self._openvino_tokenizer: Qwen2Tokenizer | None = None
         self._tokenizer_dir = self._resolve_tokenizer_dir()
 
     def _resolve_tokenizer_dir(self) -> str:
@@ -133,10 +113,8 @@ class MolmoAct2Tokenizers:
 
     @property
     def tokenizer(self) -> Qwen2Tokenizer:
-        """The OpenVINO-safe tokenizer view."""
-        if self._openvino_tokenizer is None:
-            self._openvino_tokenizer = _drop_output_only_added_tokens(self._qwen_tokenizer())
-        return self._openvino_tokenizer
+        """The tokenizer used for OpenVINO conversion."""
+        return self._qwen_tokenizer()
 
     @property
     def pad_token_id(self) -> int:

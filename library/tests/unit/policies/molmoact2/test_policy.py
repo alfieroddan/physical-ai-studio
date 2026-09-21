@@ -1175,6 +1175,7 @@ def test_openvino_compression_is_used_by_export(
     export_args = policy.extra_export_args[ExportBackend.OPENVINO]
 
     assert export_args.compress_to_fp16 is True
+    assert export_args.tokenizer_truncation is True
 
 
 def test_openvino_export_forwards_runtime_input_config(

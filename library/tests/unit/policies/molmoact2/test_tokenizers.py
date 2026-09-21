@@ -4,14 +4,16 @@
 """Tests for MolmoAct2 tokenizer utilities."""
 
 from pathlib import Path
-import re
 from shutil import copyfile
 from unittest.mock import Mock
 
+import numpy as np
+import openvino as ov
 import pytest
 import torch
 from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import LocalEntryNotFoundError
+from openvino_tokenizers import convert_tokenizer
 
 from physicalai.policies.molmoact2.processors.tokenizers import MolmoAct2Tokenizers
 
@@ -141,13 +143,36 @@ def test_real_molmoact2_tokenizer_tokenizes_prompts(real_tokenizer_dir: Path) ->
 
 @pytest.mark.integration
 @pytest.mark.requires_download
-def test_real_molmoact2_openvino_tokenizer_drops_output_tokens(real_tokenizer_dir: Path) -> None:
+def test_real_molmoact2_openvino_tokenizer_matches_huggingface(real_tokenizer_dir: Path) -> None:
     tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(real_tokenizer_dir))
-    source_tokens = tokenizers._qwen_tokenizer().added_tokens_decoder
-    filtered_tokens = tokenizers.tokenizer.added_tokens_decoder
+    tokenizer = tokenizers._qwen_tokenizer()
+    source_tokens = tokenizer.added_tokens_decoder
+    export_tokens = tokenizers.tokenizer.added_tokens_decoder
+    prompts = [
+        "<|image|><state_start><state_0><state_255><state_end><action_output>",
+        "<setup_start>tabletop<setup_end> <control_start>joint<control_end> <action_0> <extra_0>",
+        " ".join(["token"] * 100),
+    ]
+    expected = tokenizer(
+        prompts,
+        max_length=16,
+        truncation=True,
+        padding="max_length",
+        return_tensors="np",
+    )
+    model = convert_tokenizer(
+        tokenizers.tokenizer,
+        with_detokenizer=False,
+        max_length=16,
+        use_max_padding=True,
+        truncation=True,
+    )
+    compiled = ov.Core().compile_model(model, "CPU")
+    actual = compiled({compiled.inputs[0]: prompts})
+    outputs = {port.get_any_name(): value for port, value in actual.items()}
 
     assert any(token.content.startswith("<action_") for token in source_tokens.values())
     assert any(token.content.startswith("<extra_") for token in source_tokens.values())
-    assert not any(re.match(r"^<(?:action|extra)_\d+>$", token.content) for token in filtered_tokens.values())
-    assert any(token.content == "<action_start>" for token in filtered_tokens.values())
-    assert any(token.content == "<action_end>" for token in filtered_tokens.values())
+    assert export_tokens == source_tokens
+    np.testing.assert_array_equal(outputs["input_ids"], expected["input_ids"])
+    np.testing.assert_array_equal(outputs["attention_mask"], expected["attention_mask"])
