@@ -48,6 +48,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_tokenizer_override(path: str | Path) -> str:
+    """Resolve an explicit tokenizer JSON file or directory containing tokenizer.json.
+
+    Returns:
+        The resolved file or directory path.
+
+    Raises:
+        FileNotFoundError: If the override does not resolve to a tokenizer JSON file.
+    """
+    resolved = Path(path).expanduser().resolve()
+    tokenizer_path = resolved if resolved.is_file() else resolved / "tokenizer.json"
+    if not tokenizer_path.is_file() or tokenizer_path.suffix.lower() != ".json":
+        msg = f"Explicit MolmoAct2 tokenizer override is not a JSON file: {resolved}"
+        raise FileNotFoundError(msg)
+    return str(resolved)
+
+
 def _copy_feature_normalization(
     features: list[Feature],
     source: Feature | None,
@@ -467,11 +484,6 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
                 lora_target_modules=self.lora_target_modules,
                 lora_adapter_dtype=self.lora_adapter_dtype,
                 lora_use_dora=self.lora_use_dora,
-                tokenizer_name_or_path=(
-                    str(Path(self.tokenizer_json_path).expanduser().resolve())
-                    if self.tokenizer_json_path is not None
-                    else MolmoAct2Config.tokenizer_name_or_path
-                ),
             )
 
         # init model
@@ -489,7 +501,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if self.tokenizer_json_path is not None:
             config = replace(
                 config,
-                tokenizer_name_or_path=str(Path(self.tokenizer_json_path).expanduser().resolve()),
+                tokenizer_name_or_path=_resolve_tokenizer_override(self.tokenizer_json_path),
             )
 
         self.config = config

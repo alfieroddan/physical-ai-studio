@@ -46,10 +46,27 @@ def test_loads_local_tokenizer_once(tokenizer_dir: Path, monkeypatch: pytest.Mon
     loader.assert_called_once_with(str(tokenizer_dir), local_files_only=True)
 
 
-def test_accepts_explicit_tokenizer_json_path(tokenizer_dir: Path) -> None:
-    tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(tokenizer_dir / "tokenizer.json"))
+def test_accepts_explicit_tokenizer_json_path(tokenizer_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tokenizer_path = tokenizer_dir / "custom-tokenizer.json"
+    (tokenizer_dir / "tokenizer.json").rename(tokenizer_path)
+    loader = Mock(return_value=StubTokenizer())
+    download = Mock()
+    monkeypatch.setattr(
+        "physicalai.policies.molmoact2.processors.tokenizers.Qwen2Tokenizer.from_pretrained",
+        loader,
+    )
+    monkeypatch.setattr("physicalai.policies.molmoact2.processors.tokenizers.hf_hub_download", download)
+
+    tokenizers = MolmoAct2Tokenizers(tokenizer_name_or_path=str(tokenizer_path))
+    tokenizers._qwen_tokenizer()
 
     assert tokenizers._tokenizer_dir == str(tokenizer_dir)
+    loader.assert_called_once_with(
+        str(tokenizer_dir),
+        local_files_only=True,
+        tokenizer_file=str(tokenizer_path),
+    )
+    download.assert_not_called()
 
 
 def test_downloads_pinned_default_when_local_tokenizer_is_unavailable(
@@ -85,6 +102,24 @@ def test_missing_tokenizer_reports_local_override_when_download_fails(
 
     with pytest.raises(FileNotFoundError, match="Supply a valid tokenizer_json_path"):
         MolmoAct2Tokenizers(tokenizer_name_or_path=str(tmp_path / "missing"))
+
+
+@pytest.mark.parametrize("revision", ["main", "e432d85"])
+def test_rejects_unpinned_revision_before_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    revision: str,
+) -> None:
+    download = Mock()
+    monkeypatch.setattr("physicalai.policies.molmoact2.processors.tokenizers.hf_hub_download", download)
+
+    with pytest.raises(ValueError, match="full 40-character commit SHA"):
+        MolmoAct2Tokenizers(
+            tokenizer_name_or_path=str(tmp_path / "missing"),
+            tokenizer_revision=revision,
+        )
+
+    download.assert_not_called()
 
 
 @pytest.mark.parametrize(("padding", "width"), [("max_length", 6), ("longest", 3)])

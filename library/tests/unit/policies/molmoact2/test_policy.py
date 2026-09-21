@@ -1041,7 +1041,7 @@ def test_from_config_uses_explicit_tokenizer_json_path(
     tiny_molmoact2_config: MolmoAct2Config,
     tmp_path: Path,
 ) -> None:
-    tokenizer_path = tmp_path / "override" / "tokenizer.json"
+    tokenizer_path = tmp_path / "override" / "custom-tokenizer.json"
     tokenizer_path.parent.mkdir()
     tokenizer_path.write_text("{}", encoding="utf-8")
 
@@ -1049,6 +1049,18 @@ def test_from_config_uses_explicit_tokenizer_json_path(
 
     assert policy.config is not None
     assert policy.config.tokenizer_name_or_path == str(tokenizer_path.resolve())
+
+
+@pytest.mark.parametrize("override", ["missing/tokenizer.json", "missing-directory"])
+def test_from_config_rejects_missing_explicit_tokenizer_override(
+    tiny_molmoact2_config: MolmoAct2Config,
+    tmp_path: Path,
+    override: str,
+) -> None:
+    tokenizer_path = tmp_path / override
+
+    with pytest.raises(FileNotFoundError, match="Explicit MolmoAct2 tokenizer override"):
+        MolmoAct2.from_config(tiny_molmoact2_config, tokenizer_json_path=tokenizer_path)
 
 
 def test_lora_optimizer_explicit_learning_rates_take_precedence() -> None:

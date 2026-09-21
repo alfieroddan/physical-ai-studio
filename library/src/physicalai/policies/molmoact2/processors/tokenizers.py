@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ from physicalai.policies.molmoact2.constants import MOLMOACT2_TOKENIZER_REPO_ID,
 
 _TOKENIZER_JSON_FILENAME = "tokenizer.json"
 _MIN_TOKEN_LEN = 2
+_COMMIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{40}$")
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,7 @@ class MolmoAct2Tokenizers:
         self.padding = padding
         self.tokenizer_config = tokenizer_config or {}
         self._tokenizer: Qwen2Tokenizer | None = None
+        self._tokenizer_file: str | None = None
         self._tokenizer_dir = self._resolve_tokenizer_dir()
 
     def _resolve_tokenizer_dir(self) -> str:
@@ -69,9 +72,11 @@ class MolmoAct2Tokenizers:
 
         Raises:
             FileNotFoundError: If tokenizer.json is unavailable locally and cannot be downloaded.
+            ValueError: If the tokenizer revision is not a full commit SHA.
         """
         local_path = Path(self.tokenizer_name_or_path)
-        if local_path.is_file() and local_path.name == _TOKENIZER_JSON_FILENAME:
+        if local_path.is_file() and local_path.suffix.lower() == ".json":
+            self._tokenizer_file = str(local_path)
             return str(local_path.parent)
         if local_path.is_dir() and (local_path / _TOKENIZER_JSON_FILENAME).is_file():
             return str(local_path)
@@ -82,6 +87,9 @@ class MolmoAct2Tokenizers:
                 local_path,
             )
         revision = self.tokenizer_revision or MOLMOACT2_TOKENIZER_REVISION
+        if _COMMIT_SHA_PATTERN.fullmatch(revision) is None:
+            msg = f"MolmoAct2 tokenizer revision must be a full 40-character commit SHA, got {revision!r}."
+            raise ValueError(msg)
         try:
             tokenizer_path = Path(
                 hf_hub_download(
@@ -101,10 +109,13 @@ class MolmoAct2Tokenizers:
 
     def _qwen_tokenizer(self) -> Qwen2Tokenizer:
         if self._tokenizer is None:
+            tokenizer_config = dict(self.tokenizer_config)
+            if self._tokenizer_file is not None:
+                tokenizer_config["tokenizer_file"] = self._tokenizer_file
             self._tokenizer = Qwen2Tokenizer.from_pretrained(  # nosec: B615
                 self._tokenizer_dir,
                 local_files_only=True,
-                **self.tokenizer_config,
+                **tokenizer_config,
             )
         if self._tokenizer is None:
             msg = "Tokenizer initialization failed"
