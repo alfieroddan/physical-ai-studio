@@ -841,7 +841,11 @@ def test_lora_checkpoint_exports_loadable_merged_torch_model(
     restored.eval().export(export_dir, backend="torch")
 
     exported_checkpoint_path = export_dir / "molmoact2.pt"
-    exported_checkpoint = torch.load(exported_checkpoint_path, map_location="cpu", weights_only=True)
+    exported_checkpoint = torch.load(  # nosec B614  # Locally generated test artifact with restricted unpickling.
+        exported_checkpoint_path,
+        map_location="cpu",
+        weights_only=True,
+    )
     assert exported_checkpoint["policy_config"]["lora_enabled"] is False
     assert not any(
         "base_layer" in name or "lora_A" in name or "lora_B" in name
