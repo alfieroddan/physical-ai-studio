@@ -841,8 +841,7 @@ def test_lora_checkpoint_exports_loadable_merged_torch_model(
     restored.eval().export(export_dir, backend="torch")
 
     exported_checkpoint_path = export_dir / "molmoact2.pt"
-    # nosemgrep: rule-trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only trusted data.
-    exported_checkpoint = torch.load(  # nosec B614  # Locally generated test artifact with restricted unpickling.
+    exported_checkpoint = torch.load(  # nosemgrep: rule-trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only trusted data.
         exported_checkpoint_path,
         map_location="cpu",
         weights_only=True,
