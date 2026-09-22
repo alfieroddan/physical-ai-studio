@@ -134,10 +134,14 @@ def resolve_image_encoder(
         NotImplementedError: If the encoder_name is supported but not yet implemented.
     """
     resolved_name = (
-        encoder_name.value
-        if isinstance(encoder_name, SupportedEncoder)
-        else (encoder_name or SupportedEncoder.WEBSSL.value)
-    ).strip().lower()
+        (
+            encoder_name.value
+            if isinstance(encoder_name, SupportedEncoder)
+            else (encoder_name or SupportedEncoder.WEBSSL.value)
+        )
+        .strip()
+        .lower()
+    )
 
     try:
         supported_encoder = SupportedEncoder(resolved_name)

@@ -125,10 +125,14 @@ def resolve_action_head(
         NotImplementedError: If the head is supported but not yet implemented.
     """
     resolved_name = (
-        action_head_name.value
-        if isinstance(action_head_name, SupportedActionHead)
-        else (action_head_name or SupportedActionHead.VQBET.value)
-    ).strip().lower()
+        (
+            action_head_name.value
+            if isinstance(action_head_name, SupportedActionHead)
+            else (action_head_name or SupportedActionHead.VQBET.value)
+        )
+        .strip()
+        .lower()
+    )
 
     try:
         supported_head = SupportedActionHead(resolved_name)

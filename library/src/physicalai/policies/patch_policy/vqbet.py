@@ -150,7 +150,14 @@ class VQBeTActionHead(BaseActionHead):
             ``[B, T, G, C]`` logits and ``[B, T, G, C, W, A]`` offsets.
         """
         logits = self.code_head(embeddings).reshape(embeddings.shape[0], embeddings.shape[1], self.groups, self.n_embed)
-        offsets_shape = (embeddings.shape[0], embeddings.shape[1], self.groups, self.n_embed, self.chunk_size, self.act_dim)
+        offsets_shape = (
+            embeddings.shape[0],
+            embeddings.shape[1],
+            self.groups,
+            self.n_embed,
+            self.chunk_size,
+            self.act_dim,
+        )
         offsets = self.offset_head(embeddings).reshape(offsets_shape)
         return logits, offsets
 

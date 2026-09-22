@@ -21,8 +21,7 @@ import math
 from dataclasses import dataclass
 
 import torch
-import torch.nn as nn
-from torch import Tensor
+from torch import Tensor, nn
 from torch.nn import functional as F
 
 TOKEN_NDIM = 4
@@ -47,7 +46,7 @@ def generate_mask_matrix(npatch: int, nwindow: int) -> Tensor:
 class CausalSelfAttention(nn.Module):
     """Multi-head self-attention under a block-causal patch mask."""
 
-    def __init__(self, config: "GPTConfig") -> None:
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         if config.n_embd % config.n_head != 0:
             msg = f"n_embd ({config.n_embd}) must be divisible by n_head ({config.n_head})."
@@ -83,7 +82,7 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     """Position-wise MLP block."""
 
-    def __init__(self, config: "GPTConfig") -> None:
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
@@ -100,7 +99,7 @@ class MLP(nn.Module):
 class Block(nn.Module):
     """Single GPT transformer block."""
 
-    def __init__(self, config: "GPTConfig") -> None:
+    def __init__(self, config: GPTConfig) -> None:
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
@@ -160,7 +159,7 @@ class PatchGPT(nn.Module):
                 drop=nn.Dropout(self.config.dropout),
                 h=nn.ModuleList([Block(self.config) for _ in range(self.config.n_layer)]),
                 ln_f=nn.LayerNorm(self.config.n_embd),
-            )
+            ),
         )
         self.lm_head = nn.Linear(self.config.n_embd, self.config.output_dim, bias=False)
         self.apply(self._init_weights)
@@ -212,4 +211,6 @@ class PatchGPT(nn.Module):
         self.config.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[: block_size * self.config.n_patches])
         for block in self.transformer.h:
-            block.attn.bias = block.attn.bias[:, :, :block_size * self.config.n_patches, : block_size * self.config.n_patches]
+            block.attn.bias = block.attn.bias[
+                :, :, : block_size * self.config.n_patches, : block_size * self.config.n_patches
+            ]
