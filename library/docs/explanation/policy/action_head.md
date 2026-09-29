@@ -123,8 +123,10 @@ calls `.item()`, which syncs with the device and breaks
 [graph replay](#graph-replay).
 
 The defaults (`T = 100`, cosine schedule, noise prediction, clipping, DDPM)
-match LeRobot's Diffusion Policy. Sampling matches the `diffusers`
-`DDPMScheduler` (`eta=1`) and `DDIMScheduler` (`eta=0`) step for step.
+match LeRobot's Diffusion Policy. The unit tests check the maths with a
+perfect denoiser: a DDIM step lands exactly on the forward process at the next
+timestep, a DDPM step samples the posterior $q(x_{t-1} \mid x_t, x_0)$, and
+both samplers recover $x_0$.
 
 ### Dtypes
 
