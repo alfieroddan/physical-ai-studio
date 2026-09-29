@@ -120,7 +120,7 @@ part:
 store a leading $\bar\alpha = 1$, so timestep `t` is read at index `t + 1`.
 The lookup uses `index_select`, never `buffer[t]`: indexing with a 0-d tensor
 calls `.item()`, which syncs with the device and breaks
-[graph replay](#graph-replay).
+[graph replay](../../../src/physicalai/policies/components/action_heads/diffusion/README.md#graph-replay).
 
 The defaults (`T = 100`, cosine schedule, noise prediction, clipping, DDPM)
 match LeRobot's Diffusion Policy. The unit tests check the maths with a
@@ -156,51 +156,3 @@ Both low precisions work. fp16 has 10 mantissa bits to bf16's 7 and is about
 10x more accurate on the example head, but its range stops at 65504, so a
 large model trained in bf16 can overflow in fp16. Check a model's activations
 before choosing fp16.
-
-### OpenVINO
-
-An exported head runs under OpenVINO's own precision rules:
-
-- **The IR dtype is not the execution dtype.** Each device picks an inference
-  precision: f32 on CPUs without native bf16, bf16 on CPUs with AMX, f16 on
-  GPUs. Read it back from the compiled model, and force
-  `INFERENCE_PRECISION_HINT` to `f32` where parity matters.
-- **The whole graph is lowered.** In bf16 or f16 OpenVINO runs the network,
-  the schedule and the update in that precision, as a bf16 PyTorch head does.
-  The head still works because it never computes $1 - \bar\alpha$ at
-  runtime, but the error is larger than in float32.
-- **Export a deterministic sampler.** Use `eta=0.0` and
-  `use_random_input_noise=False`, so the graph has no random ops. The model
-  then returns one chunk per context rather than a sample from the
-  distribution.
-
-### Graph replay
-
-Eager `sample` launches every kernel of every step from Python.
-For small networks that launch overhead dominates, so a GPU can be slower
-than one CPU thread. `DiffusionActionHead.enable_graph_replay()` removes it: the first call
-records one `sample` call as a CUDA or XPU graph, and later calls replay it
-with a single launch.
-
-```python
-head.enable_graph_replay()
-head.eval()
-with torch.inference_mode():
-    actions = head.sample(context)  # first call captures, later calls replay
-```
-
-- The backend follows the context's device: CUDA graphs on `cuda`, XPU graphs
-  on `xpu`. On other devices `sample` runs eagerly.
-- Replay only runs in `eval()` mode with gradients disabled. Training and
-  any call that needs gradients run eagerly.
-- One graph is captured per context shape and dtype, number of steps and
-  whether `noise` is passed. New inputs are copied into the captured buffers,
-  and the result is returned as a copy.
-- Moving or casting the module drops the captured graphs. Call
-  `enable_graph_replay()` again after replacing parameters, for example with
-  `load_state_dict(..., assign=True)`.
-
-This works because `step` uses only tensor operations on fixed shapes, with
-no `.item()` calls or host-side randomness. A custom `denoise` must follow the
-same rules. Random draws with
-`torch.randn` are graph-safe: each replay draws new noise.
