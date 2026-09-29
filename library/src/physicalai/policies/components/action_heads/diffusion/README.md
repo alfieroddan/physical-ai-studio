@@ -24,7 +24,8 @@ from physicalai.policies.components.action_heads import DiffusionActionHead
 The code blocks below form one script: run them in order in one Python
 session. Plotting needs `matplotlib`. Results were measured on an NVIDIA
 A100 and one thread of an Intel Xeon Gold 6338 (`OMP_NUM_THREADS=1`), with
-PyTorch 2.11.
+PyTorch 2.11. [Graph replay](#graph-replay) was also measured on an Intel Arc
+B390 GPU (XPU) with PyTorch 2.11.
 
 ## A Tiny Diffusion Head
 
@@ -204,46 +205,20 @@ disabled:
 head = head.to(device).eval()
 head.eta, head.use_random_input_noise = 0.0, False
 context = {"tokens": torch.full((1, 1, 1), 0.5, device=device)}
-results = []
 with torch.inference_mode():
-    for num_steps in (1, 2, 5, 10, 20, 50, 100):
+    for num_steps in (1, 10, 100):
         head.enable_graph_replay(False)
         eager = latency_ms(lambda: head.sample(context, num_steps=num_steps))
         head.enable_graph_replay()  # the first call below captures, later calls replay
         replayed = latency_ms(lambda: head.sample(context, num_steps=num_steps))
-        results.append((num_steps, eager, replayed))
         print(f"{num_steps:3d} steps: eager {eager:6.2f} ms, graph {replayed:5.2f} ms, {eager / replayed:4.1f}x")
 ```
 
-```python
-num_steps, eager, graphed = zip(*results)
-fig, ax = plt.subplots(figsize=(6, 3.5))
-ax.plot(num_steps, eager, marker="o", color="#2a78d6", linewidth=2, label="eager")
-ax.plot(num_steps, graphed, marker="o", color="#eb6834", linewidth=2, label=f"{device.type.upper()} graph replay")
-ax.annotate(
-    f"{eager[-1] / graphed[-1]:.0f}x faster",
-    (num_steps[-1], graphed[-1]),
-    textcoords="offset points",
-    xytext=(-10, 12),
-    ha="right",
-    color="#52514e",
-)
-ax.set_xlabel("sampling steps")
-ax.set_ylabel("latency per chunk (ms)")
-ax.spines[["top", "right"]].set_visible(False)
-ax.grid(axis="y", color="#e4e3df", linewidth=0.8)
-ax.legend(frameon=False)
-fig.tight_layout()
-fig.savefig("diffusion_head_graphs.png", dpi=150)
-```
+| Steps | A100 eager | CUDA graph | Speedup | Arc B390 eager | XPU graph | Speedup |
+| ----- | ---------- | ---------- | ------- | -------------- | --------- | ------- |
+| 1     | 0.49 ms    | 0.12 ms    | 4.0x    | 0.35 ms        | 0.11 ms   | 3.2x    |
+| 10    | 4.11 ms    | 0.65 ms    | 6.3x    | 2.53 ms        | 0.57 ms   | 4.4x    |
+| 100   | 40.4 ms    | 6.28 ms    | 6.4x    | 23.7 ms        | 5.39 ms   | 4.4x    |
 
-![Latency of eager sampling and CUDA graph replay against the number of sampling steps](../../../../../../docs/assets/diffusion_head/diffusion_head_graphs.png)
-
-| Steps | Eager (A100) | CUDA graph | Speedup |
-| ----- | ------------ | ---------- | ------- |
-| 1     | 0.49 ms      | 0.12 ms    | 4.0x    |
-| 10    | 4.11 ms      | 0.65 ms    | 6.3x    |
-| 100   | 40.4 ms      | 6.28 ms    | 6.4x    |
-
-The first call for each shape and step count captures the graph. XPU numbers
-were not measured for this page.
+The first call for each shape and step count captures the graph. On the Arc
+B390 the replayed actions match eager sampling exactly.
