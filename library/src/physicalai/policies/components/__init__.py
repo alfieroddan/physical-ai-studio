@@ -3,7 +3,7 @@
 
 """Shared neural network components for policy modules."""
 
-from physicalai.policies.components.action_heads import ActionHead, IterativeActionHead
+from physicalai.policies.components.action_heads import ActionHead, DiffusionActionHead, IterativeActionHead
 from physicalai.policies.components.nn import (
     CategorySpecificLinear,
     CategorySpecificMLP,
@@ -17,6 +17,7 @@ __all__ = [
     "ActionHead",
     "CategorySpecificLinear",
     "CategorySpecificMLP",
+    "DiffusionActionHead",
     "IterativeActionHead",
     "MultiEmbodimentActionEncoder",
     "SinusoidalPositionalEncoding",
