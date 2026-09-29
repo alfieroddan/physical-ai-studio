@@ -19,7 +19,6 @@ back from pure noise with the DDIM update::
     sigma^2 = eta^2 * (1 - alpha_bar_prev) / (1 - alpha_bar_t) * (1 - alpha_bar_t / alpha_bar_prev)
 
 ``eta = 1`` is DDPM ancestral sampling and ``eta = 0`` is deterministic DDIM.
-Defaults match LeRobot's Diffusion Policy.
 """
 
 from __future__ import annotations
@@ -46,7 +45,7 @@ def make_betas(
     beta_start: float = 1e-4,
     beta_end: float = 0.02,
 ) -> torch.Tensor:
-    """Build a noise schedule with the same definitions as ``diffusers``.
+    """Build a noise schedule.
 
     Args:
         schedule: ``"linear"``, ``"scaled_linear"`` or ``"squaredcos_cap_v2"`` (cosine).
