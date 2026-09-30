@@ -3,6 +3,6 @@
 
 """Denoising diffusion (DDPM / DDIM) action head."""
 
-from physicalai.policies.components.action_heads.diffusion.diffusion import DiffusionActionHead, make_betas
+from .diffusion import DiffusionActionHead, make_betas
 
 __all__ = ["DiffusionActionHead", "make_betas"]

@@ -6,7 +6,7 @@ subclass only writes `denoise`. See the
 [explanation](../../../../../../docs/explanation/policy/action_head.md#diffusion-action-head) for how it works.
 
 ```python
-from physicalai.policies.components.action_heads import DiffusionActionHead
+from physicalai.policies.components import DiffusionActionHead
 ```
 
 | Argument                 | Default               | Meaning                                               |

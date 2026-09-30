@@ -3,8 +3,8 @@
 
 """Reusable action heads for policies."""
 
-from physicalai.policies.components.action_heads.base import ActionHead, Context, IterativeActionHead
-from physicalai.policies.components.action_heads.diffusion import DiffusionActionHead, make_betas
+from .base import ActionHead, Context, IterativeActionHead
+from .diffusion import DiffusionActionHead, make_betas
 
 __all__ = [
     "ActionHead",
