@@ -195,3 +195,21 @@ datamodule = LeRobotDataModule(
     data_format="lerobot"
 )
 ```
+
+## Goal Conditioning
+
+Pass `goal_source` to attach a goal, the last frame of a demonstration, to every
+sample as `Observation.goal_images`:
+
+```python test="skip" reason="requires physicalai install and downloads data"
+from physicalai.data.lerobot import LeRobotDataModule
+
+datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="task")
+```
+
+> **Note:** Goal conditioning assumes the last frame of every episode shows the
+> task completed. Crop episodes that continue afterwards (e.g. cyclic recordings
+> that return home) to end at task completion.
+
+See [Goal Conditioning](goal-conditioning.md) for goal sources, wrapping datasets
+yourself, rollouts with `GoalConditionedGym` and custom goal datasets.

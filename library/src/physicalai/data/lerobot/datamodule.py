@@ -9,7 +9,7 @@ import json
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from huggingface_hub import hf_hub_download
 from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -20,6 +20,7 @@ from physicalai.data import DataModule
 
 from .converters import DataFormat
 from .dataset import _LeRobotDatasetAdapter
+from .goal import GoalSource, LeRobotGoalConditionedDataset
 from .utils.quantile_stats import augment_dataset_quantile_stats, has_quantile_stats
 
 if TYPE_CHECKING:
@@ -111,7 +112,19 @@ class LeRobotDataModule(DataModule):
         ...     data_format=DataFormat.LEROBOT
         ... )
 
-        >>> # 4. Instantiate from an existing LeRobotDataset object
+        >>> # 4. Attach a goal (the last frame of a demonstration) to every sample
+        >>> datamodule = LeRobotDataModule(
+        ...     repo_id="lerobot/libero",
+        ...     train_batch_size=32,
+        ...     goal_source="task_sample"
+        ... )
+
+        >>> # 5. Or wrap the dataset yourself
+        >>> from physicalai.data.lerobot import LeRobotGoalConditionedDataset
+        >>> dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"), goal_source="task_sample")
+        >>> datamodule = LeRobotDataModule(dataset=dataset, train_batch_size=32)
+
+        >>> # 6. Instantiate from an existing LeRobotDataset object
         >>> from lerobot.datasets import LeRobotDataset
         >>> raw_dataset = LeRobotDataset("lerobot/aloha_sim_transfer_cube_human")
         >>> datamodule = LeRobotDataModule(
@@ -125,7 +138,7 @@ class LeRobotDataModule(DataModule):
         self,
         *,
         repo_id: str | None = None,
-        dataset: LeRobotDataset | None = None,
+        dataset: LeRobotDataset | LeRobotGoalConditionedDataset | None = None,
         root: str | Path | None = None,
         episodes: list[int] | None = None,
         train_batch_size: int = 16,
@@ -139,6 +152,7 @@ class LeRobotDataModule(DataModule):
         video_backend: str | None = None,
         batch_encoding_size: int = 1,
         data_format: Literal["physicalai", "lerobot"] | DataFormat = "physicalai",
+        goal_source: GoalSource | None = None,
         # Eval-loss validation
         val_split: float = 0.0,
         val_split_seed: int | None = None,
@@ -159,7 +173,8 @@ class LeRobotDataModule(DataModule):
             repo_id (str | None, optional): Repository ID for the LeRobot dataset.
                 Required if `dataset` is not provided.
                 Defaults to `None`.
-            dataset (LeRobotDataset | None, optional): Pre-initialized LeRobotDataset instance.
+            dataset (LeRobotDataset | LeRobotGoalConditionedDataset | None, optional): Pre-initialized
+                LeRobotDataset instance, or one already wrapped with goals.
                 Defaults to `None`.
             root (str | Path | None, optional): Local directory for caching dataset files.
                 Defaults to `None`.
@@ -190,6 +205,11 @@ class LeRobotDataModule(DataModule):
                 Output format for the data. Use "physicalai" for the native `Observation` format,
                 or "lerobot" for LeRobot's original dict format.
                 Defaults to "physicalai".
+            goal_source (Literal["task", "episode", "task_sample"] | None, optional): Wrap the
+                datasets in `LeRobotGoalConditionedDataset` so every sample carries a goal. ``"task"``
+                uses the last frame of each task's first episode, ``"episode"`` each episode's own
+                last frame, and ``"task_sample"`` the last frame of a random episode of the same
+                task. Requires ``data_format="physicalai"``. Defaults to `None` (no goals).
             val_split (float, optional): Fraction of episodes to hold out for eval-loss
                 validation (e.g. ``0.1`` for 10%). The last N episodes are used as the
                 validation set. Must be in ``[0, 1)``. ``0`` disables eval-loss validation.
@@ -253,6 +273,14 @@ class LeRobotDataModule(DataModule):
         # Convert `data_format` to enum if it's a string
         self.data_format = DataFormat(data_format)
 
+        goal_dataset = dataset if isinstance(dataset, LeRobotGoalConditionedDataset) else None
+        if (goal_source is not None or goal_dataset is not None) and self.data_format != DataFormat.PHYSICALAI:
+            msg = "Goal conditioning requires data_format='physicalai'."
+            raise ValueError(msg)
+        if goal_source is not None and goal_dataset is not None:
+            msg = "'dataset' already carries goals; do not also pass 'goal_source'."
+            raise ValueError(msg)
+
         # Split episodes into train / val based on val_split
         train_episodes = episodes
         val_episodes: list[int] | None = None
@@ -278,7 +306,11 @@ class LeRobotDataModule(DataModule):
 
         # Create the appropriate dataset based on format
         val_eval_dataset = None
-        if dataset is not None:
+        if goal_dataset is not None:
+            # Set up the inner dataset like any other; the goal wrapper is restored below.
+            train_dataset = cast("_LeRobotDatasetAdapter", goal_dataset.dataset)
+
+        elif dataset is not None:
             if LeRobotDataset is None:
                 msg = "LeRobotDataset is not available. Install lerobot with: uv pip install lerobot."
                 raise ImportError(msg)
@@ -361,6 +393,14 @@ class LeRobotDataModule(DataModule):
                 if not has_quantile_stats(lr_ds):
                     logger.info("Pre-built dataset lacks quantile stats — computing")
                     augment_dataset_quantile_stats(lr_ds)
+
+        if goal_dataset is not None:
+            train_dataset = goal_dataset
+        elif goal_source is not None:
+            train_dataset = LeRobotGoalConditionedDataset(train_dataset, goal_source)
+            if val_eval_dataset is not None:
+                # Share the train split's goals: same dataset, no need to decode them twice.
+                val_eval_dataset = LeRobotGoalConditionedDataset(val_eval_dataset, goals=train_dataset.goals)
 
         # Pass the dataset to the parent class
         super().__init__(

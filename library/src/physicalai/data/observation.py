@@ -13,6 +13,8 @@ import numpy as np
 import torch
 
 type NormalizationValue = float | list[float] | list[list[float]] | list[list[list[float]]] | None
+# A single tensor, or a dict of named tensors (e.g. one per camera).
+type ObservationValue = dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None
 
 
 @dataclass
@@ -54,10 +56,10 @@ class Observation:
     """
 
     # Core Observation
-    action: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
-    task: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
-    state: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
-    images: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
+    action: ObservationValue = None
+    task: ObservationValue = None
+    state: ObservationValue = None
+    images: ObservationValue = None
 
     # Inference-only Fields
     # Real-Time Chunking (RTC) inputs: the unconsumed tail of the previously predicted
@@ -67,6 +69,10 @@ class Observation:
     inference_delay: torch.Tensor | np.ndarray | None = None
     max_guidance_weight: torch.Tensor | np.ndarray | None = None
     execution_horizon: torch.Tensor | np.ndarray | None = None
+
+    # Goal Conditioning
+    # Images of the state the policy should reach, in the same layout as `images`.
+    goal_images: ObservationValue = None
 
     # Optional RL & Metadata Fields
     next_reward: torch.Tensor | np.ndarray | None = None
@@ -91,6 +97,8 @@ class Observation:
         RTC_INFERENCE_DELAY = "inference_delay"
         RTC_MAX_GUIDANCE_WEIGHT = "max_guidance_weight"
         RTC_EXECUTION_HORIZON = "execution_horizon"
+
+        GOAL_IMAGES = "goal_images"
 
         NEXT_REWARD = "next_reward"
         NEXT_SUCCESS = "next_success"
@@ -528,6 +536,7 @@ ACTION = Observation.FieldName.ACTION.value
 EPISODE_INDEX = Observation.FieldName.EPISODE_INDEX.value
 EXTRA = Observation.FieldName.EXTRA.value
 FRAME_INDEX = Observation.FieldName.FRAME_INDEX.value
+GOAL_IMAGES = Observation.FieldName.GOAL_IMAGES.value
 IMAGES = Observation.FieldName.IMAGES.value
 INDEX = Observation.FieldName.INDEX.value
 INFO = Observation.FieldName.INFO.value
