@@ -259,15 +259,21 @@ class TestDtypes:
         assert torch.isfinite(actions).all()
 
 
+GRAPH_DEVICES = [
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")),
+    pytest.param("xpu", marks=pytest.mark.skipif(not torch.xpu.is_available(), reason="requires XPU")),
+]
+
+
 class TestGraphReplay:
     """enable_graph_replay replays sampling at inference only."""
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-    def test_cuda(self) -> None:
+    @pytest.mark.parametrize("device", GRAPH_DEVICES)
+    def test_replay(self, device: str) -> None:
         """Test graph replay matches eager sampling, reuses graphs and only runs at inference."""
-        head = ToyDiffusionHead(num_inference_steps=10, eta=0.0, use_random_input_noise=False).cuda().eval()
+        head = ToyDiffusionHead(num_inference_steps=10, eta=0.0, use_random_input_noise=False).to(device).eval()
         head.enable_graph_replay()
-        contexts = [{"tokens": torch.randn(2, 6, CONTEXT_DIM, device="cuda")} for _ in range(2)]
+        contexts = [{"tokens": torch.randn(2, 6, CONTEXT_DIM, device=device)} for _ in range(2)]
         with torch.inference_mode():
             for context in contexts:
                 torch.testing.assert_close(head.sample(context), head._sample(context, None, 10))  # noqa: SLF001
@@ -284,12 +290,12 @@ class TestGraphReplay:
         head.double()
         assert head._graphs == {}  # noqa: SLF001
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-    def test_ddpm_draws_new_noise(self) -> None:
+    @pytest.mark.parametrize("device", GRAPH_DEVICES)
+    def test_ddpm_draws_new_noise(self, device: str) -> None:
         """Test a replayed DDPM graph draws fresh noise on every call."""
-        head = ToyDiffusionHead(num_inference_steps=10).cuda().eval()
+        head = ToyDiffusionHead(num_inference_steps=10).to(device).eval()
         head.enable_graph_replay()
-        context = {"tokens": torch.randn(2, 6, CONTEXT_DIM, device="cuda")}
+        context = {"tokens": torch.randn(2, 6, CONTEXT_DIM, device=device)}
         with torch.inference_mode():
             assert not torch.allclose(head.sample(context), head.sample(context))
 
