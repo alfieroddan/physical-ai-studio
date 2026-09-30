@@ -217,5 +217,6 @@ Policies compose functionality through mixins:
 
 - [Base Policy](base.md) - Detailed base class documentation
 - [Vision Encoder](vision_encoder.md) - Shared image encoder for timm, torchvision and custom backbones
+- [Action Heads](action_head.md) - Shared action head interface for regression, flow matching and diffusion
 - [Export Design](../export/README.md) - Model export system
 - [Data Module](../data/README.md) - Dataset integration
