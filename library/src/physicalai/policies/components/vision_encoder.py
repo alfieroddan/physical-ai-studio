@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Generic image feature extractor for policy vision encoders.
+"""Generic vision encoder for policies.
 
 Wraps a timm model, a torchvision model or any ``nn.Module`` and returns
 features from one or more of its layers. Each layer can be pooled and the
@@ -15,14 +15,14 @@ Supports both architecture families:
 Examples:
     DINOv2 CLS token:
 
-    >>> encoder = FeatureExtractor("vit_small_patch14_dinov2.lvd142m", pooling="cls", dynamic_img_size=True)
+    >>> encoder = VisionEncoder("vit_small_patch14_dinov2.lvd142m", pooling="cls", dynamic_img_size=True)
     >>> encoder(torch.rand(2, 3, 224, 224)).shape
     torch.Size([2, 384])
 
     All four ResNet stages, average pooled and concatenated:
 
     >>> resnet = torchvision.models.resnet18(weights="DEFAULT")
-    >>> encoder = FeatureExtractor(
+    >>> encoder = VisionEncoder(
     ...     resnet, layers=["layer1", "layer2", "layer3", "layer4"], pooling="avg", aggregate="concat"
     ... )
     >>> encoder(torch.rand(2, 3, 224, 224)).shape
@@ -53,7 +53,7 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 OUTPUT_KEY = "output"
 
 
-class FeatureExtractor(nn.Module):
+class VisionEncoder(nn.Module):
     """Extract (optionally pooled and aggregated) features from an image backbone.
 
     Args:
@@ -99,7 +99,7 @@ class FeatureExtractor(nn.Module):
         num_prefix_tokens: int | None = None,
         **model_kwargs: Any,  # noqa: ANN401
     ) -> None:
-        """Initialize the feature extractor.
+        """Initialize the vision encoder.
 
         Raises:
             ValueError: If ``pooling`` or ``aggregate`` is invalid.
@@ -156,7 +156,7 @@ class FeatureExtractor(nn.Module):
 
             modules[name].register_forward_hook(hook)
 
-    def train(self, mode: bool = True) -> FeatureExtractor:  # noqa: FBT001, FBT002
+    def train(self, mode: bool = True) -> VisionEncoder:  # noqa: FBT001, FBT002
         """Set training mode, keeping a frozen backbone in eval mode.
 
         Args:

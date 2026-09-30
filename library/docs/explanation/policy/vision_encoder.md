@@ -1,10 +1,10 @@
-# Feature Extractor
+# Vision Encoder
 
-`FeatureExtractor` is a shared vision encoder for policies. It wraps a timm model,
+`VisionEncoder` is a shared vision encoder for policies. It wraps a timm model,
 a torchvision model or any `nn.Module` and returns features from chosen layers.
 
 ```python
-from physicalai.policies.components import FeatureExtractor
+from physicalai.policies.components import VisionEncoder
 ```
 
 ## Inputs
@@ -44,18 +44,18 @@ gives the output dimension of each layer.
 import torchvision
 
 # DINOv2 CLS token -> (B, 384)
-FeatureExtractor("vit_small_patch14_dinov2.lvd142m", pooling="cls", dynamic_img_size=True)
+VisionEncoder("vit_small_patch14_dinov2.lvd142m", pooling="cls", dynamic_img_size=True)
 
 # DINOv2 patch tokens -> (B, N, 384), or averaged -> (B, 384)
-FeatureExtractor("vit_small_patch14_dinov2.lvd142m", pooling="none", dynamic_img_size=True)
-FeatureExtractor("vit_small_patch14_dinov2.lvd142m", pooling="avg", dynamic_img_size=True)
+VisionEncoder("vit_small_patch14_dinov2.lvd142m", pooling="none", dynamic_img_size=True)
+VisionEncoder("vit_small_patch14_dinov2.lvd142m", pooling="avg", dynamic_img_size=True)
 
 # torchvision ResNet18, final stage average pooled -> (B, 512)
 resnet = torchvision.models.resnet18(weights="DEFAULT")
-FeatureExtractor(resnet, layers=["layer4"], pooling="avg")
+VisionEncoder(resnet, layers=["layer4"], pooling="avg")
 
 # All four ResNet stages, average pooled and concatenated -> (B, 960)
-FeatureExtractor(resnet, layers=["layer1", "layer2", "layer3", "layer4"], pooling="avg", aggregate="concat")
+VisionEncoder(resnet, layers=["layer1", "layer2", "layer3", "layer4"], pooling="avg", aggregate="concat")
 ```
 
 For models whose transformer tokens do not expose `num_prefix_tokens` (e.g. a

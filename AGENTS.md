@@ -35,9 +35,9 @@ Physical AI Studio is the training-side repo for the Physical AI workflow: colle
 ## Shared Policy Components
 
 - Reuse `physicalai.policies.components` before writing policy-specific building blocks.
-- For image encoders, use `FeatureExtractor` instead of a custom backbone wrapper. It takes a timm model name or any `nn.Module` (e.g. a torchvision model), selects layers by module name, and handles pooling (`none`, `avg`, `max`, `cls`) and multi-layer aggregation (`none`, `concat`, `mean`) for both conv and ViT backbones.
+- For image encoders, use `VisionEncoder` instead of a custom backbone wrapper. It takes a timm model name or any `nn.Module` (e.g. a torchvision model), selects layers by module name, and handles pooling (`none`, `avg`, `max`, `cls`) and multi-layer aggregation (`none`, `concat`, `mean`) for both conv and ViT backbones.
 - `forward` expects `(B, C, H, W)` images in `[0, 1]` and normalizes internally; use `encode_image` for PIL images, numpy arrays or unbatched tensors.
-- See `library/docs/explanation/policy/feature_extractor.md` for examples.
+- See `library/docs/explanation/policy/vision_encoder.md` for examples.
 
 ## Contribution Notes
 
