@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { ReactNode, useMemo, useState } from 'react';
 
 import { Button, Divider, Flex, Grid, Heading, Loading, minmax, Text, View } from '@geti-ui/ui';
 import { useNavigate } from 'react-router';
@@ -91,7 +91,17 @@ const JointReadings = ({ result }: { result: CalibrationResult }) => (
  *
  * The robot is only created once calibration succeeds.
  */
-export const CalibrationWizardContent = () => {
+interface CalibrationWizardContentProps {
+    /** Heading for the zero-pose step; robot-specific sections pass their own. */
+    title?: string;
+    /** Robot-specific guidance shown above the plugin's instructions. */
+    tips?: ReactNode;
+}
+
+export const CalibrationWizardContent = ({
+    title = 'Move the arm to its zero pose',
+    tips,
+}: CalibrationWizardContentProps) => {
     const navigate = useNavigate();
     const { project_id } = useProjectId();
     const { activeType, robotForm } = useRobotForm();
@@ -187,7 +197,8 @@ export const CalibrationWizardContent = () => {
                 <Flex direction='column' gap='size-300'>
                     {currentStep === 'position' && (
                         <>
-                            <Heading level={3}>Move the arm to its zero pose</Heading>
+                            <Heading level={3}>{title}</Heading>
+                            {tips}
                             {isReady ? (
                                 <InlineAlert variant='info'>{statusMessage}</InlineAlert>
                             ) : (
