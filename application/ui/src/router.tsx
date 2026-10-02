@@ -31,6 +31,7 @@ import { Layout as RobotsLayout } from './routes/robots/layout';
 import { New as RobotsNew } from './routes/robots/new';
 import { NewRobotLayout } from './routes/robots/new-layout';
 import { Robot } from './routes/robots/robot';
+import { RobotCalibration } from './routes/robots/robot-calibration';
 import { SO101Setup } from './routes/robots/so101-setup';
 import { TabNavigation as RobotsTabNavigation } from './routes/robots/tab-navigation';
 import { Settings } from './routes/settings';
@@ -78,6 +79,7 @@ export const paths = {
             index: robots,
             new: robots.path('new'),
             so101Setup: robots.path('new/so101-setup'),
+            calibration: robots.path('new/calibration'),
             edit: robot.path('edit'),
             show: robot,
         },
@@ -266,6 +268,10 @@ export const router = createBrowserRouter([
                                     {
                                         path: 'so101-setup',
                                         element: <SO101Setup />,
+                                    },
+                                    {
+                                        path: 'calibration',
+                                        element: <RobotCalibration />,
                                     },
                                 ],
                             },

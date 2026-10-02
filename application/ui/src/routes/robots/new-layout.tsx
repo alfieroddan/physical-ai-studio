@@ -8,8 +8,9 @@ import { RobotModelsProvider } from '../../features/robots/robot-models-context'
  *
  * Wraps child routes with RobotModelsProvider and RobotFormProvider so that
  * form state (name, type, serial_number) is preserved when navigating between
- * the generic form (/robots/new) and the SO101 setup wizard
- * (/robots/new/so101-setup).
+ * the generic form (/robots/new), the SO101 setup wizard
+ * (/robots/new/so101-setup) and the plugin calibration wizard
+ * (/robots/new/calibration).
  */
 export const NewRobotLayout = () => {
     return (
