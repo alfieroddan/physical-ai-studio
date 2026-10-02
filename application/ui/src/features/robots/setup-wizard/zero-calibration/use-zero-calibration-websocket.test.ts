@@ -2,7 +2,7 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { SchemaRobotInput } from '../../robot-types';
-import { useCalibrationWebSocket } from './use-calibration-websocket';
+import { useZeroCalibrationWebSocket } from './use-zero-calibration-websocket';
 
 const sendJsonMessage = vi.fn();
 let capturedUrl: unknown;
@@ -27,28 +27,28 @@ const robot = {
     payload: { connection_string: 'can0' },
 } as unknown as SchemaRobotInput;
 
-describe('useCalibrationWebSocket', () => {
+describe('useZeroCalibrationWebSocket', () => {
     afterEach(() => {
         sendJsonMessage.mockClear();
     });
 
     it('does not open a socket until there is a robot to calibrate', () => {
-        renderHook(() => useCalibrationWebSocket({ projectId: 'project-1', robot: null }));
+        renderHook(() => useZeroCalibrationWebSocket({ projectId: 'project-1', robot: null }));
 
         expect(capturedUrl).toBeNull();
     });
 
     it('starts calibration with the unsaved robot once the socket opens', () => {
-        renderHook(() => useCalibrationWebSocket({ projectId: 'project-1', robot }));
+        renderHook(() => useZeroCalibrationWebSocket({ projectId: 'project-1', robot }));
 
         act(() => capturedOptions.onOpen?.());
 
-        expect(capturedUrl).toBe('/api/projects/project-1/robots/calibration/ws');
+        expect(capturedUrl).toBe('/api/projects/project-1/robots/zero-calibration/ws');
         expect(sendJsonMessage).toHaveBeenCalledWith({ command: 'start', robot });
     });
 
     it('tracks instructions and live joints from the worker', () => {
-        const { result } = renderHook(() => useCalibrationWebSocket({ projectId: 'project-1', robot }));
+        const { result } = renderHook(() => useZeroCalibrationWebSocket({ projectId: 'project-1', robot }));
 
         act(() => {
             deliver({ event: 'status', state: 'running', phase: 'positioning', message: 'Fold the arm.' });
@@ -61,7 +61,7 @@ describe('useCalibrationWebSocket', () => {
     });
 
     it('sends set_zero and stores the result', () => {
-        const { result } = renderHook(() => useCalibrationWebSocket({ projectId: 'project-1', robot }));
+        const { result } = renderHook(() => useZeroCalibrationWebSocket({ projectId: 'project-1', robot }));
 
         act(() => result.current.commands.setZero());
 
@@ -81,7 +81,7 @@ describe('useCalibrationWebSocket', () => {
     });
 
     it('keeps the error code from an error event', () => {
-        const { result } = renderHook(() => useCalibrationWebSocket({ projectId: 'project-1', robot }));
+        const { result } = renderHook(() => useZeroCalibrationWebSocket({ projectId: 'project-1', robot }));
 
         act(() => deliver({ event: 'error', message: 'No such device', error_code: 'device_not_found' }));
 

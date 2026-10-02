@@ -8,12 +8,12 @@ import { SchemaRobotInput } from '../../robot-types';
 // Types — mirrors the backend RobotCalibrationWorker protocol
 // ---------------------------------------------------------------------------
 
-export type CalibrationPhase = 'waiting' | 'connecting' | 'positioning' | 'verification';
+export type ZeroCalibrationPhase = 'waiting' | 'connecting' | 'positioning' | 'verification';
 
 interface StatusEvent {
     event: 'status';
     state: string;
-    phase: CalibrationPhase;
+    phase: ZeroCalibrationPhase;
     message: string;
 }
 
@@ -23,7 +23,7 @@ interface ObservationEvent {
     data: Record<string, number>;
 }
 
-export interface CalibrationResult {
+export interface ZeroCalibrationResult {
     event: 'calibration_result';
     success: boolean;
     /** Joint readings in degrees right after set-zero, keyed as "{joint_name}.pos" */
@@ -37,27 +37,27 @@ interface ErrorEvent {
     error_code?: string;
 }
 
-type CalibrationEvent = StatusEvent | ObservationEvent | CalibrationResult | ErrorEvent | { event: 'pong' };
+type CalibrationEvent = StatusEvent | ObservationEvent | ZeroCalibrationResult | ErrorEvent | { event: 'pong' };
 
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
 
-interface UseCalibrationWebSocketOptions {
+interface UseZeroCalibrationWebSocketOptions {
     projectId: string;
     /** The unsaved robot to calibrate; the socket opens once it is set. */
     robot: SchemaRobotInput | null;
 }
 
-export interface CalibrationWebSocketState {
+export interface ZeroCalibrationWebSocketState {
     /** Current backend phase */
-    phase: CalibrationPhase | null;
+    phase: ZeroCalibrationPhase | null;
     /** Latest status message; in the positioning phase, the plugin's zero-pose instructions */
     statusMessage: string | null;
     /** Live joint positions for the 3D preview */
     joints: Record<string, number> | null;
     /** Result of the latest set-zero */
-    calibrationResult: CalibrationResult | null;
+    calibrationResult: ZeroCalibrationResult | null;
     /** Whether a set-zero is waiting for its result */
     isSettingZero: boolean;
     /** Latest error */
@@ -68,7 +68,7 @@ export interface CalibrationWebSocketState {
     isConnected: boolean;
 }
 
-const INITIAL_STATE: CalibrationWebSocketState = {
+const INITIAL_STATE: ZeroCalibrationWebSocketState = {
     phase: null,
     statusMessage: null,
     joints: null,
@@ -79,8 +79,8 @@ const INITIAL_STATE: CalibrationWebSocketState = {
     isConnected: false,
 };
 
-export function useCalibrationWebSocket({ projectId, robot }: UseCalibrationWebSocketOptions) {
-    const [state, setState] = useState<CalibrationWebSocketState>(INITIAL_STATE);
+export function useZeroCalibrationWebSocket({ projectId, robot }: UseZeroCalibrationWebSocketOptions) {
+    const [state, setState] = useState<ZeroCalibrationWebSocketState>(INITIAL_STATE);
 
     const handleMessage = useCallback((event: WebSocketEventMap['message']) => {
         try {
@@ -109,7 +109,7 @@ export function useCalibrationWebSocket({ projectId, robot }: UseCalibrationWebS
         }
     }, []);
 
-    const url = robot !== null ? `/api/projects/${projectId}/robots/calibration/ws` : null;
+    const url = robot !== null ? `/api/projects/${projectId}/robots/zero-calibration/ws` : null;
 
     const { sendJsonMessage, readyState } = useWebSocket(url, {
         onMessage: handleMessage,

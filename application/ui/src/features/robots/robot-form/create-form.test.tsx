@@ -15,7 +15,7 @@ const definition = (type: string, calibration: { instructions: string; zero_tole
     urdf_path: `/api/robots/catalog/${type}/urdf`,
     package_map: {},
     joint_map: {},
-    calibration,
+    zero_calibration: calibration,
 });
 
 const renderCreateForm = (robotType: string) => {

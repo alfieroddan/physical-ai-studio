@@ -7,11 +7,11 @@ import { http } from '../../../../api/utils';
 import { server } from '../../../../msw-node-setup';
 import { render } from '../../../../test-utils/render';
 import { RobotFormProvider } from '../../robot-form/provider';
-import { CalibrationWizardContent } from './calibration-wizard';
-import { CalibrationWebSocketState, useCalibrationWebSocket } from './use-calibration-websocket';
+import { useZeroCalibrationWebSocket, ZeroCalibrationWebSocketState } from './use-zero-calibration-websocket';
+import { ZeroCalibrationWizardContent } from './zero-calibration-wizard';
 
-vi.mock('./use-calibration-websocket', () => ({
-    useCalibrationWebSocket: vi.fn(),
+vi.mock('./use-zero-calibration-websocket', () => ({
+    useZeroCalibrationWebSocket: vi.fn(),
 }));
 
 // The 3D viewer needs WebGL; the live sync is covered by use-joint-state.
@@ -25,7 +25,7 @@ vi.mock('../../use-joint-state', () => ({
 const PROJECT_ID = 'project-1';
 const setZero = vi.fn();
 
-const READY_STATE: CalibrationWebSocketState = {
+const READY_STATE: ZeroCalibrationWebSocketState = {
     phase: 'positioning',
     statusMessage: 'Fold the arm and close the gripper.',
     joints: { 'shoulder_pan.pos': 40 },
@@ -36,8 +36,8 @@ const READY_STATE: CalibrationWebSocketState = {
     isConnected: true,
 };
 
-const renderWizard = (state: Partial<CalibrationWebSocketState> = {}) => {
-    vi.mocked(useCalibrationWebSocket).mockReturnValue({
+const renderWizard = (state: Partial<ZeroCalibrationWebSocketState> = {}) => {
+    vi.mocked(useZeroCalibrationWebSocket).mockReturnValue({
         state: { ...READY_STATE, ...state },
         readyState: 1,
         commands: { setZero },
@@ -47,16 +47,16 @@ const renderWizard = (state: Partial<CalibrationWebSocketState> = {}) => {
         <RobotFormProvider
             robot={{ type: 'ReBot_B601_RS_Follower', name: 'Khaos', payload: { connection_string: 'can0' } }}
         >
-            <CalibrationWizardContent />
+            <ZeroCalibrationWizardContent />
         </RobotFormProvider>,
         {
-            route: `/projects/${PROJECT_ID}/robots/new/calibration`,
-            path: '/projects/:project_id/robots/new/calibration',
+            route: `/projects/${PROJECT_ID}/robots/new/zero-calibration`,
+            path: '/projects/:project_id/robots/new/zero-calibration',
         }
     );
 };
 
-describe('CalibrationWizardContent', () => {
+describe('ZeroCalibrationWizardContent', () => {
     beforeEach(() => {
         setZero.mockClear();
     });
@@ -64,7 +64,7 @@ describe('CalibrationWizardContent', () => {
     it('starts calibration with the robot from the form', () => {
         renderWizard();
 
-        expect(vi.mocked(useCalibrationWebSocket)).toHaveBeenCalledWith({
+        expect(vi.mocked(useZeroCalibrationWebSocket)).toHaveBeenCalledWith({
             projectId: PROJECT_ID,
             robot: expect.objectContaining({
                 name: 'Khaos',

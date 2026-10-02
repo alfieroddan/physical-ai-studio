@@ -32,7 +32,7 @@ import { New as RobotsNew } from './routes/robots/new';
 import { NewRobotLayout } from './routes/robots/new-layout';
 import { ReBotRSSetup } from './routes/robots/rebot-rs-setup';
 import { Robot } from './routes/robots/robot';
-import { RobotCalibration } from './routes/robots/robot-calibration';
+import { RobotZeroCalibration } from './routes/robots/robot-zero-calibration';
 import { SO101Setup } from './routes/robots/so101-setup';
 import { StarArmSetup } from './routes/robots/stararm-setup';
 import { TabNavigation as RobotsTabNavigation } from './routes/robots/tab-navigation';
@@ -83,7 +83,7 @@ export const paths = {
             so101Setup: robots.path('new/so101-setup'),
             rebotRsSetup: robots.path('new/rebot-rs-setup'),
             stararmSetup: robots.path('new/stararm-setup'),
-            calibration: robots.path('new/calibration'),
+            zeroCalibration: robots.path('new/zero-calibration'),
             edit: robot.path('edit'),
             show: robot,
         },
@@ -282,8 +282,8 @@ export const router = createBrowserRouter([
                                         element: <StarArmSetup />,
                                     },
                                     {
-                                        path: 'calibration',
-                                        element: <RobotCalibration />,
+                                        path: 'zero-calibration',
+                                        element: <RobotZeroCalibration />,
                                     },
                                 ],
                             },
