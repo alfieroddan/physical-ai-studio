@@ -240,6 +240,9 @@ class RobotZeroCalibrationWorker(TransportWorker):
                 try:
                     await self._start(data.get("robot"))
                 except Exception:
+                    # A failed release leaves the driver connected: drop it so the user can retry.
+                    await self._cleanup()
+                    self.zero_calibration = None
                     self.phase = ZeroCalibrationPhase.WAITING
                     raise
 

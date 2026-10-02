@@ -259,7 +259,8 @@ An optional `zero_calibration` runs before the robot is saved. The zero-calibrat
 websocket validates the unsaved robot, calls `robot_builder`, and connects to
 the plain driver directly rather than through a `SharedRobot`, because a shared
 robot only forwards observations and actions. It calls the plugin's `release`
-and `set_zero` steps, streams observations for the 3D view, and disconnects the
+and `set_zero` steps, streams observations for the 3D view (when the type has an
+asset), and disconnects the
 driver when the websocket closes. The UI saves the robot afterwards.
 For the runtime after construction, see [Runtime Session Architecture](./runtime-session-architecture.md).
 

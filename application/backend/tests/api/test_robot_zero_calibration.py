@@ -39,6 +39,7 @@ class FakeDriver:
     zero_positions: list[float] = field(default_factory=lambda: [0.5, -0.2])
     joint_names: list[str] = field(default_factory=lambda: list(JOINT_NAMES))
     calls: list[str] = field(default_factory=list)
+    fail_next_release: bool = False
 
     def connect(self) -> None:
         self.calls.append("connect")
@@ -57,6 +58,9 @@ class _TestPayload(BaseModel):
 def _zero_calibration() -> RobotZeroCalibration:
     async def release(robot: Any) -> None:
         robot.calls.append("release")
+        if robot.fail_next_release:
+            robot.fail_next_release = False
+            raise RuntimeError("Servo did not unlock")
 
     async def set_zero(robot: Any) -> None:
         robot.calls.append("set_zero")
@@ -169,6 +173,19 @@ def test_set_zero_reports_failure_when_a_joint_is_outside_tolerance(client: Test
 
     assert result["success"] is False
     assert result["joints"]["gripper.pos"] == 3.0
+
+
+def test_failed_release_disconnects_so_start_can_be_retried(client: TestClient, driver: FakeDriver) -> None:
+    driver.fail_next_release = True
+
+    with client.websocket_connect(_url()) as websocket:
+        websocket.send_json({"command": "start", "robot": _robot()})
+        error = _receive_until(websocket, "error")
+        websocket.send_json({"command": "start", "robot": _robot()})
+        _receive_until(websocket, "status", phase="positioning")
+
+    assert error["message"] == "Servo did not unlock"
+    assert driver.calls[:5] == ["connect", "release", "disconnect", "connect", "release"]
 
 
 def test_set_zero_before_start_is_a_command_error(client: TestClient) -> None:
