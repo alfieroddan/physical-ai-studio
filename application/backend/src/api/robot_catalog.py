@@ -12,6 +12,11 @@ from robots.catalog.assets import resolve_robot_relative_asset_path, resolve_rob
 from schemas import SerialPortInfo
 
 
+class RobotCalibrationResponse(BaseModel):
+    instructions: str = Field(..., description="Description of the zero pose shown in the calibration wizard")
+    zero_tolerance_deg: float = Field(..., description="Largest joint reading, in degrees, that counts as zero")
+
+
 class RobotCatalogDefinitionResponse(BaseModel):
     type: str = Field(..., description="Stable backend robot type identifier")
     display_name: str = Field(..., description="Human-readable robot type label")
@@ -20,6 +25,10 @@ class RobotCatalogDefinitionResponse(BaseModel):
     package_map: dict[str, str] = Field(default_factory=dict, description="URDF package name to URL prefix map")
     joint_map: dict[str, list[str]] = Field(
         description="Observation joint name to URDF joint(s) mapping",
+    )
+    calibration: RobotCalibrationResponse | None = Field(
+        default=None,
+        description="Zero-pose calibration offered when adding this robot type, if any",
     )
 
 
@@ -39,6 +48,12 @@ def _to_response(definition: RobotCatalogDefinition) -> RobotCatalogDefinitionRe
         urdf_path=f"{catalog_root}/urdf",
         package_map=package_map,
         joint_map=joint_map,
+        calibration=None
+        if definition.calibration is None
+        else RobotCalibrationResponse(
+            instructions=definition.calibration.instructions,
+            zero_tolerance_deg=definition.calibration.zero_tolerance_deg,
+        ),
     )
 
 
