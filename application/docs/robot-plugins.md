@@ -216,7 +216,8 @@ zero_calibration = RobotZeroCalibration(
 
 After **Begin Calibration**, Studio builds the driver with `robot_builder`,
 connects to it directly, and calls `release` so the arm can be moved by hand.
-It shows `instructions` beside a live 3D view, calls `set_zero` when the user
+It shows `instructions` (beside a live 3D view when the robot type has a
+`RobotAsset`), calls `set_zero` when the user
 confirms the pose, and checks that every joint reads within
 `zero_tolerance_deg` of zero before the robot can be saved. Users can skip the
 step for an arm that is already calibrated. Calibration needs exclusive access
