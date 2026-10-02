@@ -39,6 +39,12 @@ export const CreateRobotForm = () => {
     const isSO101 = activeType === 'SO101_Follower' || activeType === 'SO101_Leader';
     const shouldRunSO101Setup = isSO101 && !hasUploadedCalibration(body?.payload);
     const shouldRunCalibration = catalog.some(({ type, calibration }) => type === activeType && calibration != null);
+    const calibrationPath =
+        activeType === 'ReBot_B601_RS_Follower'
+            ? paths.project.robots.rebotRsSetup
+            : activeType === 'StarArm_102_LD_Leader' || activeType === 'StarArm_102_HD_Leader'
+              ? paths.project.robots.stararmSetup
+              : paths.project.robots.calibration;
 
     const handleSubmit = async (event: FormEvent) => {
         event.preventDefault();
@@ -53,7 +59,7 @@ export const CreateRobotForm = () => {
         }
 
         if (shouldRunCalibration) {
-            navigate(paths.project.robots.calibration({ project_id }));
+            navigate(calibrationPath({ project_id }));
             return;
         }
 
