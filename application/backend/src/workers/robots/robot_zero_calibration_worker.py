@@ -1,6 +1,6 @@
 """Robot Calibration Worker — websocket-driven zero-pose calibration for plugin robots.
 
-Runs the ``RobotCalibration`` a catalog definition provides. Guides the user through:
+Runs the ``RobotZeroCalibration`` a catalog definition provides. Guides the user through:
   1. Connect — build the plain driver from the unsaved robot and connect to it directly
   2. Positioning — release the arm and stream live joint positions while the user
      moves it into the zero pose described by the plugin's instructions
@@ -29,16 +29,16 @@ from workers.transport.worker_transport import WorkerTransport
 from workers.transport_worker import TransportWorker, WorkerState
 
 if TYPE_CHECKING:
-    from physicalai_studio_plugin import RobotCalibration
+    from physicalai_studio_plugin import RobotZeroCalibration
 
 FPS = 30  # Streaming rate for the live 3D view
 
 
-class CalibrationUnsupportedError(ValueError):
+class ZeroCalibrationUnsupportedError(ValueError):
     """The robot type's catalog definition offers no calibration."""
 
 
-class CalibrationPhase(StrEnum):
+class ZeroCalibrationPhase(StrEnum):
     """Phases of the calibration state machine.
 
     The broadcast loop streams observations in ``POSITIONING`` and ``VERIFICATION``
@@ -51,7 +51,7 @@ class CalibrationPhase(StrEnum):
     VERIFICATION = "verification"
 
 
-class RobotCalibrationWorker(TransportWorker):
+class RobotZeroCalibrationWorker(TransportWorker):
     """Websocket worker that runs a plugin's zero-pose calibration.
 
     Commands:
@@ -75,18 +75,18 @@ class RobotCalibrationWorker(TransportWorker):
         super().__init__(transport)
         self.robot_client_factory = robot_client_factory
         self.catalog_registry = catalog_registry
-        self.phase = CalibrationPhase.WAITING
+        self.phase = ZeroCalibrationPhase.WAITING
 
         self.driver: Any | None = None
-        self.calibration: RobotCalibration | None = None
+        self.zero_calibration: RobotZeroCalibration | None = None
         # Drivers are not thread-safe: serialize the broadcast loop's reads with set_zero.
         self._driver_lock = asyncio.Lock()
 
     @staticmethod
     def _classify_error(exc: Exception) -> str:
         """Map an exception to a frontend-friendly error code."""
-        if isinstance(exc, CalibrationUnsupportedError):
-            return "calibration_unsupported"
+        if isinstance(exc, ZeroCalibrationUnsupportedError):
+            return "zero_calibration_unsupported"
         if isinstance(exc, ValidationError):
             return "invalid_config"
         if isinstance(exc, PermissionError):
@@ -97,7 +97,7 @@ class RobotCalibrationWorker(TransportWorker):
 
     def _require_driver(self) -> Any:
         """Return the connected driver, raising if calibration has not started."""
-        if self.driver is None or self.calibration is None:
+        if self.driver is None or self.zero_calibration is None:
             raise RuntimeError("Calibration has not started")
         return self.driver
 
@@ -129,25 +129,25 @@ class RobotCalibrationWorker(TransportWorker):
         if self.driver is not None:
             raise RuntimeError("Calibration has already started")
 
-        self.phase = CalibrationPhase.CONNECTING
+        self.phase = ZeroCalibrationPhase.CONNECTING
         await self._send_phase_status("Connecting to the robot...")
 
         robot = self.catalog_registry.get_robot_adapter().validate_python(robot_data)
         definition = self.catalog_registry.get_definition(robot.type)
-        calibration = None if definition is None else definition.calibration
+        calibration = None if definition is None else definition.zero_calibration
         if calibration is None:
-            raise CalibrationUnsupportedError(f"Robot type {robot.type} does not support calibration")
+            raise ZeroCalibrationUnsupportedError(f"Robot type {robot.type} does not support calibration")
 
         driver, _definition = await self.robot_client_factory.build_robot_driver(robot, self.robot_client_factory)
         async with self._driver_lock:
             await asyncio.to_thread(driver.connect)
             self.driver = driver
-            self.calibration = calibration
+            self.zero_calibration = calibration
             if calibration.release is not None:
                 await calibration.release(driver)
 
         logger.info(f"Calibration worker: connected to {robot.type} robot {robot.name!r}")
-        self.phase = CalibrationPhase.POSITIONING
+        self.phase = ZeroCalibrationPhase.POSITIONING
         await self._send_phase_status(calibration.instructions)
 
     # ------------------------------------------------------------------
@@ -157,7 +157,7 @@ class RobotCalibrationWorker(TransportWorker):
     async def _set_zero(self) -> None:
         """Run the plugin's set-zero step, then check every joint reads close to zero."""
         driver = self._require_driver()
-        calibration = self.calibration
+        calibration = self.zero_calibration
         if calibration is None:
             raise RuntimeError("Calibration has not started")
 
@@ -170,7 +170,7 @@ class RobotCalibrationWorker(TransportWorker):
         success = all(math.isfinite(value) and abs(value) <= tolerance for value in joints.values())
         logger.info(f"Calibration worker: set zero, success={success}")
 
-        self.phase = CalibrationPhase.VERIFICATION
+        self.phase = ZeroCalibrationPhase.VERIFICATION
         await self._send_event("calibration_result", success=success, joints=joints, tolerance_deg=tolerance)
 
     # ------------------------------------------------------------------
@@ -185,7 +185,7 @@ class RobotCalibrationWorker(TransportWorker):
             while not self._stop_requested:
                 start_time = time.perf_counter()
 
-                if self.phase in {CalibrationPhase.POSITIONING, CalibrationPhase.VERIFICATION}:
+                if self.phase in {ZeroCalibrationPhase.POSITIONING, ZeroCalibrationPhase.VERIFICATION}:
                     try:
                         await self._broadcast_observation()
                     except Exception as e:
@@ -223,7 +223,9 @@ class RobotCalibrationWorker(TransportWorker):
                     await self._dispatch_command(command, data)
                 except Exception as e:
                     logger.exception(f"Error handling command '{command}': {e}")
-                    error_code = RobotCalibrationWorker._classify_error(e) if command == "start" else "command_error"
+                    error_code = (
+                        RobotZeroCalibrationWorker._classify_error(e) if command == "start" else "command_error"
+                    )
                     await self._send_event("error", message=str(e), error_code=error_code)
         except asyncio.CancelledError:
             pass
@@ -238,7 +240,7 @@ class RobotCalibrationWorker(TransportWorker):
                 try:
                     await self._start(data.get("robot"))
                 except Exception:
-                    self.phase = CalibrationPhase.WAITING
+                    self.phase = ZeroCalibrationPhase.WAITING
                     raise
 
             case "set_zero":

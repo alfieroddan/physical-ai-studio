@@ -179,7 +179,7 @@ robot supports discovery, identification, or online-status checks.
 - `probe`: optional discovery, identification, and online-status implementation.
 - `asset`: optional URDF, mesh, and joint-map information.
 - `adapter_options`: optional control and effort-forwarding behavior.
-- `calibration`: optional zero-pose calibration Studio runs when the robot is added.
+- `zero_calibration`: optional zero-pose calibration Studio runs when the robot is added.
 
 The `type` value must not be casually renamed. It is stored in project data and
 must remain unique across all installed plugins.
@@ -190,13 +190,13 @@ The full SDK reference is in
 ## Offer Zero-Pose Calibration
 
 Some arms are calibrated by storing a zero pose on their motors rather than in a
-calibration file. Set `calibration` on the definition to have Studio run a
+calibration file. Set `zero_calibration` on the definition to have Studio run a
 guided calibration when the robot is added:
 
 ```python
 import asyncio
 
-from physicalai_studio_plugin import RobotCalibration
+from physicalai_studio_plugin import RobotZeroCalibration
 
 
 async def release(robot: MyRobot) -> None:
@@ -207,7 +207,7 @@ async def set_zero(robot: MyRobot) -> None:
     await asyncio.to_thread(robot.set_zero_position)
 
 
-calibration = RobotCalibration(
+zero_calibration = RobotZeroCalibration(
     instructions="Move the arm to its rest pose and close the gripper.",
     release=release,
     set_zero=set_zero,

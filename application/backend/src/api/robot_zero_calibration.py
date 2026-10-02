@@ -8,25 +8,25 @@ from fastapi.responses import Response
 from loguru import logger
 
 from api.dependencies import RobotCatalogServiceDep, RobotClientFactoryDep, get_project_id
-from workers.robots.robot_calibration_worker import RobotCalibrationWorker
+from workers.robots.robot_zero_calibration_worker import RobotZeroCalibrationWorker
 from workers.transport.websocket_transport import WebSocketTransport
 
 router = APIRouter(prefix="/api/projects/{project_id}/robots", tags=["Robot Setup"])
 
 
 @router.get(
-    "/calibration/ws",
+    "/zero-calibration/ws",
     tags=["WebSocket"],
     summary="Robot zero-pose calibration (WebSocket)",
     status_code=426,
 )
-async def robot_calibration_websocket_openapi(project_id: UUID) -> Response:  # noqa: ARG001
+async def robot_zero_calibration_websocket_openapi(project_id: UUID) -> Response:  # noqa: ARG001
     """This endpoint requires a WebSocket connection. Use `wss://` to connect."""
     return Response(status_code=426)
 
 
-@router.websocket("/calibration/ws")
-async def robot_calibration_websocket(
+@router.websocket("/zero-calibration/ws")
+async def robot_zero_calibration_websocket(
     _project_id: Annotated[str, Depends(get_project_id)],
     robot_client_factory: RobotClientFactoryDep,
     catalog_service: RobotCatalogServiceDep,
@@ -40,7 +40,7 @@ async def robot_calibration_websocket(
     await websocket.accept()
 
     try:
-        worker = RobotCalibrationWorker(
+        worker = RobotZeroCalibrationWorker(
             transport=WebSocketTransport(websocket),
             robot_client_factory=robot_client_factory,
             catalog_registry=catalog_service.registry,

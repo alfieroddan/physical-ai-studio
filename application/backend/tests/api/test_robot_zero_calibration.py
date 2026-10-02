@@ -8,7 +8,7 @@ from uuid import uuid4
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from physicalai_studio_plugin import RobotCalibration, RobotCatalogDefinition
+from physicalai_studio_plugin import RobotCatalogDefinition, RobotZeroCalibration
 from pydantic import BaseModel
 
 from api.dependencies import get_robot_catalog_service, get_robot_client_factory
@@ -54,7 +54,7 @@ class _TestPayload(BaseModel):
     connection_string: str = ""
 
 
-def _calibration() -> RobotCalibration:
+def _zero_calibration() -> RobotZeroCalibration:
     async def release(robot: Any) -> None:
         robot.calls.append("release")
 
@@ -62,7 +62,7 @@ def _calibration() -> RobotCalibration:
         robot.calls.append("set_zero")
         robot.positions = list(robot.zero_positions)
 
-    return RobotCalibration(
+    return RobotZeroCalibration(
         instructions="Fold the arm and close the gripper.",
         release=release,
         set_zero=set_zero,
@@ -79,7 +79,7 @@ class _FakeCatalogService:
                 display_name="Test Calibrated Follower",
                 role="follower",
                 robot_payload=_TestPayload,
-                calibration=_calibration(),
+                zero_calibration=_zero_calibration(),
             )
         )
 
@@ -107,7 +107,7 @@ def client(factory) -> Iterator[TestClient]:
 
 
 def _url() -> str:
-    return f"/api/projects/{PROJECT_ID}/robots/calibration/ws"
+    return f"/api/projects/{PROJECT_ID}/robots/zero-calibration/ws"
 
 
 def _robot(robot_type: str = ROBOT_TYPE, payload: Any = None) -> dict[str, Any]:
@@ -186,7 +186,7 @@ def test_start_rejects_robot_types_without_calibration(client: TestClient, facto
 
         error = _receive_until(websocket, "error")
 
-    assert error["error_code"] == "calibration_unsupported"
+    assert error["error_code"] == "zero_calibration_unsupported"
     factory.build_robot_driver.assert_not_called()
 
 
