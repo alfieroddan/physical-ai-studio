@@ -3,11 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { render } from '../../../../test-utils/render';
 import { RobotFormProvider } from '../../robot-form/provider';
-import { useCalibrationWebSocket } from '../calibration/use-calibration-websocket';
+import { useZeroCalibrationWebSocket } from '../zero-calibration/use-zero-calibration-websocket';
 import { StarArmSetupWizardContent } from './setup-wizard';
 
-vi.mock('../calibration/use-calibration-websocket', () => ({
-    useCalibrationWebSocket: vi.fn(),
+vi.mock('../zero-calibration/use-zero-calibration-websocket', () => ({
+    useZeroCalibrationWebSocket: vi.fn(),
 }));
 
 // The 3D viewer needs WebGL.
@@ -20,7 +20,7 @@ vi.mock('../../use-joint-state', () => ({
 
 describe('StarArmSetupWizardContent', () => {
     it('shows its own title and guidance over the shared calibration wizard', async () => {
-        vi.mocked(useCalibrationWebSocket).mockReturnValue({
+        vi.mocked(useZeroCalibrationWebSocket).mockReturnValue({
             state: {
                 phase: 'positioning',
                 statusMessage: 'Plugin instructions.',

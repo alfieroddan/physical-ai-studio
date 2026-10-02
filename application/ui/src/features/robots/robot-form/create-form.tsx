@@ -38,13 +38,15 @@ export const CreateRobotForm = () => {
     const body = useRobotFormBody(uuidv4());
     const isSO101 = activeType === 'SO101_Follower' || activeType === 'SO101_Leader';
     const shouldRunSO101Setup = isSO101 && !hasUploadedCalibration(body?.payload);
-    const shouldRunCalibration = catalog.some(({ type, calibration }) => type === activeType && calibration != null);
-    const calibrationPath =
+    const shouldRunZeroCalibration = catalog.some(
+        ({ type, zero_calibration }) => type === activeType && zero_calibration != null
+    );
+    const zeroCalibrationPath =
         activeType === 'ReBot_B601_RS_Follower'
             ? paths.project.robots.rebotRsSetup
             : activeType === 'StarArm_102_LD_Leader' || activeType === 'StarArm_102_HD_Leader'
               ? paths.project.robots.stararmSetup
-              : paths.project.robots.calibration;
+              : paths.project.robots.zeroCalibration;
 
     const handleSubmit = async (event: FormEvent) => {
         event.preventDefault();
@@ -58,8 +60,8 @@ export const CreateRobotForm = () => {
             return;
         }
 
-        if (shouldRunCalibration) {
-            navigate(calibrationPath({ project_id }));
+        if (shouldRunZeroCalibration) {
+            navigate(zeroCalibrationPath({ project_id }));
             return;
         }
 
@@ -93,7 +95,7 @@ export const CreateRobotForm = () => {
                         >
                             {shouldRunSO101Setup
                                 ? 'Begin Setup'
-                                : shouldRunCalibration
+                                : shouldRunZeroCalibration
                                   ? 'Begin Calibration'
                                   : 'Add robot'}
                         </Button>

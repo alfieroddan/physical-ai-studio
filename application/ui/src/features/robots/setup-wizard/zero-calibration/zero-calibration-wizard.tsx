@@ -15,14 +15,14 @@ import { InlineAlert } from '../shared/inline-alert';
 import { SetupRobotViewer } from '../shared/setup-robot-viewer';
 import { StatusBadge } from '../shared/status-badge';
 import { Stepper } from '../shared/stepper';
-import { CalibrationResult, useCalibrationWebSocket } from './use-calibration-websocket';
+import { useZeroCalibrationWebSocket, ZeroCalibrationResult } from './use-zero-calibration-websocket';
 
 import classes from '../shared/setup-wizard.module.css';
 
-type CalibrationStep = 'position' | 'verify';
+type ZeroCalibrationStep = 'position' | 'verify';
 
-const STEPS: CalibrationStep[] = ['position', 'verify'];
-const STEP_LABELS: Record<CalibrationStep, string> = { position: 'Zero pose', verify: 'Verify' };
+const STEPS: ZeroCalibrationStep[] = ['position', 'verify'];
+const STEP_LABELS: Record<ZeroCalibrationStep, string> = { position: 'Zero pose', verify: 'Verify' };
 
 const jointLabel = (key: string) => (key.endsWith('.pos') ? key.slice(0, -4) : key);
 
@@ -49,7 +49,7 @@ const LiveViewer = ({ robotType, joints }: { robotType: SchemaRobotType; joints:
 // Joint readings after set-zero
 // ---------------------------------------------------------------------------
 
-const JointReadings = ({ result }: { result: CalibrationResult }) => (
+const JointReadings = ({ result }: { result: ZeroCalibrationResult }) => (
     <div className={classes.sectionCard}>
         <table className={classes.rangeTable}>
             <thead>
@@ -91,17 +91,17 @@ const JointReadings = ({ result }: { result: CalibrationResult }) => (
  *
  * The robot is only created once calibration succeeds.
  */
-interface CalibrationWizardContentProps {
+interface ZeroCalibrationWizardContentProps {
     /** Heading for the zero-pose step; robot-specific sections pass their own. */
     title?: string;
     /** Robot-specific guidance shown above the plugin's instructions. */
     tips?: ReactNode;
 }
 
-export const CalibrationWizardContent = ({
+export const ZeroCalibrationWizardContent = ({
     title = 'Move the arm to its zero pose',
     tips,
-}: CalibrationWizardContentProps) => {
+}: ZeroCalibrationWizardContentProps) => {
     const navigate = useNavigate();
     const { project_id } = useProjectId();
     const { activeType, robotForm } = useRobotForm();
@@ -112,7 +112,7 @@ export const CalibrationWizardContent = ({
         activeType === undefined ? null : buildRobotBody(robotForm, activeType, robotId)
     );
 
-    const { state, commands } = useCalibrationWebSocket({ projectId: project_id, robot: robotBody });
+    const { state, commands } = useZeroCalibrationWebSocket({ projectId: project_id, robot: robotBody });
     const { phase, statusMessage, joints, calibrationResult, isSettingZero, error, isConnected } = state;
 
     const [saving, setSaving] = useState(false);
@@ -128,8 +128,8 @@ export const CalibrationWizardContent = ({
     });
 
     const isCalibrated = calibrationResult?.success === true;
-    const currentStep: CalibrationStep = isCalibrated ? 'verify' : 'position';
-    const completedSteps = new Set<CalibrationStep>(isCalibrated ? ['position'] : []);
+    const currentStep: ZeroCalibrationStep = isCalibrated ? 'verify' : 'position';
+    const completedSteps = new Set<ZeroCalibrationStep>(isCalibrated ? ['position'] : []);
 
     const goBackToForm = () => navigate(paths.project.robots.new({ project_id }));
 
