@@ -8,7 +8,12 @@ import classes from '../shared/setup-wizard.module.css';
 
 const DEFAULT_CAN_INTERFACE = 'can0';
 
-const canSetupCommands = (canInterface: string) => `sudo ip link set ${canInterface} down 2>/dev/null
+const canSetupCommands = (canInterface: string) => `# The kit includes PCAN-USB, which should normally show up as can0 or can1
+sudo modprobe peak_usb
+ip -br link
+
+# If ${canInterface} appears, set the bitrate
+sudo ip link set ${canInterface} down 2>/dev/null
 sudo ip link set ${canInterface} type can bitrate 1000000
 sudo ip link set ${canInterface} up`;
 
