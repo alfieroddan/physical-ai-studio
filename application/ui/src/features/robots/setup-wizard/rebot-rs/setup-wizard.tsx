@@ -8,7 +8,9 @@ import classes from '../shared/setup-wizard.module.css';
 
 const DEFAULT_CAN_INTERFACE = 'can0';
 
-const canSetupCommands = (canInterface: string) => `# The kit includes PCAN-USB, which should normally show up as can0 or can1
+const canSetupCommands = (
+    canInterface: string
+) => `# The kit includes PCAN-USB, which should normally show up as can0 or can1
 sudo modprobe peak_usb
 ip -br link
 
