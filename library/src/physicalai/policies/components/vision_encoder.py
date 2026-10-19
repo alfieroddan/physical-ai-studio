@@ -32,6 +32,7 @@ Examples:
 from __future__ import annotations
 
 import difflib
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -155,10 +156,12 @@ class VisionEncoder(nn.Module):
                 msg = f"Layer '{name}' not found in model. Did you mean one of: {suggestions}?"
                 raise ValueError(msg)
 
-            def hook(_module: nn.Module, _inputs: Any, output: Any, name: str = name) -> None:  # noqa: ANN401
-                self._features[name] = output[0] if isinstance(output, (tuple, list)) else output
+            modules[name].register_forward_hook(partial(self._capture_feature, name))
 
-            modules[name].register_forward_hook(hook)
+    def _capture_feature(self, name: str, _module: nn.Module, _inputs: Any, output: Any) -> None:  # noqa: ANN401
+        """Preserve the selected activation before downstream in-place operations."""
+        feature = output[0] if isinstance(output, (tuple, list)) else output
+        self._features[name] = feature.clone()
 
     def train(self, mode: bool = True) -> VisionEncoder:  # noqa: FBT001, FBT002
         """Set training mode, keeping a frozen backbone in eval mode.
@@ -202,15 +205,22 @@ class VisionEncoder(nn.Module):
 
         Returns:
             Raw layer outputs keyed by layer name.
+
+        Raises:
+            ValueError: If a selected layer is not executed by the backbone's feature path.
         """
         if self.normalize:
-            images = (images - self.mean) / self.std
+            images = (images - self.mean.to(images)) / self.std.to(images)
 
         # timm models expose forward_features, which skips the classifier head.
         run = getattr(self.model, "forward_features", self.model)
         self._features = {}
         output = run(images)
-        return self._features if self.layers else {OUTPUT_KEY: output}
+        missing = [name for name in self.layers if name not in self._features]
+        if missing:
+            msg = f"Selected layers were not executed by the backbone's feature path: {missing}."
+            raise ValueError(msg)
+        return {name: self._features[name] for name in self.layers} if self.layers else {OUTPUT_KEY: output}
 
     def _pool(self, feature: torch.Tensor) -> torch.Tensor:
         """Reduce a single layer's features according to ``self.pooling``.

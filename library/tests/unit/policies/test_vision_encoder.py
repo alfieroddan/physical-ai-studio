@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 import pytest
 import torch
@@ -86,6 +88,75 @@ class TestTransformer:
 
 class TestModule:
     """Tests for shared module behaviour."""
+
+    def test_capture_preserves_activation_before_inplace_operations(self) -> None:
+        """Test captured activations retain their values and gradients."""
+        backbone = nn.Sequential(nn.Identity(), nn.ReLU(inplace=True))
+        encoder = VisionEncoder(backbone, layers=["0"], normalize=False, frozen=False)
+        images = torch.tensor([[[[-1.0]], [[0.0]], [[1.0]]]], requires_grad=True)
+
+        features = encoder(images + 0)
+
+        torch.testing.assert_close(features, images)
+        features.sum().backward()
+        torch.testing.assert_close(images.grad, torch.ones_like(images))
+
+    def test_deepcopy_collects_its_own_features(self) -> None:
+        """Test copied hooks do not write into the original encoder."""
+        encoder = VisionEncoder(nn.Sequential(nn.Identity()), layers=["0"], normalize=False)
+        copied = copy.deepcopy(encoder)
+        images = torch.rand(1, 3, 4, 4)
+        original_features = encoder(images)
+
+        torch.testing.assert_close(copied(images + 1), images + 1)
+        assert encoder._features["0"] is original_features
+        torch.testing.assert_close(encoder._features["0"], images)
+
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.float64])
+    @pytest.mark.parametrize(
+        "device",
+        ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"))],
+    )
+    def test_normalization_matches_backbone_device_and_dtype(self, device: str, dtype: torch.dtype) -> None:
+        """Test wrapping an already-converted backbone does not require moving the encoder."""
+        backbone = nn.Conv2d(3, 2, kernel_size=1).to(device=device, dtype=dtype)
+        encoder = VisionEncoder(backbone)
+        images = torch.rand(1, 3, 4, 4, device=device, dtype=dtype)
+        expected = backbone((images - encoder.mean.to(images)) / encoder.std.to(images))
+
+        torch.testing.assert_close(encoder(images), expected)
+        torch.testing.assert_close(encoder.encode_image(images[0]), expected)
+
+    def test_explicit_layers_reject_skipped_timm_head(self) -> None:
+        """Test head-only layers raise instead of executing the classifier head."""
+        import timm  # noqa: PLC0415
+
+        backbone = timm.create_model("resnet18", pretrained=False)
+        encoder = VisionEncoder(backbone, layers=["global_pool"], normalize=False)
+        images = torch.rand(1, 3, 32, 32)
+
+        with pytest.raises(ValueError, match="not executed.*global_pool"):
+            encoder(images)
+
+    @pytest.mark.parametrize("aggregate", ["none", "concat"])
+    def test_features_follow_requested_layer_order(self, aggregate: str) -> None:
+        """Test dictionaries and concatenation follow selection rather than execution order."""
+        encoder = VisionEncoder(
+            nn.Sequential(nn.Identity(), nn.Sigmoid()),
+            layers=["1", "0"],
+            aggregate=aggregate,
+            normalize=False,
+        )
+        images = torch.rand(1, 3, 4, 4)
+
+        features = encoder(images)
+
+        if aggregate == "none":
+            assert list(features) == ["1", "0"]
+            torch.testing.assert_close(features["1"], images.sigmoid())
+            torch.testing.assert_close(features["0"], images)
+        else:
+            torch.testing.assert_close(features, torch.cat([images.sigmoid(), images], dim=1))
 
     @pytest.mark.parametrize("pooling", ["none", "avg", "max"])
     def test_feature_dims_uses_configured_input_size(self, pooling: str) -> None:
