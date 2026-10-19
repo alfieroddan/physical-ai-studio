@@ -153,6 +153,8 @@ class LeRobotDataModule(DataModule):
         batch_encoding_size: int = 1,
         data_format: Literal["physicalai", "lerobot"] | DataFormat = "physicalai",
         goal_source: GoalSource | None = None,
+        state_columns: list[str] | None = None,
+        action_columns: list[str] | None = None,
         # Eval-loss validation
         val_split: float = 0.0,
         val_split_seed: int | None = None,
@@ -210,6 +212,14 @@ class LeRobotDataModule(DataModule):
                 uses the last frame of each task's first episode, ``"episode"`` each episode's own
                 last frame, and ``"task_sample"`` the last frame of a random episode of the same
                 task. Requires ``data_format="physicalai"``. Defaults to `None` (no goals).
+            state_columns (list[str] | None, optional): Ordered LeRobot sub-column keys to concatenate
+                into a single ``observation.state`` tensor (e.g. DROID's
+                ``["observation.state.joint_positions", "observation.state.gripper_position"]``). Only used
+                with ``data_format="physicalai"``. Defaults to `None` (no combining).
+            action_columns (list[str] | None, optional): Ordered LeRobot sub-column keys to concatenate
+                into a single ``action`` tensor (e.g. DROID's
+                ``["action.joint_position", "action.gripper_position"]``). Only used with
+                ``data_format="physicalai"``. Defaults to `None` (no combining).
             val_split (float, optional): Fraction of episodes to hold out for eval-loss
                 validation (e.g. ``0.1`` for 10%). The last N episodes are used as the
                 validation set. Must be in ``[0, 1)``. ``0`` disables eval-loss validation.
@@ -272,6 +282,8 @@ class LeRobotDataModule(DataModule):
 
         # Convert `data_format` to enum if it's a string
         self.data_format = DataFormat(data_format)
+        self._state_columns = state_columns
+        self._action_columns = action_columns
 
         goal_dataset = dataset if isinstance(dataset, LeRobotGoalConditionedDataset) else None
         if (goal_source is not None or goal_dataset is not None) and self.data_format != DataFormat.PHYSICALAI:
@@ -319,7 +331,13 @@ class LeRobotDataModule(DataModule):
                 raise TypeError(msg)
 
             train_dataset = (
-                _LeRobotDatasetAdapter.from_lerobot(dataset) if data_format == DataFormat.PHYSICALAI else dataset
+                _LeRobotDatasetAdapter.from_lerobot(
+                    dataset,
+                    state_columns=state_columns,
+                    action_columns=action_columns,
+                )
+                if data_format == DataFormat.PHYSICALAI
+                else dataset
             )
 
         elif repo_id is not None:
@@ -336,6 +354,8 @@ class LeRobotDataModule(DataModule):
                     download_videos=download_videos,
                     video_backend=video_backend,
                     batch_encoding_size=batch_encoding_size,
+                    state_columns=state_columns,
+                    action_columns=action_columns,
                 )
                 if val_episodes is not None:
                     val_eval_dataset = _LeRobotDatasetAdapter(
@@ -349,6 +369,8 @@ class LeRobotDataModule(DataModule):
                         download_videos=download_videos,
                         video_backend=video_backend,
                         batch_encoding_size=batch_encoding_size,
+                        state_columns=state_columns,
+                        action_columns=action_columns,
                     )
             else:
                 if LeRobotDataset is None:
