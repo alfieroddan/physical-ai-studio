@@ -15,14 +15,20 @@ from physicalai.gyms import GoalConditionedGym, Gym
 class FakeGym(Gym):
     """Gym returning batched observations with a task description and configurable cameras."""
 
-    def __init__(self, images: dict[str, torch.Tensor] | torch.Tensor, batch_size: int = 1, task: str = "task") -> None:
+    def __init__(
+        self,
+        images: dict[str, torch.Tensor] | torch.Tensor,
+        batch_size: int = 1,
+        task: str | list[str] = "task",
+    ) -> None:
         self.images = images
         self.batch_size = batch_size
         self.task_description = task
         self.extra_attribute = "forwarded"
 
     def _observation(self) -> Observation:
-        return Observation(images=self.images, state=torch.zeros(self.batch_size, 2), task=[self.task_description])
+        task = self.task_description if isinstance(self.task_description, list) else [self.task_description]
+        return Observation(images=self.images, state=torch.zeros(self.batch_size, 2), task=task)
 
     def reset(self, *, seed=None, episode_index=0, **reset_kwargs):
         return self._observation(), {"seed": seed}
@@ -58,6 +64,13 @@ class TaskGoals(GoalConditionedDataset):
         return self.goal_images
 
 
+class PerTaskGoals:
+    """Canonical image value derived from a task name's final character."""
+
+    def get_task_goal(self, task: str) -> ObservationValue:
+        return {"top": _image(float(task[-1]))}
+
+
 def _image(value: float = 1.0) -> torch.Tensor:
     return torch.full((3, 2, 2), value)
 
@@ -80,13 +93,13 @@ class TestGoalConditionedGym:
 
     def test_goal_looked_up_once_per_episode_by_task(self):
         gym = _gym({"top": torch.zeros(1, 3, 2, 2)}, {"top": _image()})
-        gym.dataset.lookups.clear()  # construction checks the task once
+        gym.goals.lookups.clear()  # construction checks the task once
 
         gym.reset()
         gym.step(torch.zeros(2))
         gym.step(torch.zeros(2))
 
-        assert gym.dataset.lookups == ["task"]
+        assert gym.goals.lookups == ["task"]
 
     def test_unknown_task_fails_at_construction(self):
         with pytest.raises(KeyError, match="other"):
@@ -109,6 +122,37 @@ class TestGoalConditionedGym:
 
         assert gym.extra_attribute == "forwarded"
         assert gym.sample_action().shape == (2,)
+
+    def test_rejects_heterogeneous_batched_tasks(self):
+        gym = GoalConditionedGym(
+            FakeGym(
+                {"top": torch.zeros(3, 3, 2, 2)},
+                batch_size=3,
+                task=["task1", "task2", "task3"],
+            ),
+            PerTaskGoals(),
+        )
+
+        with pytest.raises(ValueError, match="same task"):
+            gym.reset()
+
+    def test_rejects_wrong_task_batch_length(self):
+        gym = GoalConditionedGym(
+            FakeGym({"top": torch.zeros(3, 3, 2, 2)}, batch_size=3, task=["task1", "task2"]),
+            PerTaskGoals(),
+        )
+
+        with pytest.raises(ValueError, match="Expected one task description or 3"):
+            gym.reset()
+
+    def test_attached_goal_does_not_mutate_store_or_next_reset(self):
+        gym = _gym({"top": torch.zeros(1, 3, 2, 2)}, {"top": _image()})
+        first, _ = gym.reset()
+        first.goal_images["top"].zero_()
+
+        second, _ = gym.reset()
+
+        assert torch.equal(second.goal_images["top"], _image().unsqueeze(0))
 
 
 class TestCameraMatching:

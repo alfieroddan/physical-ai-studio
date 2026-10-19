@@ -3,18 +3,22 @@
 A wrapper that attaches the goal for the gym's current task to every observation.
 
 On every `reset()` the gym's task description (`Observation.task`) is looked up in a
-goal-conditioned dataset, and that task's fixed goal is attached to every observation
+goal-conditioned dataset, and that task's canonical goal is attached to every observation
 from `reset()` and `step()`, batched and laid out like the gym's own images. Everything
 else is forwarded to the wrapped gym.
+
+A single task description is broadcast across the observation batch. If a sequence is
+provided, every item must describe the same task. Attached goal tensors are independent,
+contiguous copies and cannot mutate the canonical goal.
 
 ```mermaid
 classDiagram
     class GoalConditionedGym {
         + gym : Gym
-        + dataset : GoalConditionedDataset
+        + goals : TaskGoalStore
         + camera_map : dict[str, str]
         --
-        + __init__(gym: Gym, dataset: GoalConditionedDataset, camera_map: dict|None)
+        + __init__(gym: Gym, goals: TaskGoalStore, camera_map: dict|None)
         + get_goal(observation) ObservationValue
         + reset(seed: int|None, **kwargs) Observation, dict|list[dict]
         + step(action) Observation, float|list[float], bool|list[bool], bool|list[bool], dict|list[dict]
@@ -25,7 +29,7 @@ classDiagram
     }
 
     GoalConditionedGym --> Gym : wraps
-    GoalConditionedGym --> GoalConditionedDataset : goal per task
+    GoalConditionedGym --> TaskGoalStore : goal per task
 ```
 
 Example:

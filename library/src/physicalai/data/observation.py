@@ -15,6 +15,8 @@ import torch
 type NormalizationValue = float | list[float] | list[list[float]] | list[list[list[float]]] | None
 # A single tensor, or a dict of named tensors (e.g. one per camera).
 type ObservationValue = dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None
+# A task may be text for language-conditioned policies/gyms or an encoded tensor/array.
+type TaskValue = str | list[str] | tuple[str, ...] | torch.Tensor | np.ndarray | None
 
 
 @dataclass
@@ -57,7 +59,7 @@ class Observation:
 
     # Core Observation
     action: ObservationValue = None
-    task: ObservationValue = None
+    task: TaskValue = None
     state: ObservationValue = None
     images: ObservationValue = None
 

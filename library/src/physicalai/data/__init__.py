@@ -5,7 +5,7 @@
 
 from .datamodules import DataModule
 from .dataset import Dataset
-from .goal import GoalConditionedDataset
+from .goal import GoalConditionedDataset, TaskGoalStore
 from .lerobot import LeRobotDataModule
 from .observation import (
     Feature,
@@ -14,6 +14,7 @@ from .observation import (
     NormalizationValue,
     Observation,
     ObservationValue,
+    TaskValue,
 )
 
 __all__ = [
@@ -27,4 +28,6 @@ __all__ = [
     "NormalizationValue",
     "Observation",
     "ObservationValue",
+    "TaskGoalStore",
+    "TaskValue",
 ]

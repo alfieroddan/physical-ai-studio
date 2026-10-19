@@ -11,12 +11,24 @@ subclasses decide where the goal comes from.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from physicalai.data.dataset import Dataset
 
 if TYPE_CHECKING:
     from physicalai.data.observation import Feature, Observation, ObservationValue
+
+
+class TaskGoalStore(Protocol):
+    """Provides the canonical goal images for a task description.
+
+    This is the narrow interface `physicalai.gyms.GoalConditionedGym` needs: given a task
+    description (e.g. ``Observation.task`` from a gym), return its fixed rollout goal.
+    """
+
+    def get_task_goal(self, task: str) -> ObservationValue:
+        """Return the canonical goal images for a task description."""
+        ...
 
 
 class GoalConditionedDataset(Dataset):
@@ -93,4 +105,4 @@ class GoalConditionedDataset(Dataset):
         self.dataset.delta_indices = indices
 
 
-__all__ = ["GoalConditionedDataset"]
+__all__ = ["GoalConditionedDataset", "TaskGoalStore"]

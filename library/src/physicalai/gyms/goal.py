@@ -17,7 +17,7 @@ import torch
 from .base import Gym
 
 if TYPE_CHECKING:
-    from physicalai.data.goal import GoalConditionedDataset
+    from physicalai.data.goal import TaskGoalStore
     from physicalai.data.observation import Observation, ObservationValue
 
     from .types import SingleOrBatch
@@ -32,14 +32,46 @@ def _device(obs: Observation) -> torch.device:
     return torch.device("cpu")
 
 
-def _batch(value: ObservationValue, batch_size: int, device: torch.device) -> ObservationValue:
-    def batch(tensor: Any) -> torch.Tensor:  # noqa: ANN401
-        tensor = torch.as_tensor(tensor, device=device)
-        return tensor.unsqueeze(0).expand(batch_size, *tensor.shape)
+def _task_description(task: Any, batch_size: int) -> str:  # noqa: ANN401
+    """Return the single task represented by a rollout batch.
+
+    Raises:
+        ValueError: If the task is missing, malformed, or differs within the batch.
+    """
+    if isinstance(task, str):
+        return task
+    if isinstance(task, (list, tuple)) and task and all(isinstance(item, str) for item in task):
+        if len(task) not in {1, batch_size}:
+            msg = f"Expected one task description or {batch_size} repeated descriptions, got {len(task)}."
+            raise ValueError(msg)
+        if len(set(task)) != 1:
+            msg = "GoalConditionedGym requires every environment in a batch to use the same task."
+            raise ValueError(msg)
+        return task[0]
+    msg = "GoalConditionedGym needs Observation.task to contain one task description."
+    raise ValueError(msg)
+
+
+def _batch_goal(value: ObservationValue, batch_size: int, device: torch.device) -> ObservationValue:
+    """Broadcast an unbatched goal into independent contiguous batch tensors.
+
+    Returns:
+        Goal images with a leading batch dimension.
+    """
+
+    def batch(image: Any) -> torch.Tensor:  # noqa: ANN401
+        tensor = torch.as_tensor(image, device=device)
+        return tensor.unsqueeze(0).expand(batch_size, *tensor.shape).clone().contiguous()
 
     if isinstance(value, dict):
-        return {k: batch(v) for k, v in value.items()}
+        return {key: batch(image) for key, image in value.items()}
     return None if value is None else batch(value)
+
+
+def _clone_goal(value: ObservationValue, device: torch.device) -> ObservationValue:
+    if isinstance(value, dict):
+        return {key: torch.as_tensor(item, device=device).clone().contiguous() for key, item in value.items()}
+    return None if value is None else torch.as_tensor(value, device=device).clone().contiguous()
 
 
 def _match_cameras(goal: ObservationValue, images: ObservationValue, camera_map: dict[str, str]) -> ObservationValue:
@@ -75,9 +107,10 @@ class GoalConditionedGym(Gym):
     """Gym whose observations carry the goal for its current task.
 
     On every ``reset`` the gym's task description (``Observation.task``) is looked up in the
-    goal dataset, and that task's fixed goal is attached to every observation of the episode,
+    goal store, and that task's canonical goal is attached to every observation of the episode,
     batched and laid out like the gym's own images. Works for single-task gyms (PushT) and
-    multi-task ones (LIBERO) alike. Everything else is forwarded to the wrapped gym.
+    multi-task suites (such as LIBERO) alike. A vectorized batch must contain one task.
+    Everything else is forwarded to the wrapped gym.
 
     Examples:
         >>> dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"))
@@ -87,38 +120,30 @@ class GoalConditionedGym(Gym):
         torch.Size([1, 3, 256, 256])
     """
 
-    def __init__(self, gym: Gym, dataset: GoalConditionedDataset, camera_map: dict[str, str] | None = None) -> None:
+    def __init__(self, gym: Gym, goals: TaskGoalStore, camera_map: dict[str, str] | None = None) -> None:
         """Initialize the wrapper.
 
         Args:
             gym: Gym to wrap. Its observations must carry the task description in ``task``.
-            dataset: Goal dataset the policy is trained on; provides each task's goal.
+            goals: Goal-conditioned dataset or other provider of canonical task goals.
             camera_map: Renames goal cameras to gym cameras, e.g. ``{"image": "top"}``. Only
                 needed when names differ and there is more than one camera.
         """
         self.gym = gym
-        self.dataset = dataset
+        self.goals = goals
         self.camera_map = camera_map or {}
         self._goal: ObservationValue = None
 
-        # Fail early if the gym already knows a task the dataset does not have.
+        # Fail early if the gym already knows a task the store does not have.
         description = getattr(gym, "task_description", None)
         if isinstance(description, str) and description:
-            dataset.get_task_goal(description)
+            goals.get_task_goal(description)
 
     def get_goal(self, observation: Observation) -> ObservationValue:
-        """Return the goal images for the task in ``observation.task``.
-
-        Raises:
-            ValueError: If the observation carries no task description.
-        """
-        task = observation.task
-        if isinstance(task, (list, tuple)) and task:
-            task = task[0]
-        if not isinstance(task, str):
-            msg = "GoalConditionedGym needs the gym to put its task description in Observation.task."
-            raise ValueError(msg)  # noqa: TRY004
-        return self.dataset.get_task_goal(task)
+        """Return independent batched goal images for ``observation``'s task."""
+        task = _task_description(observation.task, observation.batch_size)
+        goal = _match_cameras(self.goals.get_task_goal(task), observation.images, self.camera_map)
+        return _batch_goal(goal, observation.batch_size, _device(observation))
 
     def reset(
         self,
@@ -157,8 +182,7 @@ class GoalConditionedGym(Gym):
     def _attach(self, obs: Observation) -> Observation:
         if self._goal is None:
             return obs
-        batch_size, device = obs.batch_size, _device(obs)
-        obs.goal_images = _batch(_match_cameras(self._goal, obs.images, self.camera_map), batch_size, device)
+        obs.goal_images = _clone_goal(self._goal, _device(obs))
         return obs
 
     def render(self, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
