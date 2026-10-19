@@ -78,6 +78,8 @@ class VisionEncoder(nn.Module):
         std: Per-channel normalization std. Same defaults as ``mean``.
         num_prefix_tokens: Number of CLS/register tokens before the patch tokens.
             Defaults to ``model.num_prefix_tokens`` if available, else 0.
+        input_size: Dummy image shape (C, H, W) used to infer ``feature_dims``.
+            Defaults to (3, 224, 224).
         **model_kwargs: Extra arguments passed to ``timm.create_model``.
 
     Raises:
@@ -97,6 +99,7 @@ class VisionEncoder(nn.Module):
         mean: Sequence[float] | None = None,
         std: Sequence[float] | None = None,
         num_prefix_tokens: int | None = None,
+        input_size: tuple[int, int, int] = (3, 224, 224),
         **model_kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Initialize the vision encoder.
@@ -120,6 +123,7 @@ class VisionEncoder(nn.Module):
         self.aggregate = aggregate
         self.frozen = frozen
         self.normalize = normalize
+        self.input_size = input_size
         self.num_prefix_tokens = (
             num_prefix_tokens if num_prefix_tokens is not None else getattr(self.model, "num_prefix_tokens", 0)
         )
@@ -244,8 +248,13 @@ class VisionEncoder(nn.Module):
         Computed once with a dummy forward pass.
         """
         if self._feature_dims is None:
-            param = next(self.model.parameters())
-            dummy = torch.zeros(1, 3, 224, 224, device=param.device, dtype=param.dtype)
+            param = next(self.model.parameters(), None)
+            dummy = torch.zeros(
+                1,
+                *self.input_size,
+                device=param.device if param is not None else "cpu",
+                dtype=param.dtype if param is not None else torch.float32,
+            )
             with torch.no_grad():
                 features = self._extract(dummy)
             self._feature_dims = {name: _channels(self._pool(feature)) for name, feature in features.items()}
@@ -273,9 +282,16 @@ class VisionEncoder(nn.Module):
             Features for the batch of images, as returned by ``forward``.
         """
         images = image if isinstance(image, list) else [image]
-        param = next(self.model.parameters())
+        reference = next(self.model.parameters(), None)
+        if reference is None:
+            reference = next(self.model.buffers(), None)
         batch = torch.stack([_to_chw_tensor(img, channels_last=channels_last, size=size) for img in images])
-        return self(batch.to(device=param.device, dtype=param.dtype))
+        return self(
+            batch.to(
+                device=reference.device if reference is not None else "cpu",
+                dtype=reference.dtype if reference is not None else torch.float32,
+            ),
+        )
 
 
 def _to_chw_tensor(

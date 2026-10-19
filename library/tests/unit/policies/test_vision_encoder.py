@@ -87,6 +87,33 @@ class TestTransformer:
 class TestModule:
     """Tests for shared module behaviour."""
 
+    def test_feature_dims_uses_configured_input_size(self) -> None:
+        """Test the dummy input uses the explicitly configured input size."""
+        backbone = nn.Sequential(nn.Flatten(), nn.Linear(3 * 32 * 48, 4))
+        encoder = VisionEncoder(backbone, input_size=(3, 32, 48))
+
+        assert encoder.feature_dims == {"output": 4}
+
+    def test_feature_dims_without_parameters(self) -> None:
+        """Test parameter-less backbones can infer feature dimensions."""
+        encoder = VisionEncoder(nn.Identity())
+
+        assert encoder.feature_dims == {"output": 3}
+
+    @pytest.mark.parametrize("buffer_dtype", [None, torch.float64])
+    def test_encode_image_without_parameters(self, buffer_dtype: torch.dtype | None) -> None:
+        """Test parameter-less backbones use a buffer or CPU/float32 defaults."""
+        backbone = nn.Identity()
+        if buffer_dtype is not None:
+            backbone.register_buffer("reference", torch.zeros(1, dtype=buffer_dtype))
+        encoder = VisionEncoder(backbone, normalize=False)
+        image = torch.rand(3, 32, 32)
+
+        features = encoder.encode_image(image)
+
+        expected = image.unsqueeze(0).to(dtype=buffer_dtype if buffer_dtype is not None else torch.float32)
+        torch.testing.assert_close(features, expected)
+
     def test_encode_image_formats(self, resnet: nn.Module) -> None:
         """Test PIL images, HWC arrays and CHW tensors give the same features."""
         encoder = VisionEncoder(resnet, layers=["layer4"], pooling="avg")
