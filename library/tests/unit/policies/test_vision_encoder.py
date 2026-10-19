@@ -115,6 +115,35 @@ class TestModule:
 
         assert encoder.feature_dims == {"output": 3}
 
+    def test_feature_dims_preserves_training_modes_and_buffers(self, resnet: nn.Module) -> None:
+        """Test small-input probing leaves BatchNorm statistics and mixed modes unchanged."""
+        encoder = VisionEncoder(resnet, layers=["layer4"], frozen=False, input_size=(3, 32, 32))
+        resnet.layer1.eval()
+        training_modes = [module.training for module in resnet.modules()]
+        buffers = {name: buffer.clone() for name, buffer in resnet.named_buffers()}
+
+        assert encoder.feature_dims == {"layer4": 512}
+
+        assert [module.training for module in resnet.modules()] == training_modes
+        for name, buffer in resnet.named_buffers():
+            torch.testing.assert_close(buffer, buffers[name])
+
+    def test_feature_dims_restores_training_modes_on_error(self) -> None:
+        """Test a failing dummy forward restores every submodule's original mode."""
+        backbone = nn.Sequential(nn.BatchNorm2d(3), nn.Flatten(), nn.Linear(1, 4))
+        encoder = VisionEncoder(backbone, frozen=False, input_size=(3, 32, 32))
+        backbone[1].eval()
+        training_modes = [module.training for module in backbone.modules()]
+        buffers = {name: buffer.clone() for name, buffer in backbone.named_buffers()}
+
+        with pytest.raises(RuntimeError, match="mat1 and mat2"):
+            _ = encoder.feature_dims
+
+        assert [module.training for module in backbone.modules()] == training_modes
+        for name, buffer in backbone.named_buffers():
+            torch.testing.assert_close(buffer, buffers[name])
+        assert encoder._feature_dims is None
+
     @pytest.mark.parametrize("buffer_dtype", [None, torch.float64])
     def test_encode_image_without_parameters(self, buffer_dtype: torch.dtype | None) -> None:
         """Test parameter-less backbones use a buffer or CPU/float32 defaults."""

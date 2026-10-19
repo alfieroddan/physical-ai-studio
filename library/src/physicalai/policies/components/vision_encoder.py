@@ -250,7 +250,7 @@ class VisionEncoder(nn.Module):
     def feature_dims(self) -> dict[str, int]:
         """Channel/embedding dimension of each layer's output, keyed by layer name.
 
-        Computed once with a dummy forward pass.
+        Computed once with an eval-mode dummy forward pass, preserving training modes.
         """
         if self._feature_dims is None:
             param = next(self.model.parameters(), None)
@@ -260,8 +260,14 @@ class VisionEncoder(nn.Module):
                 device=param.device if param is not None else "cpu",
                 dtype=param.dtype if param is not None else torch.float32,
             )
-            with torch.no_grad():
-                features = self._extract(dummy)
+            training_modes = [(module, module.training) for module in self.model.modules()]
+            try:
+                self.model.eval()
+                with torch.no_grad():
+                    features = self._extract(dummy)
+            finally:
+                for module, training in training_modes:
+                    module.training = training
             self._feature_dims = {name: _channels(self._pool(feature)) for name, feature in features.items()}
         return self._feature_dims
 
