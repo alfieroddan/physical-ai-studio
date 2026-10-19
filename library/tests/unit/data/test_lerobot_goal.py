@@ -43,17 +43,26 @@ class FakeLeRobotDataset:
     reveals which frame it was taken from.
     """
 
-    def __init__(self, repo_id=None, root=None, episodes=None, **kwargs):
+    def __init__(self, repo_id=None, root=None, episodes=None, image_dtype=torch.float32, image_value=None, **kwargs):
         self.repo_id = repo_id
         self.root = root
         self.episodes = episodes
         self.delta_indices = None
-        selected = episodes if episodes is not None else range(len(EPISODE_TASKS))
+        self.delta_timestamps = kwargs.get("delta_timestamps")
+        self.image_dtype = image_dtype
+        self.image_value = image_value
+        self.image_reads = 0
+        selected = sorted(episodes) if episodes is not None else range(len(EPISODE_TASKS))
         self._frames = [ep * EPISODE_LENGTH + i for ep in selected for i in range(EPISODE_LENGTH)]
         self.meta = SimpleNamespace(
             tasks=TASK_DESCRIPTIONS,
             episodes=[
-                {"episode_index": ep, "dataset_to_index": (ep + 1) * EPISODE_LENGTH} for ep in range(len(EPISODE_TASKS))
+                {
+                    "episode_index": ep,
+                    "dataset_from_index": ep * EPISODE_LENGTH,
+                    "dataset_to_index": (ep + 1) * EPISODE_LENGTH,
+                }
+                for ep in range(len(EPISODE_TASKS))
             ],
             features={
                 "observation.images.top": {"shape": (3, 2, 2), "dtype": "video", "names": ["c", "h", "w"]},
@@ -74,13 +83,20 @@ class FakeLeRobotDataset:
         return len(self._frames)
 
     def get_raw_item(self, idx: int) -> dict:
-        return {k: v for k, v in self[idx].items() if not k.startswith("observation.images")}
-
-    def __getitem__(self, idx: int) -> dict:
         frame = self._frames[idx]
         episode = frame // EPISODE_LENGTH
         return {
-            "observation.images.top": torch.full((3, 2, 2), frame / 255),
+            "episode_index": torch.tensor(episode),
+            "task_index": torch.tensor(0 if EPISODE_TASKS[episode] == "a" else 1),
+        }
+
+    def __getitem__(self, idx: int) -> dict:
+        self.image_reads += 1
+        frame = self._frames[idx]
+        episode = frame // EPISODE_LENGTH
+        pixel = frame / 255 if self.image_value is None else self.image_value
+        return {
+            "observation.images.top": torch.full((3, 2, 2), pixel, dtype=self.image_dtype),
             "observation.state": torch.full((2,), float(frame)),
             "action": torch.zeros(2),
             "episode_index": torch.tensor(episode),
@@ -108,50 +124,113 @@ class TestLeRobotGoalProvider:
             goal = goals.get(episode_index=episode, task_index=0)
             assert torch.equal(goal["top"], torch.full((3, 2, 2), _last_frame(episode) / 255))
 
-    def test_task_source_uses_first_episode_of_task(self):
-        goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="task")
+    def test_filtered_dataset_uses_its_own_terminal_frames(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(episodes=[1, 3]))
 
-        assert _frame(goals.get(episode_index=1, task_index=0)) == _last_frame(0)
-        assert _frame(goals.get(episode_index=3, task_index=1)) == _last_frame(2)
+        assert _frame(goals.get(episode_index=1, task_index=0)) == _last_frame(1)
+        assert _frame(goals.get(episode_index=3, task_index=1)) == _last_frame(3)
 
-    def test_task_source_only_decodes_first_episodes(self):
-        goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="task")
+    def test_custom_offsets_cover_full_dataset(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=[0, 1, 2, 0])
 
-        assert goals._images["top"].shape[0] == 2
+        assert _frame(goals.get(episode_index=0, task_index=0)) == 0
+        assert _frame(goals.get(episode_index=1, task_index=0)) == 4
+        assert _frame(goals.get(episode_index=2, task_index=1)) == 8
+        assert _frame(goals.get(episode_index=3, task_index=1)) == 9
 
-    def test_task_sample_draws_from_every_episode_of_the_task(self):
-        goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="task_sample")
-        torch.manual_seed(0)
+    def test_negative_one_selects_last_frame(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=[-1, -1, -1, -1])
 
-        drawn = {int(_frame(goals.get(episode_index=3, task_index=1))) for _ in range(50)}
+        for episode in range(len(EPISODE_TASKS)):
+            assert _frame(goals.get(episode_index=episode, task_index=0)) == _last_frame(episode)
 
-        assert drawn == {_last_frame(2), _last_frame(3)}
+    def test_custom_offsets_cover_filtered_split(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(episodes=[1, 3]), goal_indices=[1, 0])
 
-    @pytest.mark.parametrize("source", ["task", "episode", "task_sample"])
-    def test_task_goal_is_first_episode_in_every_mode(self, source):
-        goals = LeRobotGoalProvider(FakeLeRobotDataset(), source=source)
+        assert _frame(goals.get(episode_index=1, task_index=0)) == 4
+        assert _frame(goals.get(episode_index=3, task_index=1)) == 9
 
-        assert _frame(goals.get_task_goal(task_index=1)) == _last_frame(2)
+    def test_custom_offsets_load_from_json_file(self, tmp_path):
+        index_file = tmp_path / "goal_indices.json"
+        index_file.write_text("[0, 1, 2, 0]", encoding="utf-8")
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=index_file)
+
+        assert _frame(goals.get(episode_index=2, task_index=1)) == 8
+
+    def test_json_file_must_contain_integer_list(self, tmp_path):
+        index_file = tmp_path / "goal_indices.json"
+        index_file.write_text('{"0": 1}', encoding="utf-8")
+
+        with pytest.raises(ValueError, match="JSON array or list of integers"):
+            LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=index_file)
+
+    def test_invalid_custom_offset_raises(self):
+        with pytest.raises(ValueError, match="outside episode 3"):
+            LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=[0, 1, 2, EPISODE_LENGTH])
+
+        with pytest.raises(ValueError, match="outside episode 3"):
+            LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=[0, 1, 2, -EPISODE_LENGTH - 1])
+
+    def test_custom_offset_count_must_match_dataset_or_split(self):
+        with pytest.raises(ValueError, match="Expected 4 goal indices"):
+            LeRobotGoalProvider(FakeLeRobotDataset(), goal_indices=[0])
+
+    def test_goal_images_are_decoded_lazily(self):
+        dataset = FakeLeRobotDataset()
+        goals = LeRobotGoalProvider(dataset)
+
+        assert dataset.image_reads == 0
+        goals.get(episode_index=0, task_index=0)
+        assert dataset.image_reads == 1
+
+    def test_goal_images_use_the_supplied_dataset_instance(self):
+        dataset = FakeLeRobotDataset(episodes=[1, 3])
+
+        goals = LeRobotGoalProvider.from_dataset(dataset)
+
+        assert goals._dataset is dataset
+        assert dataset.episodes == [1, 3]
+
+    def test_temporal_windows_are_rejected(self):
+        with pytest.raises(ValueError, match="delta_timestamps=None"):
+            LeRobotGoalProvider(FakeLeRobotDataset(delta_timestamps={"action": [0.0, 0.1]}))
+
+    def test_uint8_images_are_not_rescaled_as_float(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(image_dtype=torch.uint8, image_value=255))
+
+        assert torch.equal(goals.get(episode_index=0, task_index=0)["top"], torch.ones((3, 2, 2)))
+
+    def test_goal_cache_is_bounded(self, monkeypatch):
+        monkeypatch.setattr("physicalai.data.lerobot.goal._MAX_GOAL_CACHE_BYTES", 12)
+        goals = LeRobotGoalProvider(FakeLeRobotDataset())
+
+        goals.get(episode_index=0, task_index=0)
+        goals.get(episode_index=1, task_index=0)
+
+        assert list(goals._goal_cache) == [1]
+        assert goals._goal_cache_bytes == 12
+
+    def test_task_goal_uses_first_selected_episode(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset(episodes=[1, 3]))
+
+        assert _frame(goals.get_task_goal(task_index=0)) == _last_frame(1)
 
     def test_images_roundtrip_through_uint8(self):
         goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="episode")
 
-        assert goals._images["top"].dtype == torch.uint8
+        assert not goals._goal_cache
         assert goals.get(episode_index=0, task_index=0)["top"].dtype == torch.float32
-
-    def test_filtered_dataset_raises(self):
-        with pytest.raises(ValueError, match="unfiltered"):
-            LeRobotGoalProvider(FakeLeRobotDataset(episodes=[0, 1]))
+        assert goals._goal_cache[0]["top"].dtype == torch.uint8
 
     def test_unknown_source_raises(self):
-        with pytest.raises(ValueError, match="Unknown goal source"):
-            LeRobotGoalProvider(FakeLeRobotDataset(), source="future")  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match="expected 'episode'"):
+            LeRobotGoalProvider(FakeLeRobotDataset(), source="task")  # type: ignore[arg-type]
 
     def test_unknown_task_raises(self):
-        goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="task")
+        goals = LeRobotGoalProvider(FakeLeRobotDataset())
 
         with pytest.raises(KeyError, match="No goal for task index 7"):
-            goals.get(episode_index=0, task_index=7)
+            goals.get_task_goal(task_index=7)
 
     def test_unknown_episode_raises(self):
         goals = LeRobotGoalProvider(FakeLeRobotDataset(), source="episode")
@@ -183,15 +262,14 @@ class TestTaskLookup:
 
 @pytest.mark.usefixtures("fake_lerobot")
 class TestLeRobotGoalConditionedDataset:
-    def test_goal_comes_from_outside_the_split(self):
-        # Episode 3 shares task "b" with episode 2, which is not in this split.
-        dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[3]), goal_source="task")
+    def test_filtered_wrapper_uses_only_its_own_episode_goal(self):
+        dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[3]))
 
         obs = dataset[0]
 
         assert obs.episode_index == 3
-        assert _frame(obs.goal_images) == _last_frame(2)
-        assert torch.equal(obs.goal_images["top"], torch.full((3, 2, 2), _last_frame(2) / 255))
+        assert _frame(obs.goal_images) == _last_frame(3)
+        assert torch.equal(obs.goal_images["top"], torch.full((3, 2, 2), _last_frame(3) / 255))
 
     def test_wraps_adapter(self):
         adapter = _LeRobotDatasetAdapter.from_lerobot(FakeLeRobotDataset(episodes=[1]))
@@ -211,12 +289,18 @@ class TestLeRobotGoalConditionedDataset:
         assert dataset.dataset._lerobot_dataset.delta_indices == {"action": [0, 1]}
 
     def test_shares_existing_goals(self):
-        train = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[0, 2]), goal_source="task")
+        train = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[0, 2]))
 
-        val = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[1]), goals=train.goals)
+        val = LeRobotGoalConditionedDataset(FakeLeRobotDataset(episodes=[2]), goals=train.goals)
 
         assert val.goals is train.goals
-        assert _frame(val[0].goal_images) == _last_frame(0)
+        assert _frame(val[0].goal_images) == _last_frame(2)
+
+    def test_rejects_goal_indices_with_existing_provider(self):
+        goals = LeRobotGoalProvider(FakeLeRobotDataset())
+
+        with pytest.raises(ValueError, match="Cannot provide both 'goals' and 'goal_indices'"):
+            LeRobotGoalConditionedDataset(FakeLeRobotDataset(), goals=goals, goal_indices=[0, 0, 0, 0])
 
 
 @pytest.mark.usefixtures("fake_lerobot")
@@ -228,10 +312,16 @@ class TestLeRobotDataModuleGoals:
         assert dm.train_dataset[0].goal_images is None
 
     def test_goal_source_wraps_dataset(self):
-        dm = LeRobotDataModule(repo_id="fake", episodes=[3], train_batch_size=2, goal_source="task")
+        dm = LeRobotDataModule(repo_id="fake", episodes=[3], train_batch_size=2, goal_source="episode")
 
         assert isinstance(dm.train_dataset, LeRobotGoalConditionedDataset)
-        assert _frame(dm.train_dataset[0].goal_images) == _last_frame(2)
+        assert _frame(dm.train_dataset[0].goal_images) == _last_frame(3)
+
+    def test_goal_indices_enable_goal_conditioning(self):
+        dm = LeRobotDataModule(repo_id="fake", episodes=[3], train_batch_size=2, goal_indices=[0, 1, 2, 1])
+
+        assert isinstance(dm.train_dataset, LeRobotGoalConditionedDataset)
+        assert _frame(dm.train_dataset[0].goal_images) == 10
 
     def test_accepts_wrapped_dataset(self):
         dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset(), goal_source="episode")
@@ -240,28 +330,42 @@ class TestLeRobotDataModuleGoals:
 
         assert dm.train_dataset is dataset
 
-    def test_val_split_shares_goals(self, monkeypatch):
+    def test_val_split_uses_split_local_goals(self, monkeypatch):
         monkeypatch.setattr("physicalai.data.lerobot.datamodule._read_total_episodes", lambda *_: 4)
         dm = LeRobotDataModule(
             repo_id="fake",
             train_batch_size=2,
             val_split=0.25,
             val_split_seed=0,
-            goal_source="task",
+            goal_source="episode",
         )
 
         assert isinstance(dm.val_eval_dataset, LeRobotGoalConditionedDataset)
-        assert dm.val_eval_dataset.goals is dm.train_dataset.goals
+        assert dm.val_eval_dataset.goals is not dm.train_dataset.goals
+        assert _frame(dm.train_dataset[0].goal_images) == _last_frame(0)
+        assert _frame(dm.val_eval_dataset[0].goal_images) == _last_frame(3)
+
+    def test_val_split_applies_full_dataset_goal_offsets(self, monkeypatch):
+        monkeypatch.setattr("physicalai.data.lerobot.datamodule._read_total_episodes", lambda *_: 4)
+        dm = LeRobotDataModule(
+            repo_id="fake",
+            train_batch_size=2,
+            val_split=0.25,
+            val_split_seed=0,
+            goal_indices=[0, 0, 0, 1],
+        )
+
+        assert _frame(dm.val_eval_dataset[0].goal_images) == 10
 
     def test_goal_source_with_wrapped_dataset_raises(self):
         dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset())
 
         with pytest.raises(ValueError, match="already carries goals"):
-            LeRobotDataModule(dataset=dataset, goal_source="task")
+            LeRobotDataModule(dataset=dataset, goal_source="episode")
 
     def test_lerobot_format_raises(self):
         with pytest.raises(ValueError, match="physicalai"):
-            LeRobotDataModule(repo_id="fake", data_format="lerobot", goal_source="task")
+            LeRobotDataModule(repo_id="fake", data_format="lerobot", goal_source="episode")
 
 
 @pytest.mark.usefixtures("fake_lerobot")
@@ -330,12 +434,12 @@ class FakeTaskGym(Gym):
 class TestGoalConditionedGymWithLeRobot:
     @pytest.mark.parametrize(("description", "task_episode"), [("task a", 0), ("Task B.", 2)])
     def test_goal_matches_gym_task(self, description, task_episode):
-        dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset(), goal_source="task_sample")
+        dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset())
         gym = GoalConditionedGym(FakeTaskGym(description), dataset)
 
         obs, _ = gym.reset(seed=0)
 
-        # Rollouts always use the task's fixed goal, whatever the training goal source.
+        # Rollouts use the first selected episode's goal for the gym task.
         assert _frame(obs.goal_images).tolist() == [_last_frame(task_episode)]
         assert obs.goal_images["top"].shape == (1, 3, 2, 2)
 

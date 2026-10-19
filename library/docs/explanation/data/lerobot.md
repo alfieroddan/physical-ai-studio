@@ -204,8 +204,13 @@ sample as `Observation.goal_images`:
 ```python test="skip" reason="requires physicalai install and downloads data"
 from physicalai.data.lerobot import LeRobotDataModule
 
-datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="task")
+datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="episode")
 ```
+
+Use `goal_indices` to select a frame offset within each episode. Offsets are
+zero-based, and negative offsets count from the end (`-1` is the last frame).
+The option accepts a list of per-episode offsets or a JSON file containing that
+list; if omitted, the last frame is used.
 
 > **Note:** Goal conditioning assumes the last frame of every episode shows the
 > task completed. Crop episodes that continue afterwards (e.g. cyclic recordings

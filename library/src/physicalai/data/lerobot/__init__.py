@@ -30,12 +30,13 @@ Examples:
 
 from .converters import DataFormat, FormatConverter
 from .datamodule import LeRobotDataModule
-from .goal import GoalSource, LeRobotGoalConditionedDataset, LeRobotGoalProvider
+from .goal import GoalIndices, GoalSource, LeRobotGoalConditionedDataset, LeRobotGoalProvider
 from .utils import get_delta_timestamps_from_policy
 
 __all__ = [
     "DataFormat",
     "FormatConverter",
+    "GoalIndices",
     "GoalSource",
     "LeRobotDataModule",
     "LeRobotGoalConditionedDataset",

@@ -36,7 +36,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from physicalai.data.lerobot import LeRobotGoalConditionedDataset
 from physicalai.gyms import GoalConditionedGym, LiberoGym
 
-dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"), goal_source="task")
+dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"))
 gym = GoalConditionedGym(LiberoGym(task_suite="libero_goal", task_id=3), dataset)
 
 obs, _ = gym.reset(seed=0)

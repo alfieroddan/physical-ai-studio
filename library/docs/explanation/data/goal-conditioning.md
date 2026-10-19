@@ -65,13 +65,10 @@ classDiagram
 
 ## Training
 
-`goal_source` picks which last frame is the goal:
-
-| `goal_source`   | Goal                                                 |
-| --------------- | ---------------------------------------------------- |
-| `"task"`        | The task's first episode. Same as Patch Policy.      |
-| `"episode"`     | The sample's own episode.                            |
-| `"task_sample"` | A random episode of the same task, drawn per sample. |
+Each sample uses the last frame of its own episode as the goal. The provider
+reads only from the wrapped dataset instance and only uses episodes selected for
+that instance. A held-out validation episode therefore cannot supply a training
+goal.
 
 ```python test="skip" reason="requires physicalai install and downloads data"
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -79,12 +76,31 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from physicalai.data.lerobot import LeRobotDataModule, LeRobotGoalConditionedDataset
 
 # Let the datamodule add goals
-datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="task")
+datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="episode")
 
 # Or wrap the dataset yourself
-dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"), goal_source="task")
+dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"))
 datamodule = LeRobotDataModule(dataset=dataset)
 ```
+
+By default, each selected episode uses its last frame. To choose a goal frame,
+pass frame offsets within each episode. Offsets are zero-based; negative offsets
+count from the end, so `-1` selects the last frame. Provide one offset per dataset
+episode, or one per selected episode when wrapping a filtered split:
+
+```python
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+dataset = LeRobotDataset("lerobot/libero")
+goal_indices = [-1] * dataset.meta.total_episodes
+datamodule = LeRobotDataModule(dataset=dataset, goal_indices=goal_indices)
+```
+
+The same list can be stored in a JSON file as a top-level array of integers and
+passed as `goal_indices="goal_indices.json"`. With `val_split`, use a full-dataset
+list so train and validation episodes map to their own offsets. Supplying
+`goal_indices` enables goal conditioning; otherwise it remains opt-in through
+`goal_source="episode"`.
 
 Goals need `data_format="physicalai"`.
 
@@ -98,7 +114,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from physicalai.data.lerobot import LeRobotGoalConditionedDataset
 from physicalai.gyms import GoalConditionedGym, LiberoGym
 
-dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"), goal_source="task")
+dataset = LeRobotGoalConditionedDataset(LeRobotDataset("lerobot/libero"))
 gym = GoalConditionedGym(LiberoGym(task_suite="libero_goal", task_id=3), dataset)
 
 obs, _ = gym.reset(seed=0)
@@ -106,7 +122,7 @@ obs.goal_images["image"].shape  # torch.Size([1, 3, 256, 256])
 ```
 
 - On each reset, the gym's task text is matched to a dataset task.
-- The gym always uses that task's `"task"` goal.
+- The gym uses the first selected episode's terminal frame for that task.
 - The goal matches the gym's batch size and camera names.
 - Use `camera_map` if camera names differ.
 
@@ -119,6 +135,8 @@ obs.goal_images["image"].shape  # torch.Size([1, 3, 256, 256])
 - **Gyms must report their task** in `Observation.task`. The text must match a
   dataset task.
 - **Policies must normalise goals.** Use the same statistics as `images`.
+- **Goal conditioning requires `delta_timestamps=None`.** A goal is one terminal
+  frame, not a temporal window.
 - **Check your goals.** Save a few `goal_images` and look at them before
   training.
 
