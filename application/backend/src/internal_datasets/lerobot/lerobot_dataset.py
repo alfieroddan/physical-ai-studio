@@ -1,5 +1,6 @@
 import copy
 import shutil
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,6 +10,7 @@ import numpy as np
 import torch
 from lerobot.datasets.dataset_tools import delete_episodes as lerobot_delete_episodes
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot.datasets.video_utils import VideoDecoderCache, decode_video_frames_torchcodec
 from lerobot.processor import make_default_processors
 from lerobot.processor.pipeline import RobotProcessorPipeline
 from lerobot.utils.constants import ACTION, OBS_STR
@@ -149,9 +151,25 @@ class InternalLeRobotDataset(DatasetClient):
         if not video_path.is_file():
             return None
 
-        image_key = video_key if video_key in self._dataset.meta.camera_keys else f"observation.images.{video_key}"
-        thumbnail_png = self._build_thumbnail_png_bytes(episode, image_key, width, height)
-        if thumbnail_png is None:
+        video_stat = video_path.stat()
+
+        # Only cache thumbnails which are at most 320x240
+        build_thumbnail = (
+            self._cached_thumbnail_png_bytes if width <= 320 and height <= 240 else self._build_thumbnail_png_bytes
+        )
+        try:
+            thumbnail_png = build_thumbnail(
+                str(video_path),
+                episode[f"videos/{video_key}/from_timestamp"],
+                width,
+                height,
+                video_stat.st_mtime_ns,
+                video_stat.st_size,
+                self._dataset.tolerance_s,
+            )
+        except (ImportError, RuntimeError, ValueError, OSError, cv2.error) as exc:
+            # Catch outside the PNG cache so transient decoding failures can be retried.
+            logger.warning("Could not build thumbnail from '{}': {}", video_path, exc)
             return None
 
         return thumbnail_png, video_path
@@ -261,6 +279,9 @@ class InternalLeRobotDataset(DatasetClient):
 
     def start_recording_mutation(self, fps: int, features: dict, robot_type: str) -> RecordingMutation:
         """Start recording mutation."""
+        # Fail before copying the dataset if PyAV has no usable video encoder.
+        self._resolved_streaming_encoding_settings_write()
+
         settings = get_settings()
         cache_dir = settings.cache_dir / str(uuid4())
 
@@ -391,30 +412,34 @@ class InternalLeRobotDataset(DatasetClient):
     def _get_episode_metadata_list(self) -> list[EpisodeMetadata]:
         return [episode for episode in self._dataset.meta.episodes if isinstance(episode, dict)]
 
-    def _build_thumbnail_png_bytes(self, episode: dict, image_key: str, width: int, height: int) -> bytes | None:
-        if image_key not in self._dataset.meta.camera_keys:
-            logger.warning("Unknown thumbnail camera key '{}'", image_key)
-            return None
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _cached_thumbnail_png_bytes(
+        video_path: str, start: float, width: int, height: int, mtime_ns: int, size: int, tolerance_s: float
+    ) -> bytes:
+        return InternalLeRobotDataset._build_thumbnail_png_bytes(
+            video_path, start, width, height, mtime_ns, size, tolerance_s
+        )
 
-        from_idx = int(episode["dataset_from_index"])
-        item = self._read_dataset_item_for_thumbnail(from_idx)
-        if item is None:
-            logger.warning("Could not read dataset item for thumbnail at index {}", from_idx)
-            return None
-
+    @staticmethod
+    def _build_thumbnail_png_bytes(
+        video_path: str, start: float, width: int, height: int, _mtime_ns: int, _size: int, tolerance_s: float
+    ) -> bytes:
+        # OpenCV's bundled FFmpeg can lack software AV1 decoding. Use LeRobot's
+        # CPU decoder, without its global path-only cache which can retain replaced videos.
+        decoder_cache = VideoDecoderCache(max_size=1)
         try:
-            image = item[image_key].permute(1, 2, 0).detach().numpy()
-        except Exception:
-            logger.exception("Could not extract image '{}' for thumbnail", image_key)
-            return None
+            frames = decode_video_frames_torchcodec(
+                video_path, [start], tolerance_s, decoder_cache=decoder_cache, return_uint8=True
+            )
+        finally:
+            decoder_cache.clear()
 
-        rescaled = (image * 255).clip(0, 255).astype(np.uint8)
-        resized = cv2.resize(rescaled, (width, height))
-        bgr_image = cv2.cvtColor(resized, cv2.COLOR_RGB2BGR)
-        encoded, imagebytes = cv2.imencode(".png", bgr_image)
+        frame = cv2.cvtColor(frames[0].permute(1, 2, 0).numpy(), cv2.COLOR_RGB2BGR)
+        resized = cv2.resize(frame, (width, height))
+        encoded, imagebytes = cv2.imencode(".png", resized)
         if not encoded:
-            logger.warning("Failed to encode thumbnail PNG for image key '{}'", image_key)
-            return None
+            raise RuntimeError(f"Failed to encode thumbnail PNG from '{video_path}'")
 
         return imagebytes.tobytes()
 
@@ -423,31 +448,3 @@ class InternalLeRobotDataset(DatasetClient):
         if writer is None:
             return None
         return copy.deepcopy(writer.episode_buffer)
-
-    def _read_dataset_item_for_thumbnail(self, index: int) -> dict | None:
-        try:
-            return self._dataset[index]
-        except RuntimeError as exc:
-            if "Cannot read from a dataset that is being recorded" not in str(exc):
-                logger.exception("Could not read dataset item for thumbnail")
-                return None
-
-            logger.warning("Dataset is in recording mode during thumbnail read; using reader fallback")
-            try:
-                if self._dataset.reader is None:
-                    _ = self._dataset.hf_dataset
-
-                reader = self._dataset.reader
-                if reader is None:
-                    return None
-
-                if reader.hf_dataset is None:
-                    reader.load_and_activate()
-
-                return reader.get_item(index)
-            except Exception:
-                logger.exception("Could not read dataset item from reader fallback")
-                return None
-        except Exception:
-            logger.exception("Could not read dataset item for thumbnail")
-            return None

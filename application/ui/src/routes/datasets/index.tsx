@@ -7,7 +7,7 @@ import { useNavigate, useParams } from 'react-router';
 import { SchemaDatasetOutput } from '../../api/openapi-spec';
 import { DatasetTabs } from '../../features/datasets/dataset-tabs';
 import { useProject, useProjectId } from '../../features/projects/use-project';
-import { paths } from '../../router';
+import { paths } from '../../paths';
 import { ReactComponent as EmptyIllustration } from './../../assets/illustration.svg';
 import { DatasetProvider } from './dataset-provider';
 import { DatasetViewer } from './dataset-viewer';
@@ -22,7 +22,7 @@ const Datasets = ({ datasets }: DatasetsProps) => {
     const { project_id } = useProjectId();
     const navigate = useNavigate();
     const params = useParams();
-    const dataset_id = params.dataset_id ?? datasets[0]?.id;
+    const dataset_id = params.dataset_id;
 
     if (datasets.length === 0) {
         return (

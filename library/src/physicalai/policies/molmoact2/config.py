@@ -41,8 +41,8 @@ class MolmoAct2Config(PeftConfigMixin, Config):
     setup_type: str = ""
     control_mode: str = ""
     adapt_to_so101: bool = False
-    # Compatibility for the released degree-statistics checkpoint, not native SO101 training.
-    convert_pretrained_so101_stats: bool = False
+    # SO-101 calibration; sets the runtime-to-degrees joint scales used with ``adapt_to_so101``.
+    calibration: dict[str, Any] | None = None
 
     # Text transformer
     hidden_size: int = 2560
@@ -154,7 +154,7 @@ class MolmoAct2Config(PeftConfigMixin, Config):
 
     # Tokenizer
     tokenizer_name_or_path: str = "allenai/MolmoAct2"
-    tokenizer_revision: str | None = None
+    tokenizer_revision: str | None = "e432d85f6e039edca44afb93c262f3084ab72a9c"
     tokenizer_max_length: int = 256
     tokenizer_padding: Literal["max_length", "longest"] = "max_length"
     tokenizer_config: dict[str, Any] | None = None

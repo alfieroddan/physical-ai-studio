@@ -1,22 +1,25 @@
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
-import robots.catalog.assets as assets
 from main import app
+from robots.catalog.assets import resolve_robot_relative_asset_path
+from robots.catalog.registry import RobotCatalogRegistry
 
 
-def test_get_robot_catalog_urdf_returns_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
-
-    urdf_path = tmp_path / "SO101" / "so101_new_calib.urdf"
-    urdf_path.parent.mkdir(parents=True)
-    urdf_path.write_text("<robot />", encoding="utf-8")
+def test_get_robot_catalog_urdf_returns_plugin_file() -> None:
+    definition = RobotCatalogRegistry().get_definition("SO101_Follower")
+    assert definition is not None
+    assert definition.asset is not None
+    assert definition.asset.root_resolver is not None
+    urdf_path = definition.asset.root_resolver() / definition.asset.urdf_relative_path
 
     client = TestClient(app)
 
     response = client.get("/api/robots/catalog/SO101_Follower/urdf")
 
     assert response.status_code == 200
-    assert response.text == "<robot />"
+    assert response.content == urdf_path.read_bytes()
 
 
 def test_list_robot_catalog_returns_definitions_without_internal_fields() -> None:
@@ -29,12 +32,22 @@ def test_list_robot_catalog_returns_definitions_without_internal_fields() -> Non
 
     assert payload
     first = payload[0]
-    assert set(first.keys()) == {"type", "display_name", "role", "urdf_path", "package_map", "joint_map"}
+    assert set(first.keys()) == {
+        "type",
+        "display_name",
+        "role",
+        "urdf_path",
+        "package_map",
+        "joint_map",
+        "zero_calibration",
+    }
     assert "urdf_relative_path" not in first
 
     so101 = next(definition for definition in payload if definition["type"] == "SO101_Follower")
     assert so101["urdf_path"] == "/api/robots/catalog/SO101_Follower/urdf"
     assert so101["package_map"] == {"SO101": "/api/robots/catalog/SO101_Follower"}
+    # SO101 calibrates through its own setup wizard, not the plugin zero-pose calibration.
+    assert so101["zero_calibration"] is None
 
 
 def test_get_robot_catalog_schema_returns_pydantic_schema() -> None:
@@ -149,39 +162,21 @@ def test_get_robot_catalog_asset_unknown_robot_type_returns_not_found() -> None:
     assert payload["error_code"] == "Robot_not_found"
 
 
-def test_get_robot_catalog_asset_returns_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
-
-    asset_path = tmp_path / "SO101" / "meshes" / "base.stl"
-    asset_path.parent.mkdir(parents=True)
-    asset_path.write_text("mesh", encoding="utf-8")
-
-    client = TestClient(app)
-
-    response = client.get("/api/robots/catalog/SO101_Follower/meshes/base.stl")
-
-    assert response.status_code == 200
-    assert response.text == "mesh"
-
-
-def test_get_robot_catalog_relative_asset_returns_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
-
-    asset_path = tmp_path / "SO101" / "meshes" / "base.stl"
-    asset_path.parent.mkdir(parents=True)
-    asset_path.write_text("mesh", encoding="utf-8")
+def test_get_robot_catalog_asset_returns_plugin_file() -> None:
+    definition = RobotCatalogRegistry().get_definition("SO101_Follower")
+    assert definition is not None
+    assert definition.asset is not None
+    asset_path = resolve_robot_relative_asset_path(definition, Path("assets/base_so101_v2.stl"))
 
     client = TestClient(app)
 
-    response = client.get("/api/robots/catalog/SO101_Follower/meshes/base.stl")
+    response = client.get("/api/robots/catalog/SO101_Follower/assets/base_so101_v2.stl")
 
     assert response.status_code == 200
-    assert response.text == "mesh"
+    assert response.content == asset_path.read_bytes()
 
 
-def test_get_robot_catalog_asset_rejects_traversal(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
-
+def test_get_robot_catalog_asset_rejects_traversal() -> None:
     client = TestClient(app)
 
     response = client.get("/api/robots/catalog/SO101_Follower/%2E%2E/secret.txt")
@@ -189,9 +184,7 @@ def test_get_robot_catalog_asset_rejects_traversal(tmp_path, monkeypatch) -> Non
     assert response.status_code == 403
 
 
-def test_get_robot_catalog_asset_returns_404_for_missing_file(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(assets, "BUILTIN_ROBOT_ASSETS_ROOT", tmp_path)
-
+def test_get_robot_catalog_asset_returns_404_for_missing_file() -> None:
     client = TestClient(app)
 
     response = client.get("/api/robots/catalog/SO101_Follower/missing.stl")

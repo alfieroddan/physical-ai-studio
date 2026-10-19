@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Callable
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -11,8 +12,6 @@ from physicalai_studio_plugin import RobotCatalogRegistry as RobotCatalogRegistr
 from pydantic import BaseModel, Field, TypeAdapter, create_model
 
 from schemas.robot_type import BaseRobot
-
-from . import so101, widowxai
 
 CATALOG_PLUGIN_ENTRYPOINT_GROUP = "physicalai.studio.catalog_plugins"
 
@@ -35,9 +34,6 @@ class RobotCatalogRegistry(RobotCatalogRegistryProtocol):
         self._robot_models: dict[str, type[BaseRobot]] = {}
         self._robot_adapter: TypeAdapter | None = None
         self._plugin_distributions: dict[str, str] = {}
-
-        for definition in so101.get_definitions() + widowxai.get_definitions():
-            self.register_robot(definition)
 
         self._load_external_plugins()
 
@@ -96,18 +92,14 @@ class RobotCatalogRegistry(RobotCatalogRegistryProtocol):
                 root_resolver=getattr(definition, "asset_root_resolver", None),
             )
 
-        robot_payload = getattr(definition, "robot_payload", None)
-
-        return RobotCatalogDefinition(
-            type=definition.type,
-            display_name=definition.display_name,
-            role=definition.role,
-            robot_builder=definition.robot_builder,
-            robot_payload=robot_payload,
-            asset=asset,
-            adapter_options=definition.adapter_options,
-            probe=definition.probe,
-        )
+        # Copy every field the installed RobotCatalogDefinition knows, so optional
+        # fields added later (zero_calibration, simulation, ...) are not dropped.
+        copied = {
+            field.name: getattr(definition, field.name)
+            for field in dataclasses.fields(RobotCatalogDefinition)
+            if field.name != "asset" and hasattr(definition, field.name)
+        }
+        return RobotCatalogDefinition(**copied, asset=asset)
 
     def get_robot_types(self) -> list[type[BaseModel]]:
         models: list[type[BaseModel]] = []

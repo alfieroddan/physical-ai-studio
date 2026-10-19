@@ -101,7 +101,7 @@ class ExportablePolicyMixin:
 
     @property
     def sample_input(self) -> dict[str, torch.Tensor | str] | None:
-        """Return a sample input dictionary used to trace the model during export.
+        """A sample input dictionary used to trace the model during export.
 
         Override in subclasses that support non-Torch export backends to provide
         example tensors matching the model's expected input format. Returning
@@ -161,7 +161,7 @@ class ExportablePolicyMixin:
 
     @property
     def extra_export_args(self) -> dict[str, ExportParameters]:
-        """Return extra arguments for the export process.
+        """Extra arguments for the export process.
 
         Override in subclasses to provide backend-specific export parameters.
 
@@ -528,6 +528,7 @@ class ExportablePolicyMixin:
                 with_detokenizer=False,
                 max_length=self._preprocessor.max_token_len,
                 use_max_padding=True,
+                truncation=extra_model_args.tokenizer_truncation,
             )
             if ov_tokenizer is not None:
                 openvino.save_model(ov_tokenizer, export_dir / "tokenizer.xml")

@@ -4,30 +4,25 @@ import { Button, ButtonGroup, Content, Dialog, Divider, Flex, Heading, Key, Text
 
 import { $api } from '../../../api/client';
 import { getApiErrorMessage } from '../../../api/errors';
-import { SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-spec';
+import { SchemaDeviceInfo, SchemaTrainJob as SchemaJob, SchemaModel } from '../../../api/openapi-spec';
 import { useProject } from '../../projects/use-project';
 import { InlineAlert } from '../../robots/setup-wizard/shared/inline-alert';
-import {
-    remoteServerComputeDetail,
-    remoteServerStatusLabel,
-    remoteServerStatusVariant,
-} from '../../training-targets/remote-server-status-utils';
 import { getDisplayHealth, healthLabel, healthVariant } from '../../training-targets/remote-trainer-health-utils';
-import { useRemoteServersStatus } from '../../training-targets/training-targets-table/use-remote-servers-status';
 import { useRemoteTrainersHealth } from '../../training-targets/training-targets-table/use-remote-trainers-health';
 import { useRemoteTrainerHealth } from '../../training-targets/use-remote-trainer-health';
 import { supportsLora } from '../shared/peft';
 import { supportsSnapflow } from '../shared/snapflow';
 import { ExportStep } from './export-step';
 import { FeatureMappingStep } from './feature-mapping-step';
-import { formatBytes, MODELS } from './policies';
+import { formatBytes } from './policies';
 import { SetupStep } from './setup-step';
 import { TrainingDeviceInfo } from './training-device-info';
 import { MIN_EPOCHS_FOR_SNAPFLOW, TrainingParameters } from './training-parameters';
+import { getEstimatedTrainingSteps, TRAINING_VAL_SPLIT } from './training-steps';
 import { TrainingSummaryNote } from './training-summary-note';
 import { useExportBackends } from './use-export-backends';
 import { useFeatureMapping } from './use-feature-mapping';
-import { pickBestDevice, useBestTrainingDevice } from './use-training-devices';
+import { useBestTrainingDevice } from './use-training-devices';
 import { getWizardSteps, WizardStep } from './wizard-steps';
 
 export type SchemaTrainJob = Omit<SchemaJob, 'payload'> & {
@@ -40,14 +35,14 @@ interface TrainModelDialogProps {
     defaultMaxEpochs?: number;
 }
 
-export type TrainingTargetKind = 'local' | 'trainer' | 'ssh';
+export type TrainingTargetKind = 'local' | 'trainer';
 
 export type TrainingTargetStatusVariant = 'positive' | 'notice' | 'negative' | 'neutral' | 'yellow';
 
 export type TrainingTargetOption = {
     id: string;
     label: string;
-    /** `local`, `trainer:<remote_trainer_id>`, or `ssh:<remote_server_id>`. */
+    /** `local` or `trainer:<remote_trainer_id>`. */
     kind: TrainingTargetKind;
     statusVariant: TrainingTargetStatusVariant;
     statusLabel: string;
@@ -58,23 +53,36 @@ const LOCAL_TARGET_ID = 'local';
 /** Mirrors `_DEFAULT_SNAPFLOW_DISTILL_EPOCHS` in the backend payload schema. */
 const DEFAULT_SNAPFLOW_DISTILL_EPOCHS = 3;
 
-/** Strip the `trainer:`/`ssh:` prefix off a training-target option id. */
+/** Strip the `trainer:` prefix off a training-target option id. */
 const targetRawId = (id: string): string => id.split(':', 2)[1] ?? id;
 
 export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: TrainModelDialogProps) => {
     const bestDevice = useBestTrainingDevice();
     const { data: remoteTrainers = [] } = $api.useQuery('get', '/api/remote-trainers');
-    const { data: remoteServers = [] } = $api.useQuery('get', '/api/remote-servers');
+    const { data: jobs = [] } = $api.useQuery('get', '/api/jobs');
+    const gpuKey = (device: SchemaDeviceInfo) => `${device.type}:${device.index}`;
+    // Trainer memory telemetry also sees jobs from other Studio installations.
+    const busyGpuKeysFor = (trainerId: string, devices: SchemaDeviceInfo[]) =>
+        new Set([
+            ...devices.filter((device) => device.busy).map(gpuKey),
+            ...jobs.flatMap((job) =>
+                job.type === 'training' &&
+                job.status === 'running' &&
+                job.payload.training_target === 'remote' &&
+                job.payload.remote_trainer_id === trainerId
+                    ? [`${job.payload.device?.type ?? devices[0]?.type}:${job.payload.device?.index ?? 0}`]
+                    : []
+            ),
+        ]);
     // Continuing an existing model needs its checkpoint, which only this machine
     // has: the trainer protocol can receive a dataset but not a base checkpoint.
     // So a resumed run offers local training only.
     const canTrainRemotely = baseModel === undefined;
     const remoteTrainerHealthById = useRemoteTrainersHealth(canTrainRemotely ? remoteTrainers.map((t) => t.id) : []);
-    const remoteServerStatusById = useRemoteServersStatus(canTrainRemotely ? remoteServers.map((s) => s.id) : []);
-    // One control lists every target type (local, direct-URL trainer, SSH
-    // server) rather than a separate remote-server dropdown or a local/remote
-    // mode toggle, so the derived `training_target` is always unambiguous.
-    // Each option carries its own status variant/label so the "Run on" dropdown
+    // One control lists every target type (local, direct-URL trainer - which
+    // also covers an SSH-tunneled trainer) rather than a local/remote mode
+    // toggle, so the derived `training_target` is always unambiguous. Each
+    // option carries its own status variant/label so the "Run on" dropdown
     // shows, at a glance, which targets are currently working correctly.
     const trainingTargetOptions: TrainingTargetOption[] = [
         {
@@ -89,39 +97,25 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                   const entry = remoteTrainerHealthById.get(remoteTrainer.id);
                   const displayHealth = getDisplayHealth(remoteTrainer.id, entry?.health, entry?.hasError ?? false);
                   const isChecking = entry?.isChecking ?? false;
+                  const devices = displayHealth?.devices ?? [];
+                  const busyKeys = busyGpuKeysFor(remoteTrainer.id, devices);
+                  const isTraining = busyKeys.size > 0;
+                  const freeCount = devices.filter((device) => !busyKeys.has(gpuKey(device))).length;
+                  const healthy = displayHealth?.status === 'healthy';
                   return {
                       id: `trainer:${remoteTrainer.id}`,
                       label: remoteTrainer.name,
                       kind: 'trainer' as const,
-                      statusVariant: healthVariant(displayHealth, isChecking),
-                      statusLabel: healthLabel(displayHealth, isChecking),
-                  };
-              })
-            : []),
-        ...(canTrainRemotely
-            ? remoteServers.map((remoteServer) => {
-                  const entry = remoteServerStatusById.get(remoteServer.id);
-                  const isChecking = entry?.isChecking ?? false;
-                  const isConfirmedBad =
-                      remoteServer.last_check_status === 'unreachable' || remoteServer.last_check_status === 'degraded';
-                  const isUnverified = remoteServer.last_check_status === 'unknown';
-                  return {
-                      id: `ssh:${remoteServer.id}`,
-                      label: remoteServer.name,
-                      kind: 'ssh' as const,
-                      // "unknown" reads as neutral/notice, not a hard failure -
-                      // submitting will verify it automatically. Only a confirmed
-                      // prior failure reads as "negative".
-                      statusVariant: isConfirmedBad
-                          ? ('negative' as const)
-                          : isUnverified
-                            ? ('notice' as const)
-                            : remoteServerStatusVariant(entry?.status, isChecking),
-                      statusLabel: isConfirmedBad
-                          ? `Not ready (${remoteServer.last_check_status})`
-                          : isUnverified
-                            ? 'Not verified yet'
-                            : remoteServerStatusLabel(entry?.status, isChecking),
+                      statusVariant:
+                          healthy && isTraining && freeCount === 0
+                              ? 'yellow'
+                              : healthVariant(displayHealth, isChecking),
+                      statusLabel:
+                          healthy && devices.length > 1
+                              ? `${freeCount}/${devices.length} GPUs free`
+                              : isTraining && healthy
+                                ? 'Training in progress'
+                                : healthLabel(displayHealth, isChecking),
                   };
               })
             : []),
@@ -132,9 +126,28 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
     const [currentStep, setCurrentStep] = useState<WizardStep>('setup');
     const [selectedPolicy, setSelectedPolicy] = useState<string>(baseModel?.policy ?? 'act');
+    const [targetId, setTargetId] = useState<Key | null>(LOCAL_TARGET_ID);
+    const remoteTrainerId =
+        targetId === null || targetId === LOCAL_TARGET_ID ? undefined : targetRawId(String(targetId));
+    const {
+        data: availablePolicies = [],
+        isLoading: isLoadingPolicies,
+        isError: policiesUnavailable,
+    } = $api.useQuery(
+        'get',
+        '/api/policies/available',
+        { params: { query: { remote_trainer_id: remoteTrainerId } } },
+        { staleTime: remoteTrainerId ? 0 : undefined }
+    );
     const { datasets, id: projectId } = useProject();
 
     const [selectedDataset, setSelectedDataset] = useState<Key | null>(defaultDatasetId);
+    const { data: selectedDatasetEpisodes } = $api.useQuery(
+        'get',
+        '/api/dataset/{dataset_id}/episodes',
+        { params: { path: { dataset_id: selectedDataset?.toString() ?? '' } } },
+        { enabled: selectedDataset !== null }
+    );
     const [maxEpochs, setMaxEpochs] = useState<number>(defaultMaxEpochs);
     const [batchSize, setBatchSize] = useState<number>(8);
     const [numWorkers, setNumWorkers] = useState<Key | null>('auto');
@@ -149,10 +162,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const [snapflowEnabled, setSnapflowEnabled] = useState<boolean>(false);
     const [snapflowDistillEpochs, setSnapflowDistillEpochs] = useState<number>(DEFAULT_SNAPFLOW_DISTILL_EPOCHS);
     const [augmentImages, setAugmentImages] = useState<boolean>(false);
-    const [targetId, setTargetId] = useState<Key | null>(LOCAL_TARGET_ID);
+    const [selectedGpuKey, setSelectedGpuKey] = useState<Key | null>(null);
     const selectedTarget = trainingTargetOptions.find((option) => option.id === targetId) ?? null;
     const isRemoteTarget = selectedTarget?.kind === 'trainer';
-    const isSshTarget = selectedTarget?.kind === 'ssh';
     const isLoraSupported = supportsLora(selectedPolicy);
     const isLoraRequested = isLoraSupported && loraEnabled;
     const isSnapflowSupported = supportsSnapflow(selectedPolicy);
@@ -160,12 +172,29 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     // always runs the full max_epochs before distillation extends the run), so it
     // needs no clamp against max_epochs.
     const isSnapflowRequested = isSnapflowSupported && snapflowEnabled && maxEpochs >= MIN_EPOCHS_FOR_SNAPFLOW;
+    const trainingSteps = useMemo(
+        () =>
+            selectedDatasetEpisodes === undefined
+                ? undefined
+                : getEstimatedTrainingSteps(
+                      selectedDatasetEpisodes.map(({ length }) => length),
+                      batchSize,
+                      maxEpochs + (isSnapflowRequested ? snapflowDistillEpochs : 0)
+                  ),
+        [selectedDatasetEpisodes, batchSize, maxEpochs, isSnapflowRequested, snapflowDistillEpochs]
+    );
     const {
         health: remoteTrainerHealth,
         isChecking: isCheckingRemoteTrainer,
         checkHealth: checkRemoteTrainerHealth,
     } = useRemoteTrainerHealth(isRemoteTarget ? targetRawId(selectedTarget.id) : null);
-    const remoteUnavailable = isRemoteTarget && remoteTrainerHealth?.status === 'unreachable';
+    const remoteUnavailable =
+        isRemoteTarget &&
+        (remoteTrainerHealth?.status === 'unreachable' ||
+            remoteTrainerHealth?.status === 'starting' ||
+            remoteTrainerHealth?.reason_code === 'docker_unavailable' ||
+            remoteTrainerHealth?.reason_code === 'accelerator_unavailable' ||
+            remoteTrainerHealth?.reason_code === 'container_accelerator_unavailable');
     const {
         data: policyAccess,
         isLoading: isCheckingPolicyAccess,
@@ -188,62 +217,16 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             (requirement) =>
                 requirement.required && (requirement.status === 'missing_token' || requirement.status === 'denied')
         ) === true;
-    const bestRemoteDevice = useMemo(() => pickBestDevice(remoteTrainerHealth?.devices ?? []), [remoteTrainerHealth]);
-    const selectedSshServer = useMemo(() => {
-        if (!isSshTarget) {
-            return null;
-        }
-        const rawId = targetRawId(selectedTarget.id);
-        return remoteServers.find((server) => server.id === rawId) ?? null;
-    }, [isSshTarget, remoteServers, selectedTarget]);
-    // Live Tier-1 status for the selected server, polled independently of the
-    // persisted `last_check_status`. A server can be verified (last_check_status
-    // === "healthy") yet go unreachable/degraded before the next explicit
-    // verification, so gate on both rather than trusting the persisted flag alone.
-    const selectedSshStatusEntry = selectedSshServer ? remoteServerStatusById.get(selectedSshServer.id) : undefined;
-    const sshLastCheckStatus = selectedSshServer?.last_check_status;
-    // Only a *confirmed* prior failure blocks outright. "unknown" (nobody has
-    // ever run "Pull & verify image" on this server) is not blocking here:
-    // submitting the job triggers the backend's one-time automatic Tier-2
-    // verification (`RemoteServerService.ensure_verified`), which the job
-    // endpoint runs itself and rejects with `remote_server_not_ready` if it
-    // fails — so this dialog doesn't have to force a trip to the training
-    // targets page first just to run the same check.
-    const sshConfirmedBad = sshLastCheckStatus === 'unreachable' || sshLastCheckStatus === 'degraded';
-    const sshLiveStatus = selectedSshStatusEntry?.status?.status;
-    const sshUnavailable =
-        isSshTarget &&
-        (!selectedSshServer || sshConfirmedBad || (sshLiveStatus !== undefined && sshLiveStatus !== 'healthy'));
-    const sshUnverified = isSshTarget && !sshUnavailable && sshLastCheckStatus === 'unknown';
-    // Human-readable reason for the warning banner below, falling back to an
-    // explicit label rather than rendering `undefined` when the server isn't
-    // found in `remoteServers` yet (e.g. still loading).
-    const sshStatusMessage = !selectedSshServer
-        ? 'not loaded yet'
-        : sshConfirmedBad
-          ? selectedSshServer.last_check_status
-          : remoteServerStatusLabel(selectedSshStatusEntry?.status, selectedSshStatusEntry?.isChecking ?? false);
-    const selectedSshComputeDetail = useMemo(() => {
-        if (!isSshTarget || selectedSshServer === null) {
-            return undefined;
-        }
-        return remoteServerComputeDetail(selectedSshStatusEntry?.status);
-    }, [isSshTarget, selectedSshServer, selectedSshStatusEntry]);
-    // The device actually driving this job: the local GPU when training locally,
-    // the remote trainer's reported GPU once its health check resolves, or the
-    // configured accelerator for an SSH-provisioned server (no live VRAM probe,
-    // since Studio never dials Tier 2 verification from this dialog). Auto
-    // scale/precision defaults and the disabled state below should track
-    // whichever one is currently in play.
-    const activeDevice = useMemo(() => {
-        if (isRemoteTarget) {
-            return bestRemoteDevice;
-        }
-        if (isSshTarget && selectedSshServer) {
-            return { type: selectedSshServer.device_type, name: selectedSshServer.name };
-        }
-        return bestDevice;
-    }, [isRemoteTarget, isSshTarget, bestRemoteDevice, selectedSshServer, bestDevice]);
+    const remoteDevices = remoteTrainerHealth?.devices ?? [];
+    const busyGpuKeys = busyGpuKeysFor(targetRawId(selectedTarget?.id ?? ''), remoteDevices);
+    const selectedRemoteDevice =
+        selectedGpuKey === null
+            ? (remoteDevices.find((device) => !busyGpuKeys.has(gpuKey(device))) ?? remoteDevices[0] ?? null)
+            : (remoteDevices.find((device) => gpuKey(device) === selectedGpuKey) ?? null);
+    const selectedGpuUnavailable = isRemoteTarget && selectedGpuKey !== null && selectedRemoteDevice === null;
+    const selectedGpuBusy = selectedRemoteDevice !== null && busyGpuKeys.has(gpuKey(selectedRemoteDevice));
+    // Default to the first free GPU, or the first GPU when all are occupied.
+    const activeDevice = isRemoteTarget ? selectedRemoteDevice : bestDevice;
 
     useEffect(() => {
         if (activeDevice?.type === 'cuda') {
@@ -259,7 +242,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
 
     // Which formats the trained model is exported to; the policy decides what is
     // on offer.
-    const exportSelection = useExportBackends(selectedPolicy);
+    const exportSelection = useExportBackends(selectedPolicy, remoteTrainerId);
 
     const trainMutation = $api.useMutation('post', '/api/jobs:train', {
         meta: {
@@ -273,11 +256,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     // Track submission with its own flag so a second call is a no-op for the
     // entire duration, not just while the mutation itself is in flight.
     const [isSubmitting, setIsSubmitting] = useState(false);
-    // Surfaced when the final pre-submit guard (remote trainer health recheck,
-    // SSH Tier-1 recheck) fails, or when the job endpoint itself rejects the
-    // request - most notably `remote_server_not_ready` (HTTP 409), raised when
-    // the backend's automatic Tier-2 verification of a never-checked SSH
-    // server fails right at submission time.
+    // Surfaced when the final remote-trainer health check or job submission fails.
     const [submitError, setSubmitError] = useState<string | null>(null);
 
     // Everything the job needs is picked on the setup step, so that is the only
@@ -285,9 +264,12 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
     const isSetupIncomplete =
         !selectedDataset ||
         !selectedPolicy ||
+        policiesUnavailable ||
+        isLoadingPolicies ||
+        !availablePolicies.some((policy) => policy.id === selectedPolicy) ||
         targetId === null ||
         remoteUnavailable ||
-        sshUnavailable ||
+        selectedGpuUnavailable ||
         policyAccessBlocksTraining;
 
     // A policy without a fixed camera order has no feature-mapping step at all,
@@ -307,7 +289,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         // Checked on every step from the mapping on, not just its own: the dataset's
         // cameras can finish loading after Next was pressed and turn the mapping invalid.
         (hasFeatureMapping && activeStep !== 'setup' && featureMapping.error !== null) ||
-        (activeStep === 'export' && exportSelection.error !== null);
+        (activeStep === 'export' && (exportSelection.isLoading || exportSelection.error !== null));
 
     // What the later steps recap: the trainer that runs the job and the device it
     // trains on, plus the dataset and policy the run is about.
@@ -320,7 +302,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
               }`;
     const selectedDatasetName =
         datasets.find((dataset) => dataset.id === selectedDataset?.toString())?.name ?? 'No dataset';
-    const selectedPolicyName = MODELS.find((model) => model.id === selectedPolicy)?.name ?? selectedPolicy;
+    const selectedPolicyName = availablePolicies.find((policy) => policy.id === selectedPolicy)?.name ?? selectedPolicy;
 
     const goToStep = (offset: number) => {
         const nextStep = steps[currentStepIndex + offset];
@@ -344,6 +326,15 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
         setIsSubmitting(true);
         setSubmitError(null);
         try {
+            if (policiesUnavailable || !availablePolicies.some((policy) => policy.id === selectedPolicy)) {
+                setSubmitError('This policy is not available on the selected training target.');
+                return;
+            }
+            if (exportSelection.isLoading) {
+                setSubmitError('Export formats are still loading. Try again in a moment.');
+                return;
+            }
+            let submissionDevice = selectedRemoteDevice;
             if (isRemoteTarget) {
                 // Final guard: the remote trainer may have gone offline since the last
                 // poll, so re-check availability right before submitting the job.
@@ -352,24 +343,21 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                     setSubmitError("Can't reach the remote trainer right now. Make sure it's running, then try again.");
                     return;
                 }
-            }
-
-            if (isSshTarget) {
-                if (sshUnavailable) {
-                    return;
-                }
-                // Final guard: the server may have gone unreachable/degraded since the
-                // last poll, so re-check its Tier-1 status right before submitting. A
-                // server that has never passed Tier-2 ("unknown") still reaches this
-                // point on purpose — the job endpoint verifies it automatically.
-                const latestStatus = await selectedSshStatusEntry?.checkStatus();
-                if (!latestStatus || latestStatus.status !== 'healthy') {
-                    setSubmitError('This remote server is not reachable right now. Try again once it is back online.');
+                const latestDevices = latestHealth.devices ?? [];
+                const latestBusyGpuKeys = busyGpuKeysFor(targetRawId(selectedTarget.id), latestDevices);
+                submissionDevice =
+                    selectedGpuKey === null
+                        ? (latestDevices.find((device) => !latestBusyGpuKeys.has(gpuKey(device))) ??
+                          latestDevices[0] ??
+                          null)
+                        : (latestDevices.find((device) => gpuKey(device) === selectedGpuKey) ?? null);
+                if (selectedGpuKey !== null && submissionDevice === null) {
+                    setSubmitError('The selected GPU is no longer available on this trainer. Choose another GPU.');
                     return;
                 }
             }
 
-            const name = baseModel?.name ?? MODELS.find((policy) => policy.id === selectedPolicy)?.name ?? '';
+            const name = baseModel?.name ?? selectedPolicyName;
 
             const commonPayload = {
                 dataset_id,
@@ -386,8 +374,8 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                 // which the training side reads as "keep the order it already has".
                 image_key_reorder_map: hasFeatureMapping ? featureMapping.imageKeyReorderMap : {},
                 num_cameras: hasFeatureMapping ? featureMapping.numCameras : 0,
-                // With no formats on offer (the list failed to load, or is empty) there
-                // was nothing to choose from, so fall back to exporting every supported
+                // With no formats on offer, there was nothing to choose from,
+                // so fall back to exporting every supported
                 // format rather than sending [] and exporting none.
                 export_backends: exportSelection.backends.length > 0 ? exportSelection.selectedBackends : null,
                 lora_enabled: isLoraRequested,
@@ -398,7 +386,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                 snapflow_enabled: isSnapflowRequested,
                 snapflow_distill_epochs: snapflowDistillEpochs,
                 augment_images: augmentImages,
-                val_split: 0.1,
+                val_split: TRAINING_VAL_SPLIT,
                 ...extraPayload,
             } as const;
 
@@ -407,10 +395,15 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
             // member of the `SchemaJob['payload']` discriminated union - a computed
             // `training_target` value can't be narrowed to one member by TypeScript.
             const payload: SchemaJob['payload'] = isRemoteTarget
-                ? { ...commonPayload, training_target: 'remote', remote_trainer_id: targetRawId(selectedTarget.id) }
-                : isSshTarget
-                  ? { ...commonPayload, training_target: 'ssh', remote_server_id: targetRawId(selectedTarget.id) }
-                  : { ...commonPayload, training_target: 'local' };
+                ? {
+                      ...commonPayload,
+                      training_target: 'remote',
+                      remote_trainer_id: targetRawId(selectedTarget.id),
+                      ...(submissionDevice
+                          ? { device: { type: submissionDevice.type, index: submissionDevice.index } }
+                          : {}),
+                  }
+                : { ...commonPayload, training_target: 'local' };
 
             const response = await trainMutation.mutateAsync({ body: payload });
             close(response as SchemaTrainJob | undefined);
@@ -430,9 +423,10 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                     <TrainingDeviceInfo
                         targetKind={selectedTarget?.kind ?? 'local'}
                         remoteHealth={remoteTrainerHealth ?? null}
+                        localDevice={bestDevice}
+                        remoteDevice={selectedRemoteDevice}
+                        isRemoteDeviceBusy={selectedGpuBusy}
                         isCheckingRemote={isCheckingRemoteTrainer}
-                        sshServer={selectedSshServer}
-                        sshComputeDetail={selectedSshComputeDetail}
                     />
                 </Flex>
             </Heading>
@@ -457,12 +451,20 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 onSelectedDatasetChange={setSelectedDataset}
                                 trainingTargetOptions={trainingTargetOptions}
                                 targetId={targetId}
-                                onTargetIdChange={setTargetId}
+                                onTargetIdChange={(value) => {
+                                    setTargetId(value);
+                                    setSelectedGpuKey(null);
+                                }}
+                                remoteDevices={isRemoteTarget ? remoteDevices : []}
+                                busyGpuKeys={busyGpuKeys}
+                                selectedGpuKey={selectedGpuKey}
+                                onSelectedGpuKeyChange={setSelectedGpuKey}
+                                selectedGpuUnavailable={selectedGpuUnavailable}
                                 remoteUnavailable={remoteUnavailable}
-                                sshUnavailable={sshUnavailable}
-                                sshUnverified={sshUnverified}
-                                sshStatusMessage={sshStatusMessage}
                                 selectedPolicy={selectedPolicy}
+                                availablePolicies={availablePolicies}
+                                policiesUnavailable={policiesUnavailable}
+                                isLoadingPolicies={isLoadingPolicies}
                                 onSelectedPolicyChange={setSelectedPolicy}
                                 isPolicyDisabled={baseModel !== undefined}
                                 activeDevice={activeDevice}
@@ -470,7 +472,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                         )}
 
                         {activeStep === 'feature-mapping' && (
-                            <FeatureMappingStep policy={selectedPolicy} mapping={featureMapping} />
+                            <FeatureMappingStep policyName={selectedPolicyName} mapping={featureMapping} />
                         )}
 
                         {activeStep === 'training-parameters' && (
@@ -478,6 +480,7 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                                 maxEpochs={maxEpochs}
                                 onMaxEpochsChange={setMaxEpochs}
                                 batchSize={batchSize}
+                                trainingSteps={trainingSteps}
                                 onBatchSizeChange={setBatchSize}
                                 numWorkers={numWorkers}
                                 onNumWorkersChange={setNumWorkers}
@@ -510,7 +513,9 @@ export const TrainModelDialog = ({ baseModel, close, defaultMaxEpochs = 5 }: Tra
                             />
                         )}
 
-                        {activeStep === 'export' && <ExportStep policy={selectedPolicy} selection={exportSelection} />}
+                        {activeStep === 'export' && (
+                            <ExportStep policyName={selectedPolicyName} selection={exportSelection} />
+                        )}
                     </View>
                 </Flex>
             </Content>

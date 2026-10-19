@@ -6,15 +6,9 @@ from fastapi.responses import Response
 from loguru import logger
 from sse_starlette import EventSourceResponse
 
-from api.dependencies import (
-    get_event_processor_ws,
-    get_job_id,
-    get_job_service,
-    get_model_metrics_service,
-    get_scheduler,
-)
+from api.dependencies import get_event_processor_ws, get_job_service, get_model_metrics_service, get_scheduler
 from core.scheduler import Scheduler
-from exceptions import ResourceNotFoundError, ResourceType
+from exceptions import InvalidJobStateError, ResourceNotFoundError, ResourceType
 from schemas import Job
 from schemas.base_job import JobStatus
 from schemas.job import RemoteTrainJobPayload, TrainJob, TrainJobPayload
@@ -34,7 +28,7 @@ async def list_jobs(
 
 @router.get("/{job_id}")
 async def get_job(
-    job_id: Annotated[UUID, Depends(get_job_id)],
+    job_id: UUID,
     job_service: Annotated[JobService, Depends(get_job_service)],
 ) -> Job:
     """Fetch one job by id."""
@@ -43,7 +37,7 @@ async def get_job(
 
 @router.delete("/{job_id}")
 async def delete_job(
-    job_id: Annotated[UUID, Depends(get_job_id)],
+    job_id: UUID,
     job_service: Annotated[JobService, Depends(get_job_service)],
 ) -> None:
     """Delete a job. Only allows deleting failed or canceled jobs"""
@@ -61,7 +55,7 @@ async def submit_train_job(
 
 @router.post("/{job_id}:interrupt")
 async def interrupt_job(
-    job_id: Annotated[UUID, Depends(get_job_id)],
+    job_id: UUID,
     job_service: Annotated[JobService, Depends(get_job_service)],
     scheduler: Annotated[Scheduler, Depends(get_scheduler)],
 ) -> None:
@@ -70,16 +64,21 @@ async def interrupt_job(
     if job is None:
         raise ResourceNotFoundError(ResourceType.JOB, job_id)
 
-    if job.status == JobStatus.RUNNING:
-        # Flag only this job's interrupt so concurrently running jobs on other
-        # targets are unaffected.
+    if job.status == JobStatus.CANCELED:
+        return
+    if job.status in {JobStatus.COMPLETED, JobStatus.FAILED}:
+        raise InvalidJobStateError("Cannot stop a finished job")
+    if job.status == JobStatus.RUNNING and isinstance(job, TrainJob):
+        # Keep the job RUNNING until the worker has stopped and flushed progress.
+        # Otherwise Delete can remove it while the worker still owns it.
         scheduler.job_interrupt_flags[str(job_id)] = True
+        return
     await job_service.update_job_status(job_id, status=JobStatus.CANCELED)
 
 
 @router.get("/{job_id}/model_metrics")
 async def get_model_job_metrics(
-    job_id: Annotated[UUID, Depends(get_job_id)],
+    job_id: UUID,
     job_service: Annotated[JobService, Depends(get_job_service)],
     model_metrics_service: Annotated[ModelMetricsService, Depends(get_model_metrics_service)],
 ) -> EventSourceResponse:

@@ -1,7 +1,7 @@
+import { rs } from '@rstest/core';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { HttpResponse } from 'msw';
-import { vi } from 'vitest';
 
 import { SchemaModel, SchemaTrainJob } from '../../../api/openapi-spec';
 import { http } from '../../../api/utils';
@@ -78,9 +78,9 @@ const environment = getMockedEnvironment();
 const renderModelRow = ({
     modelOverride,
     trainingJobOverride,
-    onDelete = vi.fn(),
-    onRetrain = vi.fn(),
-    onViewLogs = vi.fn(),
+    onDelete = rs.fn(),
+    onRetrain = rs.fn(),
+    onViewLogs = rs.fn(),
 }: {
     modelOverride?: Partial<SchemaModel>;
     trainingJobOverride?: SchemaTrainJob;
@@ -101,11 +101,11 @@ const renderModelRow = ({
 
 describe('ModelRow', () => {
     beforeAll(() => {
-        vi.stubGlobal('EventSource', ImmediatelyClosingEventSource);
+        rs.stubGlobal('EventSource', ImmediatelyClosingEventSource);
     });
 
     afterAll(() => {
-        vi.unstubAllGlobals();
+        rs.unstubAllGlobals();
     });
 
     beforeEach(() => {
@@ -177,7 +177,7 @@ describe('ModelRow', () => {
     });
 
     it('shows "-" in the Dataset and Environment cells and makes no dataset request when dataset_id is null', async () => {
-        const datasetHandler = vi.fn(() => HttpResponse.error());
+        const datasetHandler = rs.fn(() => HttpResponse.error());
         server.use(http.get('/api/dataset/{dataset_id}', datasetHandler));
 
         renderModelRow({ modelOverride: { dataset_id: null }, trainingJobOverride: trainingJob });
@@ -207,17 +207,6 @@ describe('ModelRow', () => {
         renderModelRow({ trainingJobOverride: trainingJob });
 
         expect(screen.getByTestId('trainer-cell')).toHaveTextContent('Local');
-    });
-
-    it('shows SSH in the Trainer column for an ssh job', () => {
-        renderModelRow({
-            trainingJobOverride: {
-                ...trainingJob,
-                payload: { ...trainingJob.payload, training_target: 'ssh', remote_server_id: 'server-1' },
-            },
-        });
-
-        expect(screen.getByTestId('trainer-cell')).toHaveTextContent('SSH');
     });
 
     it('shows "-" in the Trainer column when there is no trainingJob at all', () => {
@@ -312,16 +301,16 @@ describe('ModelRow', () => {
                 <ModelRow
                     model={model}
                     trainingJob={undefined}
-                    onDelete={vi.fn()}
-                    onRetrain={vi.fn()}
-                    onViewLogs={vi.fn()}
+                    onDelete={rs.fn()}
+                    onRetrain={rs.fn()}
+                    onViewLogs={rs.fn()}
                 />
                 <ModelRow
                     model={secondModel}
                     trainingJob={undefined}
-                    onDelete={vi.fn()}
-                    onRetrain={vi.fn()}
-                    onViewLogs={vi.fn()}
+                    onDelete={rs.fn()}
+                    onRetrain={rs.fn()}
+                    onViewLogs={rs.fn()}
                 />
             </>
         );

@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Any, Literal, override
 
 import torch
@@ -23,12 +24,11 @@ from physicalai.data.observation import (
     Observation,
 )
 from physicalai.policies.base import Policy
-from physicalai.policies.mixins.peft import PeftConfigMixin, PeftPolicyMixin
-from physicalai.policies.utils import JointFrameTransform
+from physicalai.policies.mixins.peft import PeftPolicyMixin, is_lora_injected
+from physicalai.policies.utils.deprecation import deprecate
 from physicalai.policies.utils.features import get_feature_by_type
 
 from .config import MolmoAct2Config
-from .constants import SO101_JOINT_OFFSETS, SO101_JOINT_SIGNS
 from .export import MolmoAct2ExportMixin
 from .from_hf import MolmoAct2FromHFMixin
 from .model import MolmoAct2Model
@@ -38,15 +38,32 @@ from .processors import (
     MolmoAct2Preprocessor,
     make_molmoact2_preprocessors,
 )
+from .so101 import load_so101_calibration, make_so101_joint_transform
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from lightning.pytorch.utilities.types import OptimizerLRScheduler
 
     from physicalai.gyms import Gym
+    from physicalai.policies.utils import JointFrameTransform
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_tokenizer_override(path: str | Path) -> str:
+    """Resolve an explicit tokenizer JSON file or directory containing tokenizer.json.
+
+    Returns:
+        The resolved file or directory path.
+
+    Raises:
+        FileNotFoundError: If the override does not resolve to a tokenizer JSON file.
+    """
+    resolved = Path(path).expanduser().resolve()
+    tokenizer_path = resolved if resolved.is_file() else resolved / "tokenizer.json"
+    if not tokenizer_path.is_file() or tokenizer_path.suffix.lower() != ".json":
+        msg = f"Explicit MolmoAct2 tokenizer override is not a JSON file: {resolved}"
+        raise FileNotFoundError(msg)
+    return str(resolved)
 
 
 def _copy_feature_normalization(
@@ -70,17 +87,18 @@ def _copy_feature_normalization(
     ]
 
 
-def _normalization_to_checkpoint(features: list[Feature], feature_type: FeatureType) -> list[Feature]:
+def _normalization_to_checkpoint(
+    features: list[Feature],
+    feature_type: FeatureType,
+    joint_transform: JointFrameTransform,
+) -> list[Feature]:
     feature = get_feature_by_type(features, feature_type)
     if feature is None or feature.normalization_data is None:
         return list(features)
     if not feature.shape:
         msg = f"Cannot adapt {feature_type.value} normalization without a concrete feature shape."
         raise ValueError(msg)
-    normalization = JointFrameTransform(
-        signs=SO101_JOINT_SIGNS,
-        offsets=SO101_JOINT_OFFSETS,
-    ).forward_normalization(
+    normalization = joint_transform.forward_normalization(
         feature.normalization_data,
         dimension=feature.shape[-1],
     )
@@ -109,7 +127,8 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         setup_type: str | None = None,
         control_mode: str | None = None,
         adapt_to_so101: bool | None = None,
-        convert_pretrained_so101_stats: bool = False,
+        calibration: dict[str, Any] | str | Path | None = None,
+        convert_pretrained_so101_stats: bool | None = None,
         preserve_pretrained_normalization_in_training: bool = False,
         # weight management
         compile_model: bool = False,
@@ -124,6 +143,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         lora_adapter_dtype: Literal["float32", "auto"] = "float32",
         lora_use_dora: bool = False,
         train_action_head_only: bool = False,
+        tokenizer_json_path: str | Path | None = None,
         # optimization
         optimizer_lr: float = 5e-5,
         optimizer_vit_lr: float = 5e-5,
@@ -150,12 +170,15 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             n_obs_steps: Number of observation steps included in the input history.
             setup_type: Optional setup identifier used by the model configuration.
             control_mode: Optional control mode used by the model configuration.
-            adapt_to_so101: Whether to train in the legacy SO-101 checkpoint frame.
+            adapt_to_so101: Whether to map SO-101 joints into the legacy checkpoint frame
+                (``checkpoint = sign * scale * runtime + offset``).
                 When omitted, the SO-100/101 normalization tag enables it automatically.
-            convert_pretrained_so101_stats: Whether to convert the released SO-101
-                checkpoint's degree-based statistics for the PhysicalAI SO101 driver's
-                normalized joint units. This compatibility option requires
-                ``adapt_to_so101=True`` and the ``so100_so101_molmoact2`` normalization tag.
+            calibration: SO-101 calibration dictionary or path to its JSON file. With
+                ``adapt_to_so101=True`` it sets the per-joint degrees-per-runtime-unit scale. It is
+                required when the checkpoint's statistics are used (zero-shot, or
+                ``preserve_pretrained_normalization_in_training=True``) and optional when fine-tuning
+                with dataset statistics. Without it the scale is 1.
+            convert_pretrained_so101_stats: Deprecated and ignored. Kept so older checkpoints still load.
             preserve_pretrained_normalization_in_training: Whether ``setup("fit")`` keeps state and action
                 normalization from an initialized pretrained policy when adopting the training
                 dataset's feature contract. This does not affect explicit ``set_features`` calls.
@@ -173,6 +196,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             lora_adapter_dtype: Adapter precision, independent of base-model precision.
             lora_use_dora: Whether to use DoRA instead of LoRA.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
+            tokenizer_json_path: Optional local tokenizer.json file or directory containing it.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
             optimizer_connector_lr: Learning rate for image connector parameters.
@@ -193,23 +217,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if lora_enabled and train_action_head_only:
             msg = "lora_enabled is incompatible with train_action_head_only."
             raise ValueError(msg)
-        PeftConfigMixin(
-            lora_enabled=lora_enabled,
-            lora_rank=lora_rank,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            lora_target_modules=lora_target_modules,
-            lora_adapter_dtype=lora_adapter_dtype,
-            lora_use_dora=lora_use_dora,
-        )
+
+        if convert_pretrained_so101_stats is not None:
+            deprecate("convert_pretrained_so101_stats", "it is ignored; pass `calibration` instead.")
 
         resolved_adapt_to_so101 = norm_tag == "so100_so101_molmoact2" if adapt_to_so101 is None else adapt_to_so101
-        if convert_pretrained_so101_stats and not resolved_adapt_to_so101:
-            msg = "convert_pretrained_so101_stats requires adapt_to_so101=True."
-            raise ValueError(msg)
-        if convert_pretrained_so101_stats and norm_tag != "so100_so101_molmoact2":
-            msg = "convert_pretrained_so101_stats is only supported with norm_tag='so100_so101_molmoact2'."
-            raise ValueError(msg)
 
         # args
         self.input_features = input_features
@@ -222,7 +234,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         self.setup_type = setup_type
         self.control_mode = control_mode
         self.adapt_to_so101 = resolved_adapt_to_so101
-        self.convert_pretrained_so101_stats = convert_pretrained_so101_stats
+        self.calibration = load_so101_calibration(calibration)
         self.preserve_pretrained_normalization_in_training = preserve_pretrained_normalization_in_training
         self.compile_model = compile_model
         self.openvino_compress_to_fp16 = openvino_compress_to_fp16
@@ -236,6 +248,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         self.lora_adapter_dtype: Literal["float32", "auto"] = lora_adapter_dtype
         self.lora_use_dora = lora_use_dora
         self.train_action_head_only = train_action_head_only
+        self.tokenizer_json_path = tokenizer_json_path
         self.optimizer_lr = optimizer_lr
         self.optimizer_vit_lr = optimizer_vit_lr
         self.optimizer_connector_lr = optimizer_connector_lr
@@ -277,6 +290,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         openvino_compress_to_fp16: bool = False,
         gradient_checkpointing: bool = False,
         train_action_head_only: bool = False,
+        tokenizer_json_path: str | Path | None = None,
         optimizer_lr: float = 5e-5,
         optimizer_vit_lr: float = 5e-5,
         optimizer_connector_lr: float = 5e-5,
@@ -300,6 +314,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             openvino_compress_to_fp16: Whether OpenVINO export compresses FP32 constants to FP16.
             gradient_checkpointing: Whether to enable gradient checkpointing on the model.
             train_action_head_only: Whether to freeze the VLM and train only the action head.
+            tokenizer_json_path: Optional local tokenizer.json file or directory containing it.
             optimizer_lr: Learning rate for text-model parameters.
             optimizer_vit_lr: Learning rate for vision-model parameters.
             optimizer_connector_lr: Learning rate for image connector parameters.
@@ -326,7 +341,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             setup_type=config.setup_type,
             control_mode=config.control_mode,
             adapt_to_so101=config.adapt_to_so101,
-            convert_pretrained_so101_stats=config.convert_pretrained_so101_stats,
+            calibration=config.calibration,
             preserve_pretrained_normalization_in_training=preserve_pretrained_normalization_in_training,
             compile_model=compile_model,
             openvino_compress_to_fp16=openvino_compress_to_fp16,
@@ -340,6 +355,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             lora_adapter_dtype=config.lora_adapter_dtype,
             lora_use_dora=config.lora_use_dora,
             train_action_head_only=train_action_head_only,
+            tokenizer_json_path=tokenizer_json_path,
             optimizer_lr=optimizer_lr,
             optimizer_vit_lr=optimizer_vit_lr,
             optimizer_connector_lr=optimizer_connector_lr,
@@ -383,10 +399,15 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             **kwargs,
         )
 
-    def _policy_config_for_checkpoint(self) -> dict[str, object]:
-        return self._require_config().to_dict()
+    def _policy_config_for_checkpoint(self) -> MolmoAct2Config:
+        return replace(
+            self._require_config(),
+            lora_enabled=is_lora_injected(self._require_model()),
+        )
 
     def _restore_policy_config(self, config_data: Mapping[str, object]) -> None:
+        # Older checkpoints store the removed ``convert_pretrained_so101_stats`` field.
+        config_data = {key: value for key, value in config_data.items() if key != "convert_pretrained_so101_stats"}
         config = MolmoAct2Config.from_dict(config_data)
         if self.model is not None:
             if self._require_config() != config:
@@ -397,7 +418,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Save the resolved policy config alongside Lightning's state dict."""
-        checkpoint["policy_config"] = self._policy_config_for_checkpoint()
+        checkpoint["policy_config"] = self._policy_config_for_checkpoint().to_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
         """Rebuild the policy from its resolved checkpoint config.
@@ -459,7 +480,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
                 setup_type=self.setup_type or "",
                 control_mode=self.control_mode or "",
                 adapt_to_so101=self.adapt_to_so101,
-                convert_pretrained_so101_stats=self.convert_pretrained_so101_stats,
+                calibration=self.calibration,
                 use_random_input_noise=self.use_random_input_noise,
                 lora_enabled=self.lora_enabled,
                 lora_rank=self.lora_rank,
@@ -482,6 +503,11 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         if self.model is not None:
             msg = "Policy model is already initialized"
             raise RuntimeError(msg)
+        if self.tokenizer_json_path is not None:
+            config = replace(
+                config,
+                tokenizer_name_or_path=_resolve_tokenizer_override(self.tokenizer_json_path),
+            )
 
         self.config = config
         self._weights_path = weights_path
@@ -495,7 +521,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         self.setup_type = config.setup_type
         self.control_mode = config.control_mode
         self.adapt_to_so101 = config.adapt_to_so101
-        self.convert_pretrained_so101_stats = config.convert_pretrained_so101_stats
+        self.calibration = config.calibration
 
         self.model = MolmoAct2Model.from_config(config)
         self._preprocessor, self._postprocessor = make_molmoact2_preprocessors(config)
@@ -523,6 +549,9 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             copy_action_normalization: Whether to fill missing replacement action normalization
                 with normalization resolved during policy initialization.
 
+        Raises:
+            ValueError: If SO-101 normalization is copied with ``adapt_to_so101=True`` but no calibration.
+
         Example:
             Initializing, setting features, and exporting a policy model:
 
@@ -531,7 +560,7 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             ...     pretrained_name_or_path="allenai/MolmoAct2-SO100_101",
             ...     norm_tag="so100_so101_molmoact2",
             ...     adapt_to_so101=True,
-            ...     convert_pretrained_so101_stats=True,
+            ...     calibration="so101_calibration.json",
             ... )
             >>> policy.set_features(
             ...     input_features=input_features,
@@ -544,11 +573,29 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
         self._require_model()
         config = self._require_config()
 
+        # Copied checkpoint statistics are in degrees, so runtime units need the calibration scales.
+        copies_pretrained_normalization = copy_state_normalization or copy_action_normalization
+        if config.adapt_to_so101 and config.calibration is None and copies_pretrained_normalization:
+            msg = (
+                "Copying pretrained SO-101 normalization requires `calibration` to scale runtime joint units "
+                "to the checkpoint's degrees."
+            )
+            raise ValueError(msg)
+
         resolved_input_features = list(input_features)
         resolved_output_features = list(output_features)
         if config.adapt_to_so101:
-            resolved_input_features = _normalization_to_checkpoint(resolved_input_features, FeatureType.STATE)
-            resolved_output_features = _normalization_to_checkpoint(resolved_output_features, FeatureType.ACTION)
+            joint_transform = make_so101_joint_transform(config.calibration)
+            resolved_input_features = _normalization_to_checkpoint(
+                resolved_input_features,
+                FeatureType.STATE,
+                joint_transform,
+            )
+            resolved_output_features = _normalization_to_checkpoint(
+                resolved_output_features,
+                FeatureType.ACTION,
+                joint_transform,
+            )
         if copy_state_normalization:
             resolved_input_features = _copy_feature_normalization(
                 resolved_input_features,
@@ -707,8 +754,17 @@ class MolmoAct2(PeftPolicyMixin, MolmoAct2ExportMixin, MolmoAct2FromHFMixin, Pol
             return
 
         if self.adapt_to_so101:
-            dataset_input_features = _normalization_to_checkpoint(dataset_input_features, FeatureType.STATE)
-            dataset_output_features = _normalization_to_checkpoint(dataset_output_features, FeatureType.ACTION)
+            joint_transform = make_so101_joint_transform(self.calibration)
+            dataset_input_features = _normalization_to_checkpoint(
+                dataset_input_features,
+                FeatureType.STATE,
+                joint_transform,
+            )
+            dataset_output_features = _normalization_to_checkpoint(
+                dataset_output_features,
+                FeatureType.ACTION,
+                joint_transform,
+            )
         self.input_features = dataset_input_features
         self.output_features = dataset_output_features
         self.initialize_model()
