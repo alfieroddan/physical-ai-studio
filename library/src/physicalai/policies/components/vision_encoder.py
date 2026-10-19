@@ -216,14 +216,19 @@ class VisionEncoder(nn.Module):
         """Reduce a single layer's features according to ``self.pooling``.
 
         Args:
-            feature: Feature map (B, C, H, W) or tokens (B, N, D).
+            feature: Feature map (B, C, H, W), tokens (B, N, D), or vectors (B, D).
 
         Returns:
             The pooled features.
 
         Raises:
-            ValueError: If CLS pooling is requested for a feature map.
+            ValueError: If CLS pooling is requested for a feature map or vectors.
         """
+        if feature.ndim == 2:  # noqa: PLR2004
+            if self.pooling == "cls":
+                msg = "CLS pooling requires transformer tokens (B, N, D), got already-pooled vectors (B, D)."
+                raise ValueError(msg)
+            return feature
         if feature.ndim == 4:  # noqa: PLR2004
             if self.pooling == "cls":
                 msg = "CLS pooling requires transformer tokens (B, N, D), got a feature map (B, C, H, W)."

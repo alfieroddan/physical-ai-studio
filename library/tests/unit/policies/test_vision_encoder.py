@@ -87,12 +87,27 @@ class TestTransformer:
 class TestModule:
     """Tests for shared module behaviour."""
 
-    def test_feature_dims_uses_configured_input_size(self) -> None:
-        """Test the dummy input uses the explicitly configured input size."""
+    @pytest.mark.parametrize("pooling", ["none", "avg", "max"])
+    def test_feature_dims_uses_configured_input_size(self, pooling: str) -> None:
+        """Test fixed-size vector backbones preserve outputs and feature dimensions."""
         backbone = nn.Sequential(nn.Flatten(), nn.Linear(3 * 32 * 48, 4))
-        encoder = VisionEncoder(backbone, input_size=(3, 32, 48))
+        encoder = VisionEncoder(
+            backbone, input_size=(3, 32, 48), pooling=pooling, normalize=False, num_prefix_tokens=1
+        )
+        images = torch.rand(2, 3, 32, 48)
 
+        torch.testing.assert_close(encoder(images), backbone(images))
         assert encoder.feature_dims == {"output": 4}
+
+    def test_cls_pooling_rejects_vectors(self) -> None:
+        """Test already-pooled outputs cannot provide a CLS token."""
+        backbone = nn.Sequential(nn.Flatten(), nn.Linear(3 * 32 * 48, 4))
+        encoder = VisionEncoder(backbone, input_size=(3, 32, 48), pooling="cls")
+
+        with pytest.raises(ValueError, match="already-pooled vectors"):
+            encoder(torch.rand(2, 3, 32, 48))
+        with pytest.raises(ValueError, match="already-pooled vectors"):
+            _ = encoder.feature_dims
 
     def test_feature_dims_without_parameters(self) -> None:
         """Test parameter-less backbones can infer feature dimensions."""
