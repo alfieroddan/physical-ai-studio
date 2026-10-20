@@ -37,6 +37,7 @@ class PatchDiffusionHead(DiffusionActionHead):
         clip_sample: bool = True,
         clip_sample_range: float = 1.0,
         eta: float = 1.0,
+        use_random_input_noise: bool = True,
     ) -> None:
         super().__init__(
             chunk_size,
@@ -48,6 +49,7 @@ class PatchDiffusionHead(DiffusionActionHead):
             clip_sample=clip_sample,
             clip_sample_range=clip_sample_range,
             eta=eta,
+            use_random_input_noise=use_random_input_noise,
         )
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.context_in = nn.Linear(context_dim, hidden_dim)

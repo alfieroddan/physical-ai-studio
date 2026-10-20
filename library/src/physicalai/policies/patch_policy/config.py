@@ -61,6 +61,7 @@ class PatchPolicyConfig(Config):
     clip_sample: bool = True
     clip_sample_range: float = 1.0
     eta: float = 1.0
+    use_random_input_noise: bool = True
 
     vq_latent_dim: int = 128
     vq_num_embeddings: int = 16

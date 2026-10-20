@@ -48,6 +48,7 @@ class PatchPolicyModel(Model):
         clip_sample: bool = True,
         clip_sample_range: float = 1.0,
         eta: float = 1.0,
+        use_random_input_noise: bool = True,
         vq_latent_dim: int = 128,
         vq_num_embeddings: int = 16,
         vq_num_groups: int = 2,
@@ -83,6 +84,7 @@ class PatchPolicyModel(Model):
                 clip_sample=clip_sample,
                 clip_sample_range=clip_sample_range,
                 eta=eta,
+                use_random_input_noise=use_random_input_noise,
             )
         else:
             self.action_head = PatchBehaviorTransformerHead(
@@ -137,6 +139,7 @@ class PatchPolicyModel(Model):
             clip_sample=config.clip_sample,
             clip_sample_range=config.clip_sample_range,
             eta=config.eta,
+            use_random_input_noise=config.use_random_input_noise,
             vq_latent_dim=config.vq_latent_dim,
             vq_num_embeddings=config.vq_num_embeddings,
             vq_num_groups=config.vq_num_groups,

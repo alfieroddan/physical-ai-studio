@@ -209,10 +209,6 @@ __marimo__/
 
 # Custom
 tmp*
-!tmp/
-!tmp/foward_pass.py
-!tmp/compare/
-!tmp/compare/compare_patch_policy.py
 lightning_logs
 .DS_Store
 wandb/

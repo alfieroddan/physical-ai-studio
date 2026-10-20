@@ -56,6 +56,7 @@ class PatchPolicy(Policy):
         dropout: float = 0.1,
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
+        use_random_input_noise: bool = True,
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
     ) -> None:
@@ -83,6 +84,7 @@ class PatchPolicy(Policy):
         self._dropout = dropout
         self._num_train_timesteps = num_train_timesteps
         self._num_inference_steps = num_inference_steps
+        self._use_random_input_noise = use_random_input_noise
         if input_features is not None and output_features is not None:
             self.configure_model()
 
@@ -113,6 +115,7 @@ class PatchPolicy(Policy):
             dropout=config.dropout,
             num_train_timesteps=config.num_train_timesteps,
             num_inference_steps=config.num_inference_steps,
+            use_random_input_noise=config.use_random_input_noise,
             optimizer_lr=optimizer_lr,
             optimizer_weight_decay=optimizer_weight_decay,
         )
@@ -185,6 +188,7 @@ class PatchPolicy(Policy):
                 dropout=self._dropout,
                 num_train_timesteps=self._num_train_timesteps,
                 num_inference_steps=self._num_inference_steps,
+                use_random_input_noise=self._use_random_input_noise,
             )
         config = self._config
         self.model = PatchPolicyModel.from_config(config)

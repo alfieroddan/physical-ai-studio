@@ -24,7 +24,7 @@ def features() -> tuple[list[Feature], list[Feature]]:
     )
 
 
-def make_policy(action_head: str) -> PatchPolicy:
+def make_policy(action_head: str, *, use_random_input_noise: bool = True) -> PatchPolicy:
     """Construct a small policy without downloading pretrained weights."""
     inputs, outputs = features()
     return PatchPolicy(
@@ -44,6 +44,7 @@ def make_policy(action_head: str) -> PatchPolicy:
         dropout=0.0,
         num_train_timesteps=10,
         num_inference_steps=2,
+        use_random_input_noise=use_random_input_noise,
     )
 
 
@@ -87,8 +88,8 @@ def test_temporal_indices() -> None:
 
 def test_from_config_reconstructs_explicit_values() -> None:
     """Construction from config preserves every model setting without an argument dictionary."""
-    original = make_policy("diffusion")
-    config = replace(original.config, eta=0.0, clip_sample_range=0.5)
+    original = make_policy("diffusion", use_random_input_noise=False)
+    config = replace(original.config, eta=0.0, clip_sample_range=0.5, use_random_input_noise=False)
     restored = PatchPolicy.from_config(config)
 
     assert restored.config == config
@@ -96,6 +97,16 @@ def test_from_config_reconstructs_explicit_values() -> None:
     assert isinstance(restored.model, PatchPolicyModel)
     assert getattr(restored.model.action_head, "eta") == 0.0
     assert getattr(restored.model.action_head, "clip_sample_range") == 0.5
+    assert getattr(restored.model.action_head, "use_random_input_noise") is False
+
+
+def test_random_input_noise_propagates_from_policy() -> None:
+    """The public policy option reaches the resolved config and diffusion head."""
+    policy = make_policy("diffusion", use_random_input_noise=False)
+
+    assert policy.config.use_random_input_noise is False
+    assert isinstance(policy.model, PatchPolicyModel)
+    assert getattr(policy.model.action_head, "use_random_input_noise") is False
 
 
 @pytest.mark.parametrize("image_size", [(224, 224), (112, 224)])
@@ -118,7 +129,7 @@ def test_dinov2_uses_configured_image_size(image_size: tuple[int, int]) -> None:
 
 def test_checkpoint_hooks_restore_complete_config() -> None:
     """Checkpoint hooks rebuild a lazy policy from its complete serialized config."""
-    original = make_policy("diffusion")
+    original = make_policy("diffusion", use_random_input_noise=False)
     checkpoint: dict[str, object] = {}
     original.on_save_checkpoint(checkpoint)
 
@@ -131,7 +142,7 @@ def test_checkpoint_hooks_restore_complete_config() -> None:
 
 def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:
     """Lightning checkpoint loading reconstructs modules before restoring their tensors."""
-    original = make_policy("diffusion")
+    original = make_policy("diffusion", use_random_input_noise=False)
     checkpoint = {
         "state_dict": original.state_dict(),
         "hyper_parameters": dict(original.hparams),
@@ -145,3 +156,4 @@ def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:
 
     assert restored.config == original.config
     assert set(restored.state_dict()) == set(original.state_dict())
+    assert restored.config.use_random_input_noise is False
