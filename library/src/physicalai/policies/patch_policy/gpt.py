@@ -29,12 +29,27 @@ TOKEN_NDIM = 4
 
 
 def new_gelu(x: Tensor) -> Tensor:
-    """Karpathy's GPT GELU implementation."""
+    """Apply Karpathy's GPT GELU approximation.
+
+    Args:
+        x: Input tensor.
+
+    Returns:
+        The element-wise GELU activation.
+    """
     return 0.5 * x * (1.0 + torch.tanh(math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
 
 
 def generate_mask_matrix(npatch: int, nwindow: int) -> Tensor:
-    """Build the patch-level causal mask used by block-causal attention."""
+    """Build the patch-level causal mask used by block-causal attention.
+
+    Args:
+        npatch: Number of patch tokens in each observation window.
+        nwindow: Number of observation windows.
+
+    Returns:
+        A block-causal mask with singleton batch and head dimensions.
+    """
     zeros = torch.zeros(npatch, npatch)
     ones = torch.ones(npatch, npatch)
     rows: list[Tensor] = []
@@ -45,7 +60,11 @@ def generate_mask_matrix(npatch: int, nwindow: int) -> Tensor:
 
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention under a block-causal patch mask."""
+    """Multi-head self-attention under a block-causal patch mask.
+
+    Args:
+        config: Patch-aware GPT architecture configuration.
+    """
 
     bias: Tensor
 
@@ -64,6 +83,14 @@ class CausalSelfAttention(nn.Module):
         self.register_buffer("bias", generate_mask_matrix(config.n_patches, config.block_size), persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply masked multi-head self-attention.
+
+        Args:
+            x: Token embeddings with shape ``[B, L, E]``.
+
+        Returns:
+            Contextualized embeddings with the same shape.
+        """
         b, t, c = x.size()
 
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
@@ -82,7 +109,11 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    """Position-wise MLP block."""
+    """Position-wise MLP block.
+
+    Args:
+        config: Patch-aware GPT architecture configuration.
+    """
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -91,6 +122,14 @@ class MLP(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply the position-wise feed-forward network.
+
+        Args:
+            x: Input token embeddings.
+
+        Returns:
+            Transformed token embeddings.
+        """
         x = self.c_fc(x)
         x = new_gelu(x)
         x = self.c_proj(x)
@@ -98,7 +137,11 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    """Single GPT transformer block."""
+    """Single GPT transformer block.
+
+    Args:
+        config: Patch-aware GPT architecture configuration.
+    """
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -108,6 +151,14 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x: Tensor) -> Tensor:
+        """Apply attention and feed-forward residual layers.
+
+        Args:
+            x: Input token embeddings.
+
+        Returns:
+            Contextualized token embeddings.
+        """
         x += self.attn(self.ln_1(x))
         x += self.mlp(self.ln_2(x))
         return x
@@ -115,7 +166,18 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    """Config for the patch-aware GPT trunk."""
+    """Config for the patch-aware GPT trunk.
+
+    Args:
+        block_size: Maximum number of observation windows.
+        input_dim: Width of each input patch token.
+        output_dim: Width of each output token.
+        n_patches: Number of patch tokens in each observation window.
+        n_layer: Number of transformer blocks.
+        n_head: Number of self-attention heads.
+        n_embd: Transformer embedding width.
+        dropout: Dropout probability.
+    """
 
     block_size: int = 1024
     input_dim: int = 256
@@ -128,7 +190,11 @@ class GPTConfig:
 
 
 class _Transformer(nn.Module):
-    """Typed container preserving the original transformer state-dict names."""
+    """Typed container preserving the original transformer state-dict names.
+
+    Args:
+        config: Patch-aware GPT architecture configuration.
+    """
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -140,7 +206,18 @@ class _Transformer(nn.Module):
 
 
 class PatchGPT(nn.Module):
-    """Causal transformer over per-timestep patch tokens."""
+    """Causal transformer over per-timestep patch tokens.
+
+    Args:
+        input_dim: Width of each input patch token.
+        output_dim: Width of each output token.
+        n_patches: Number of patch tokens per observation timestep.
+        n_obs_steps: Maximum number of observation timesteps.
+        n_layer: Number of transformer blocks.
+        n_head: Number of self-attention heads.
+        n_embd: Transformer embedding width.
+        dropout: Dropout probability.
+    """
 
     def __init__(
         self,
@@ -173,6 +250,17 @@ class PatchGPT(nn.Module):
                 nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * self.config.n_layer))
 
     def forward(self, tokens: Tensor) -> Tensor:
+        """Encode patch tokens under block-causal attention.
+
+        Args:
+            tokens: Patch tokens with shape ``[B, T, P, E]``.
+
+        Returns:
+            Per-timestep outputs with shape ``[B, T, output_dim]``.
+
+        Raises:
+            ValueError: If the tensor shape exceeds or conflicts with the configuration.
+        """
         if tokens.ndim != TOKEN_NDIM:
             msg = f"Expected tokens with shape [B, T, P, E], got {tuple(tokens.shape)}."
             raise ValueError(msg)
@@ -199,6 +287,11 @@ class PatchGPT(nn.Module):
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
+        """Initialize a supported transformer module in place.
+
+        Args:
+            module: Module visited by :meth:`torch.nn.Module.apply`.
+        """
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -210,7 +303,14 @@ class PatchGPT(nn.Module):
             nn.init.ones_(module.weight)
 
     def crop_block_size(self, block_size: int) -> None:
-        """Trim the learned position embeddings to a smaller observation window."""
+        """Trim the learned position embeddings to a smaller observation window.
+
+        Args:
+            block_size: New maximum number of observation windows.
+
+        Raises:
+            ValueError: If the requested block size exceeds the configured size.
+        """
         if block_size > self.config.block_size:
             msg = f"Cannot crop to a larger block size: {block_size} > {self.config.block_size}."
             raise ValueError(msg)

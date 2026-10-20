@@ -32,6 +32,28 @@ class PatchPolicy(Policy):
     """Train a timm visual encoder followed by a diffusion or Behavior Transformer head.
 
     Export is intentionally not enabled until the stochastic heads have dedicated export contracts.
+
+    Args:
+        input_features: Optional observation schema. Resolved from training data when omitted.
+        output_features: Optional action schema. Resolved from training data when omitted.
+        encoder_name: Name of the timm visual encoder architecture.
+        encoder_output: Visual representation extracted from the encoder.
+        encoder_pretrained: Whether to initialize the encoder with pretrained weights.
+        freeze_encoder: Whether to prevent updates to encoder parameters.
+        image_size: Input image height and width.
+        action_head: Action-head architecture used to predict action chunks.
+        n_obs_steps: Number of observation timesteps used as context.
+        chunk_size: Number of action timesteps predicted per chunk.
+        n_action_steps: Number of predicted actions executed per invocation.
+        hidden_dim: Hidden width of the action head.
+        num_layers: Number of transformer layers in the action head.
+        num_heads: Number of attention heads in each transformer layer.
+        dropout: Dropout probability used by transformer layers.
+        num_train_timesteps: Number of diffusion timesteps used during training.
+        num_inference_steps: Number of denoising steps used during inference.
+        use_random_input_noise: Whether diffusion sampling starts from random noise.
+        optimizer_lr: AdamW learning rate.
+        optimizer_weight_decay: AdamW weight-decay coefficient.
     """
 
     model: Model | None
@@ -96,7 +118,16 @@ class PatchPolicy(Policy):
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
     ) -> PatchPolicy:
-        """Construct a policy from a complete serialized config."""
+        """Construct a policy from a complete serialized config.
+
+        Args:
+            config: Resolved Patch Policy configuration.
+            optimizer_lr: AdamW learning rate.
+            optimizer_weight_decay: AdamW weight-decay coefficient.
+
+        Returns:
+            An initialized Patch Policy.
+        """
         policy = cls(
             input_features=None,
             output_features=None,
@@ -134,6 +165,14 @@ class PatchPolicy(Policy):
     ) -> PatchPolicy:
         """Load a checkpoint whose saved config reconstructs the model before tensor restoration.
 
+        Args:
+            checkpoint_path: Checkpoint path or binary file object.
+            map_location: Device mapping passed to Lightning checkpoint loading.
+            hparams_file: Optional path to a separate hyperparameter file.
+            strict: Whether checkpoint keys must exactly match the model state.
+            weights_only: Whether to restrict deserialization to tensor weights and safe types.
+            **kwargs: Additional constructor arguments forwarded by Lightning.
+
         Returns:
             The restored Patch Policy.
         """
@@ -148,11 +187,27 @@ class PatchPolicy(Policy):
 
     @property
     def config(self) -> PatchPolicyConfig:
+        """Resolved policy configuration.
+
+        Returns:
+            The resolved Patch Policy configuration.
+
+        Raises:
+            RuntimeError: If feature metadata has not been resolved yet.
+        """
         if self._config is None:
             raise RuntimeError("Patch Policy config is not resolved yet.")
         return self._config
 
     def _initialize_from_config(self, config: PatchPolicyConfig) -> None:
+        """Resolve policy state and build modules from a configuration.
+
+        Args:
+            config: Complete Patch Policy configuration.
+
+        Raises:
+            ValueError: If an initialized policy has a different configuration.
+        """
         if self.model is not None:
             if self.config != config:
                 raise ValueError("Checkpoint policy config does not match the initialized policy.")
@@ -195,17 +250,40 @@ class PatchPolicy(Policy):
         self._preprocessor, self._postprocessor = make_policy_processors(config)
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Save the complete resolved config needed to reconstruct the model."""
+        """Save the complete resolved config needed to reconstruct the model.
+
+        Args:
+            checkpoint: Mutable Lightning checkpoint payload.
+        """
         checkpoint["policy_config"] = self.config.to_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
-        """Reconstruct the model before Lightning restores checkpoint tensors."""
+        """Reconstruct the model before Lightning restores checkpoint tensors.
+
+        Args:
+            checkpoint: Lightning checkpoint payload.
+
+        Raises:
+            TypeError: If the checkpoint does not contain a valid policy configuration.
+        """
         config_data = checkpoint.get("policy_config")
         if not isinstance(config_data, Mapping):
             raise TypeError("Patch Policy checkpoint is missing a valid policy_config.")
         self._initialize_from_config(PatchPolicyConfig.from_dict(config_data))
 
     def _prepare_batch(self, batch: Observation, *, require_actions: bool) -> dict[str, Tensor]:
+        """Flatten action features and preprocess an observation.
+
+        Args:
+            batch: Structured policy observation.
+            require_actions: Whether actions must be included for loss computation.
+
+        Returns:
+            A preprocessed model batch.
+
+        Raises:
+            RuntimeError: If the policy processors have not been initialized.
+        """
         if self._preprocessor is None:
             raise RuntimeError("Patch Policy is not initialized.")
         values = batch.to_dict(flatten=False)
@@ -218,6 +296,17 @@ class PatchPolicy(Policy):
         return self._preprocessor(values, require_actions=require_actions)
 
     def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute training loss or predict actions according to module mode.
+
+        Args:
+            batch: Structured policy observation.
+
+        Returns:
+            Training loss and metrics in training mode, otherwise an action chunk.
+
+        Raises:
+            RuntimeError: If the policy model has not been initialized.
+        """
         if self.model is None:
             raise RuntimeError("Patch Policy is not initialized.")
         if self.training:
@@ -225,17 +314,51 @@ class PatchPolicy(Policy):
         return self.predict_action_chunk(batch)
 
     def predict_action_chunk(self, batch: Observation) -> Tensor:
+        """Predict and postprocess one action chunk.
+
+        Args:
+            batch: Structured policy observation.
+
+        Returns:
+            A denormalized action chunk limited to the execution horizon.
+
+        Raises:
+            RuntimeError: If the policy model or processors have not been initialized.
+        """
         if self.model is None or self._postprocessor is None:
             raise RuntimeError("Patch Policy is not initialized.")
         model = cast("PatchPolicyModel", self.model)
         return self._postprocessor(model.predict_action_chunk(self._prepare_batch(batch, require_actions=False)))
 
     def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute validation loss for an observation batch.
+
+        Args:
+            batch: Structured observation containing target actions.
+
+        Returns:
+            The validation loss and logging metrics.
+
+        Raises:
+            RuntimeError: If the policy model has not been initialized.
+        """
         if self.model is None:
             raise RuntimeError("Patch Policy is not initialized.")
         return self.model.compute_val_loss(self._prepare_batch(batch, require_actions=True))
 
     def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
+        """Run and log one Lightning training step.
+
+        Args:
+            batch: Structured training observation.
+            batch_idx: Batch index supplied by Lightning.
+
+        Returns:
+            The scalar training loss.
+
+        Raises:
+            TypeError: If training forward does not return a loss and metrics.
+        """
         del batch_idx
         result = self(batch)
         if not isinstance(result, tuple):
@@ -245,7 +368,14 @@ class PatchPolicy(Policy):
         return loss
 
     def setup(self, stage: str) -> None:
-        """Resolve feature metadata from the training dataset when needed."""
+        """Resolve feature metadata from the training dataset when needed.
+
+        Args:
+            stage: Lightning lifecycle stage.
+
+        Raises:
+            TypeError: If the training dataset is not a Physical AI dataset.
+        """
         if stage != "fit" or self.model is not None:
             return
         datamodule = self.trainer.datamodule  # pyrefly: ignore[missing-attribute]
@@ -257,6 +387,11 @@ class PatchPolicy(Policy):
         self.configure_model()
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
+        """Create the optimizer for trainable policy parameters.
+
+        Returns:
+            An AdamW optimizer configured for the policy.
+        """
         return torch.optim.AdamW(
             (parameter for parameter in self.parameters() if parameter.requires_grad),
             lr=self.optimizer_lr,

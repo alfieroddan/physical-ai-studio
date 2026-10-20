@@ -14,11 +14,29 @@ from physicalai.policies.patch_policy.gpt import PatchGPT
 
 
 def _mlp(input_dim: int, output_dim: int, hidden_dim: int) -> nn.Sequential:
+    """Build a two-layer ReLU MLP.
+
+    Args:
+        input_dim: Input feature width.
+        output_dim: Output feature width.
+        hidden_dim: Hidden-layer width.
+
+    Returns:
+        The assembled MLP.
+    """
     return nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, output_dim))
 
 
 class ResidualActionQuantizer(nn.Module):
-    """Compact residual vector quantizer for flattened action chunks."""
+    """Compact residual vector quantizer for flattened action chunks.
+
+    Args:
+        action_dim: Width of each action timestep.
+        chunk_size: Number of action timesteps in each chunk.
+        latent_dim: Width of the encoded action latent.
+        num_embeddings: Number of entries in each codebook group.
+        groups: Number of residual quantization groups.
+    """
 
     def __init__(self, action_dim: int, chunk_size: int, latent_dim: int, num_embeddings: int, groups: int) -> None:
         super().__init__()
@@ -31,7 +49,14 @@ class ResidualActionQuantizer(nn.Module):
         self.codebook = nn.Parameter(torch.randn(groups, num_embeddings, latent_dim) * 0.02)
 
     def encode(self, actions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Return quantized latent, residual code indices, and commitment loss."""
+        """Quantize flattened action chunks.
+
+        Args:
+            actions: Action chunks with shape ``[B, T, A]``.
+
+        Returns:
+            The straight-through latent, residual code indices, and commitment loss.
+        """
         latent = self.encoder(actions.flatten(-2))
         residual = latent
         quantized = torch.zeros_like(latent)
@@ -48,18 +73,53 @@ class ResidualActionQuantizer(nn.Module):
         return quantized, torch.stack(codes, dim=-1), commitment
 
     def decode_codes(self, codes: Tensor) -> Tensor:
-        """Decode residual code indices to action chunks."""
+        """Decode residual code indices to action chunks.
+
+        Args:
+            codes: Code index for every residual group and batch item.
+
+        Returns:
+            Reconstructed action chunks.
+        """
         latent = torch.stack(
             [self.codebook[group][codes[:, group]] for group in range(self.groups)],
         ).sum(0)
         return self.decode(latent)
 
     def decode(self, latent: Tensor) -> Tensor:
+        """Decode continuous latents to action chunks.
+
+        Args:
+            latent: Quantized action latent.
+
+        Returns:
+            Reconstructed action chunks with shape ``[B, T, A]``.
+        """
         return self.decoder(latent).reshape(-1, self.chunk_size, self.action_dim)
 
 
 class PatchBehaviorTransformerHead(ActionHead):
-    """Predict residual-VQ action centers and continuous offsets from patch tokens."""
+    """Predict residual-VQ action centers and continuous offsets from patch tokens.
+
+    Args:
+        context_dim: Width of each visual context token.
+        action_dim: Width of each action timestep.
+        chunk_size: Number of action timesteps predicted per sample.
+        n_obs_steps: Number of observation timesteps in the context.
+        n_patches: Number of visual patch tokens per observation timestep.
+        hidden_dim: Transformer and prediction-head hidden width.
+        num_layers: Number of transformer blocks.
+        num_heads: Number of self-attention heads.
+        dropout: Dropout probability used by the transformer.
+        latent_dim: Width of the VQ action latent.
+        num_embeddings: Number of entries in each codebook group.
+        groups: Number of residual vector-quantization groups.
+        reconstruction_weight: Weight applied to the VQ reconstruction loss.
+        commitment_weight: Weight applied to the VQ commitment loss.
+        offset_loss_weight: Weight applied to the continuous offset loss.
+        secondary_code_weight: Relative loss weight for code groups after the first.
+        focal_loss_gamma: Focusing exponent used by the code-prediction loss.
+    """
 
     def __init__(
         self,
@@ -107,6 +167,17 @@ class PatchBehaviorTransformerHead(ActionHead):
         self.quantizer = ResidualActionQuantizer(action_dim, chunk_size, latent_dim, num_embeddings, groups)
 
     def _embedding(self, context: Context) -> Tensor:
+        """Encode visual context into the final observation embedding.
+
+        Args:
+            context: Context containing flattened visual tokens.
+
+        Returns:
+            The final timestep embedding.
+
+        Raises:
+            ValueError: If the context contains an unexpected number of tokens.
+        """
         tokens = context["tokens"]
         expected = self.n_obs_steps * self.n_patches
         if tokens.shape[1] != expected:
@@ -114,6 +185,14 @@ class PatchBehaviorTransformerHead(ActionHead):
         return self.trunk(tokens.reshape(tokens.shape[0], self.n_obs_steps, self.n_patches, tokens.shape[-1]))[:, -1]
 
     def _predictions(self, context: Context) -> tuple[Tensor, Tensor]:
+        """Predict code logits and code-conditioned continuous offsets.
+
+        Args:
+            context: Context containing flattened visual tokens.
+
+        Returns:
+            Code logits and continuous offsets.
+        """
         embedding = self._embedding(context)
         logits = self.code_head(embedding).reshape(-1, self.groups, self.num_embeddings)
         offsets = self.offset_head(embedding).reshape(
@@ -126,6 +205,16 @@ class PatchBehaviorTransformerHead(ActionHead):
         return logits, offsets
 
     def _actions(self, logits: Tensor, offsets: Tensor, codes: Tensor | None = None) -> Tensor:
+        """Combine quantized action centers with predicted offsets.
+
+        Args:
+            logits: Predicted code logits for each residual group.
+            offsets: Predicted action offsets for every possible code.
+            codes: Optional code indices to use instead of the most likely codes.
+
+        Returns:
+            Predicted action chunks.
+        """
         if codes is None:
             codes = logits.argmax(-1)
         centers = self.quantizer.decode_codes(codes)
@@ -135,13 +224,30 @@ class PatchBehaviorTransformerHead(ActionHead):
         return centers + selected_offsets
 
     def sample(self, context: Context, *, noise: Tensor | None = None, num_steps: int | None = None) -> Tensor:
-        """Return the most likely action chunk; iterative arguments are ignored."""
+        """Return the most likely action chunk.
+
+        Args:
+            context: Context containing flattened visual tokens.
+            noise: Ignored iterative-head compatibility argument.
+            num_steps: Ignored iterative-head compatibility argument.
+
+        Returns:
+            The most likely action chunk.
+        """
         del noise, num_steps
         logits, offsets = self._predictions(context)
         return self._actions(logits, offsets)
 
     def compute_loss(self, actions: Tensor, context: Context) -> Tensor:
-        """Return combined focal-code, offset, reconstruction, and commitment losses."""
+        """Compute focal-code, offset, reconstruction, and commitment losses.
+
+        Args:
+            actions: Ground-truth action chunks.
+            context: Context containing flattened visual tokens.
+
+        Returns:
+            Unreduced per-action-element losses.
+        """
         logits, offsets = self._predictions(context)
         latent, target_codes, commitment = self.quantizer.encode(actions)
         reconstructed = self.quantizer.decode(latent)

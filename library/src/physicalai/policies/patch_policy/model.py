@@ -22,7 +22,40 @@ if TYPE_CHECKING:
 
 
 class PatchPolicyModel(Model):
-    """A visual feature encoder followed by an interchangeable action head."""
+    """A visual feature encoder followed by an interchangeable action head.
+
+    Args:
+        action_dim: Width of each action timestep.
+        num_views: Number of configured camera views.
+        n_obs_steps: Number of observation timesteps used as context.
+        chunk_size: Number of action timesteps predicted per chunk.
+        image_size: Input image height and width.
+        encoder_name: Name of the timm visual encoder architecture.
+        encoder_output: Visual representation extracted from the encoder.
+        encoder_pretrained: Whether to initialize the encoder with pretrained weights.
+        freeze_encoder: Whether to prevent updates to encoder parameters.
+        action_head: Action-head architecture used to predict action chunks.
+        hidden_dim: Hidden width of the action head.
+        num_layers: Number of transformer layers in the action head.
+        num_heads: Number of attention heads in each transformer layer.
+        dropout: Dropout probability used by transformer layers.
+        num_train_timesteps: Number of diffusion timesteps used during training.
+        num_inference_steps: Number of denoising steps used during inference.
+        beta_schedule: Noise schedule used by the diffusion head.
+        prediction_type: Diffusion target represented by the model output.
+        clip_sample: Whether to clip diffusion samples after scheduler steps.
+        clip_sample_range: Symmetric range used when clipping diffusion samples.
+        eta: DDIM stochasticity coefficient used during inference.
+        use_random_input_noise: Whether diffusion sampling starts from random noise.
+        vq_latent_dim: Latent width of the Behavior Transformer quantizer.
+        vq_num_embeddings: Number of codebook entries in each residual VQ group.
+        vq_num_groups: Number of residual vector-quantization groups.
+        vq_reconstruction_weight: Weight applied to the VQ reconstruction loss.
+        vq_commitment_weight: Weight applied to the VQ commitment loss.
+        offset_loss_weight: Weight applied to continuous action-offset loss.
+        secondary_code_weight: Relative loss weight for residual code groups after the first.
+        focal_loss_gamma: Focusing exponent used by the code-prediction loss.
+    """
 
     def __init__(  # noqa: PLR0913
         self,
@@ -111,6 +144,9 @@ class PatchPolicyModel(Model):
     def from_config(cls, config: PatchPolicyConfig) -> PatchPolicyModel:
         """Build the complete model architecture from one serialized config.
 
+        Args:
+            config: Resolved Patch Policy configuration.
+
         Returns:
             A model containing the encoder and configured action head.
         """
@@ -151,38 +187,93 @@ class PatchPolicyModel(Model):
         )
 
     def _context(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Encode batch images into flattened visual context tokens.
+
+        Args:
+            batch: Model batch containing preprocessed images.
+
+        Returns:
+            Action-head context containing visual tokens.
+        """
         images = batch["images"]
         tokens = self.encoder(images)
         return {"tokens": tokens.flatten(1, 3)}
 
     def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute training loss or sample actions according to module mode.
+
+        Args:
+            batch: Preprocessed model batch.
+
+        Returns:
+            Training loss and metrics in training mode, otherwise an action chunk.
+        """
         if self.training:
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
     def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute the reduced training loss and metrics.
+
+        Args:
+            batch: Preprocessed batch containing images and target actions.
+
+        Returns:
+            The scalar loss and detached logging metrics.
+        """
         losses = self.action_head.compute_loss(batch["action"], self._context(batch))
         loss = reduce_losses(losses, in_episode_bound(batch))
         return loss, {"loss": loss.detach()}
 
     @torch.no_grad()
     def compute_val_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute action mean-squared error for validation.
+
+        Args:
+            batch: Preprocessed batch containing images and target actions.
+
+        Returns:
+            The scalar validation loss and detached logging metrics.
+        """
         actions = self.action_head.sample(self._context(batch))
         loss = reduce_losses(F.mse_loss(actions, batch["action"], reduction="none"), in_episode_bound(batch))
         return loss, {"loss": loss.detach(), "action_mse": loss.detach()}
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Any]) -> Tensor:
+        """Predict one normalized action chunk.
+
+        Args:
+            batch: Preprocessed batch containing images.
+
+        Returns:
+            A normalized action chunk for each batch item.
+        """
         return self.action_head.sample(self._context(batch))
 
     @property
     def action_delta_indices(self) -> list[int]:
+        """Dataset offsets required for action chunks.
+
+        Returns:
+            Consecutive offsets covering the action horizon.
+        """
         return list(range(self._chunk_size))
 
     @property
     def observation_delta_indices(self) -> list[int]:
+        """Dataset offsets required for observation context.
+
+        Returns:
+            Historical offsets ending at the current timestep.
+        """
         return list(range(1 - self._n_obs_steps, 1))
 
     @property
     def reward_delta_indices(self) -> None:
+        """Reward dataset offsets, which Patch Policy does not require.
+
+        Returns:
+            None.
+        """
         return None

@@ -23,6 +23,14 @@ _TIMM_MODELS: dict[FeatureEncoderName, str] = {
 
 
 def _import_timm() -> ModuleType:
+    """Import the optional timm dependency.
+
+    Returns:
+        The imported timm module.
+
+    Raises:
+        ImportError: If the Patch Policy optional dependencies are not installed.
+    """
     try:
         import timm  # noqa: PLC0415
     except ImportError as exc:
@@ -31,7 +39,15 @@ def _import_timm() -> ModuleType:
 
 
 class TimmFeatureEncoder(nn.Module):
-    """Encode arbitrary leading image dimensions into patch tokens."""
+    """Encode arbitrary leading image dimensions into patch tokens.
+
+    Args:
+        name: Supported timm encoder name.
+        output: Encoder representation to return for each image.
+        pretrained: Whether to load pretrained backbone weights.
+        frozen: Whether to freeze the backbone in evaluation mode.
+        image_size: Input image height and width.
+    """
 
     mean: Tensor
     std: Tensor
@@ -67,13 +83,32 @@ class TimmFeatureEncoder(nn.Module):
             self.backbone.eval()
 
     def train(self, mode: bool = True) -> TimmFeatureEncoder:  # noqa: FBT001, FBT002
-        """Keep a frozen backbone in evaluation mode."""
+        """Set training mode while keeping a frozen backbone in evaluation mode.
+
+        Args:
+            mode: Whether to enable training mode for trainable modules.
+
+        Returns:
+            This encoder.
+        """
         super().train(mode=mode)
         if self.frozen:
             self.backbone.eval()
         return self
 
     def _tokens(self, images: Tensor) -> Tensor:
+        """Extract the configured token representation from flat images.
+
+        Args:
+            images: Image tensor with shape ``[N, C, H, W]``.
+
+        Returns:
+            Encoded image tokens with shape ``[N, P, E]``.
+
+        Raises:
+            TypeError: If the backbone returns an unsupported value.
+            ValueError: If the returned feature tensor has an unsupported rank.
+        """
         features = self.backbone.forward_features((images - self.mean) / self.std)
         if isinstance(features, dict):
             features = features.get("x_norm_patchtokens", features.get("last_hidden_state"))
@@ -95,7 +130,17 @@ class TimmFeatureEncoder(nn.Module):
         return patches.mean(dim=1, keepdim=True)
 
     def forward(self, images: Tensor) -> Tensor:
-        """Return ``[..., patches, embedding]`` for ``[..., C, H, W]`` images."""
+        """Encode images while preserving their leading dimensions.
+
+        Args:
+            images: Images with shape ``[..., C, H, W]``.
+
+        Returns:
+            Tokens with shape ``[..., patches, embedding]``.
+
+        Raises:
+            ValueError: If the input does not contain channel and spatial dimensions.
+        """
         if images.ndim < 4:
             raise ValueError("Expected images with shape [..., C, H, W].")
         leading = images.shape[:-3]

@@ -18,7 +18,25 @@ if TYPE_CHECKING:
 
 
 class PatchDiffusionHead(DiffusionActionHead):
-    """Denoise action tokens by cross-attending to visual patch tokens."""
+    """Denoise action tokens by cross-attending to visual patch tokens.
+
+    Args:
+        context_dim: Width of each visual context token.
+        action_dim: Width of each action timestep.
+        chunk_size: Number of action timesteps predicted per sample.
+        hidden_dim: Transformer decoder hidden width.
+        num_layers: Number of transformer decoder layers.
+        num_heads: Number of attention heads in each decoder layer.
+        dropout: Dropout probability used by decoder layers.
+        num_train_timesteps: Number of diffusion timesteps used for training.
+        num_inference_steps: Number of denoising steps used for sampling.
+        beta_schedule: Noise schedule used by the diffusion scheduler.
+        prediction_type: Diffusion target represented by the denoiser output.
+        clip_sample: Whether to clip samples after each scheduler step.
+        clip_sample_range: Symmetric range used to clip samples.
+        eta: DDIM stochasticity coefficient used during sampling.
+        use_random_input_noise: Whether sampling starts from random noise.
+    """
 
     def __init__(
         self,
@@ -69,13 +87,29 @@ class PatchDiffusionHead(DiffusionActionHead):
         self.action_out = nn.Linear(hidden_dim, action_dim)
 
     def prepare_context(self, context: Context) -> Context:
-        """Project visual tokens once for the complete denoising loop."""
+        """Project visual tokens once for the complete denoising loop.
+
+        Args:
+            context: Context containing visual tokens or preprojected memory.
+
+        Returns:
+            Context containing projected visual memory.
+        """
         if "memory" in context:
             return context
         return {**context, "memory": self.context_in(context["tokens"])}
 
     def denoise(self, x_t: Tensor, t: Tensor, context: Context) -> Tensor:
-        """Predict noise or clean actions from noisy actions and visual memory."""
+        """Predict noise or clean actions from noisy actions and visual memory.
+
+        Args:
+            x_t: Noisy action chunks at the current diffusion timestep.
+            t: Diffusion timestep for each batch item.
+            context: Context containing visual tokens or projected memory.
+
+        Returns:
+            The configured diffusion prediction for each action element.
+        """
         time = self.time_encoder(t[:, None].to(x_t.dtype))
         hidden = self.action_in(x_t) + self.action_position + time
         memory = context.get("memory")
