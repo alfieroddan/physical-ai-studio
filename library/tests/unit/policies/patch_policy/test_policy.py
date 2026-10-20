@@ -150,6 +150,7 @@ def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:
     }
     original.on_save_checkpoint(checkpoint)
     path = tmp_path / "patch_policy.ckpt"
+    # nosemgrep: trailofbits.python.pickles-in-pytorch.pickles-in-pytorch  # Test-only checkpoint is generated from trusted local state.
     torch.save(checkpoint, path)
 
     restored = PatchPolicy.load_from_checkpoint(path)
