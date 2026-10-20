@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
+from torch.nn import functional
 
 TOKEN_NDIM = 4
 
@@ -45,6 +46,8 @@ def generate_mask_matrix(npatch: int, nwindow: int) -> Tensor:
 
 class CausalSelfAttention(nn.Module):
     """Multi-head self-attention under a block-causal patch mask."""
+
+    bias: Tensor
 
     def __init__(self, config: GPTConfig) -> None:
         super().__init__()
@@ -71,12 +74,11 @@ class CausalSelfAttention(nn.Module):
         att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         mask = self.bias[:, :, :t, :t]
         att = att.masked_fill(mask == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
+        att = functional.softmax(att, dim=-1)
         att = self.attn_dropout(att)
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(b, t, c)
-        y = self.resid_dropout(self.c_proj(y))
-        return y
+        return self.resid_dropout(self.c_proj(y))
 
 
 class MLP(nn.Module):
@@ -92,8 +94,7 @@ class MLP(nn.Module):
         x = self.c_fc(x)
         x = new_gelu(x)
         x = self.c_proj(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(x)
 
 
 class Block(nn.Module):
@@ -107,8 +108,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x: Tensor) -> Tensor:
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x += self.attn(self.ln_1(x))
+        x += self.mlp(self.ln_2(x))
         return x
 
 
@@ -124,6 +125,18 @@ class GPTConfig:
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.1
+
+
+class _Transformer(nn.Module):
+    """Typed container preserving the original transformer state-dict names."""
+
+    def __init__(self, config: GPTConfig) -> None:
+        super().__init__()
+        self.wte = nn.Linear(config.input_dim, config.n_embd)
+        self.wpe = nn.Embedding(config.block_size * config.n_patches, config.n_embd)
+        self.drop = nn.Dropout(config.dropout)
+        self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.ln_f = nn.LayerNorm(config.n_embd)
 
 
 class PatchGPT(nn.Module):
@@ -152,15 +165,7 @@ class PatchGPT(nn.Module):
             dropout=dropout,
         )
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Linear(self.config.input_dim, self.config.n_embd),
-                wpe=nn.Embedding(self.config.block_size * self.config.n_patches, self.config.n_embd),
-                drop=nn.Dropout(self.config.dropout),
-                h=nn.ModuleList([Block(self.config) for _ in range(self.config.n_layer)]),
-                ln_f=nn.LayerNorm(self.config.n_embd),
-            ),
-        )
+        self.transformer = _Transformer(self.config)
         self.lm_head = nn.Linear(self.config.n_embd, self.config.output_dim, bias=False)
         self.apply(self._init_weights)
         for pn, p in self.named_parameters():
@@ -192,7 +197,8 @@ class PatchGPT(nn.Module):
         logits = logits.reshape(b, t, p, self.config.output_dim)
         return logits[:, :, -1, :]
 
-    def _init_weights(self, module: nn.Module) -> None:
+    @staticmethod
+    def _init_weights(module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
@@ -211,6 +217,10 @@ class PatchGPT(nn.Module):
         self.config.block_size = block_size
         self.transformer.wpe.weight = nn.Parameter(self.transformer.wpe.weight[: block_size * self.config.n_patches])
         for block in self.transformer.h:
-            block.attn.bias = block.attn.bias[
-                :, :, : block_size * self.config.n_patches, : block_size * self.config.n_patches
+            typed_block = cast("Block", block)
+            typed_block.attn.bias = typed_block.attn.bias[
+                :,
+                :,
+                : block_size * self.config.n_patches,
+                : block_size * self.config.n_patches,
             ]
