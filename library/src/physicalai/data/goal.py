@@ -20,14 +20,10 @@ if TYPE_CHECKING:
 
 
 class TaskGoalStore(Protocol):
-    """Provides the canonical goal images for a task description.
-
-    This is the narrow interface `physicalai.gyms.GoalConditionedGym` needs: given a task
-    description (e.g. ``Observation.task`` from a gym), return its fixed rollout goal.
-    """
+    """Provides rollout goal images for task descriptions."""
 
     def get_task_goal(self, task: str) -> ObservationValue:
-        """Return the canonical goal images for a task description."""
+        """Return the goal images for a task description."""
         ...
 
 

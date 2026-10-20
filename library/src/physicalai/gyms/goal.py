@@ -107,7 +107,7 @@ class GoalConditionedGym(Gym):
     """Gym whose observations carry the goal for its current task.
 
     On every ``reset`` the gym's task description (``Observation.task``) is looked up in the
-    goal store, and that task's canonical goal is attached to every observation of the episode,
+    goal dataset, and that task's canonical goal is attached to every observation of the episode,
     batched and laid out like the gym's own images. Works for single-task gyms (PushT) and
     multi-task suites (such as LIBERO) alike. A vectorized batch must contain one task.
     Everything else is forwarded to the wrapped gym.
@@ -120,29 +120,34 @@ class GoalConditionedGym(Gym):
         torch.Size([1, 3, 256, 256])
     """
 
-    def __init__(self, gym: Gym, goals: TaskGoalStore, camera_map: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        gym: Gym,
+        dataset: TaskGoalStore,
+        camera_map: dict[str, str] | None = None,
+    ) -> None:
         """Initialize the wrapper.
 
         Args:
             gym: Gym to wrap. Its observations must carry the task description in ``task``.
-            goals: Goal-conditioned dataset or other provider of canonical task goals.
+            dataset: Goal-conditioned dataset used to resolve task goals on reset.
             camera_map: Renames goal cameras to gym cameras, e.g. ``{"image": "top"}``. Only
                 needed when names differ and there is more than one camera.
         """
         self.gym = gym
-        self.goals = goals
+        self.dataset = dataset
         self.camera_map = camera_map or {}
         self._goal: ObservationValue = None
 
-        # Fail early if the gym already knows a task the store does not have.
+        # Fail early if the gym already knows a task the dataset does not have.
         description = getattr(gym, "task_description", None)
         if isinstance(description, str) and description:
-            goals.get_task_goal(description)
+            dataset.get_task_goal(description)
 
     def get_goal(self, observation: Observation) -> ObservationValue:
         """Return independent batched goal images for ``observation``'s task."""
         task = _task_description(observation.task, observation.batch_size)
-        goal = _match_cameras(self.goals.get_task_goal(task), observation.images, self.camera_map)
+        goal = _match_cameras(self.dataset.get_task_goal(task), observation.images, self.camera_map)
         return _batch_goal(goal, observation.batch_size, _device(observation))
 
     def reset(

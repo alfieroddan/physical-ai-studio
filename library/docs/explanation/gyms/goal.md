@@ -15,10 +15,10 @@ contiguous copies and cannot mutate the canonical goal.
 classDiagram
     class GoalConditionedGym {
         + gym : Gym
-        + goals : TaskGoalStore
+        + dataset : GoalConditionedDataset
         + camera_map : dict[str, str]
         --
-        + __init__(gym: Gym, goals: TaskGoalStore, camera_map: dict|None)
+        + __init__(gym: Gym, dataset: GoalConditionedDataset, camera_map: dict|None)
         + get_goal(observation) ObservationValue
         + reset(seed: int|None, **kwargs) Observation, dict|list[dict]
         + step(action) Observation, float|list[float], bool|list[bool], bool|list[bool], dict|list[dict]
@@ -29,7 +29,7 @@ classDiagram
     }
 
     GoalConditionedGym --> Gym : wraps
-    GoalConditionedGym --> TaskGoalStore : goal per task
+    GoalConditionedGym --> GoalConditionedDataset : goal per task
 ```
 
 Example:

@@ -93,13 +93,13 @@ class TestGoalConditionedGym:
 
     def test_goal_looked_up_once_per_episode_by_task(self):
         gym = _gym({"top": torch.zeros(1, 3, 2, 2)}, {"top": _image()})
-        gym.goals.lookups.clear()  # construction checks the task once
+        gym.dataset.lookups.clear()  # construction checks the task once
 
         gym.reset()
         gym.step(torch.zeros(2))
         gym.step(torch.zeros(2))
 
-        assert gym.goals.lookups == ["task"]
+        assert gym.dataset.lookups == ["task"]
 
     def test_unknown_task_fails_at_construction(self):
         with pytest.raises(KeyError, match="other"):

@@ -198,9 +198,9 @@ datamodule = LeRobotDataModule(
 
 ## Goal Conditioning
 
-Set `goal_source="task"` to attach one canonical goal to every sample as
-`Observation.goal_images`. Each task uses the last frame of its first selected
-training episode:
+Set `goal_source` to attach a goal to every sample as `Observation.goal_images`.
+Task mode uses one split-local representative frame per task; episode mode uses a
+frame from each sample's own episode:
 
 ```python test="skip" reason="requires physicalai install and downloads data"
 from physicalai.data.lerobot import LeRobotDataModule
@@ -208,12 +208,23 @@ from physicalai.data.lerobot import LeRobotDataModule
 datamodule = LeRobotDataModule(repo_id="lerobot/libero", goal_source="task")
 ```
 
-Observation augmentations do not apply to goals. Goal construction temporarily
-suppresses transforms while decoding one image set per task and restores them before
-training.
+The wrapper selects one goal row per episode and task without decoding images. At
+sample time it uses the observation's task or episode index to read the selected goal
+through the normal wrapped dataset, so configured training transforms apply
+independently to both reads.
 
-> **Note:** The first selected episode for each task must end with the desired target
-> state.
+Use `episode_goal_frames` (a dict or JSON object) to select relative frame offsets:
+
+```python
+datamodule = LeRobotDataModule(
+    repo_id="lerobot/libero",
+    goal_source="episode",
+    episode_goal_frames={0: -1, 1: -3},
+)
+```
+
+> **Note:** Train and validation resolve indices independently, so goals cannot cross
+> the episode split.
 
 See [Goal Conditioning](goal-conditioning.md) for wrapping datasets yourself and
 rollouts with `GoalConditionedGym`.
