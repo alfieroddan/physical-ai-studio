@@ -11,9 +11,10 @@ import lightning as L  # noqa: N812
 import pytest
 import torch
 
-from physicalai.data import Feature, FeatureType, Observation
+from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies.patch_policy import PatchPolicy
 from physicalai.policies.patch_policy.model import PatchPolicyModel
+from physicalai.policies.patch_policy.processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor
 
 
 def features() -> tuple[list[Feature], list[Feature]]:
@@ -54,6 +55,61 @@ def batch() -> Observation:
         images={"front": torch.rand(2, 2, 3, 32, 32)},
         action=torch.rand(2, 4, 2) * 2 - 1,
     )
+
+
+@torch.no_grad()
+def test_processors_normalize_images_and_concatenated_actions() -> None:
+    """Shared feature transforms preserve camera and flattened-action ordering."""
+    inputs = [
+        Feature(
+            name="front",
+            ftype=FeatureType.VISUAL,
+            shape=(3, 4, 4),
+            normalization_data=NormalizationParameters(mean=[0.5, 1.0, 1.5], std=[0.5, 1.0, 0.5]),
+        ),
+        Feature(
+            name="wrist",
+            ftype=FeatureType.VISUAL,
+            shape=(3, 4, 4),
+            normalization_data=NormalizationParameters(mean=[1.0, 1.0, 1.0], std=[2.0, 2.0, 2.0]),
+        ),
+    ]
+    outputs = [
+        Feature(
+            name="action.arm",
+            ftype=FeatureType.ACTION,
+            shape=(2,),
+            normalization_data=NormalizationParameters(mean=[1.0, 2.0], std=[2.0, 4.0]),
+        ),
+        Feature(
+            name="action.gripper",
+            ftype=FeatureType.ACTION,
+            shape=(1,),
+            normalization_data=NormalizationParameters(mean=[3.0], std=[0.5]),
+        ),
+    ]
+    preprocessor = PatchPolicyPreprocessor(inputs, outputs, (4, 4))
+    postprocessor = PatchPolicyPostprocessor(outputs, n_action_steps=1)
+    raw_actions = torch.tensor([[[3.0, 6.0, 3.5], [1.0, 2.0, 3.0]]])
+
+    processed = preprocessor(
+        {
+            "images": {
+                "front": torch.cat(
+                    [torch.full((1, 1, 1, 4, 4), value) for value in (0.5, 1.0, 2.0)],
+                    dim=2,
+                ),
+                "wrist": torch.full((1, 1, 3, 4, 4), 3.0),
+            },
+            "action": raw_actions,
+        },
+        require_actions=True,
+    )
+
+    torch.testing.assert_close(processed["images"][0, 0, 0, :, 0, 0], torch.tensor([0.0, 0.0, 1.0]))
+    torch.testing.assert_close(processed["images"][0, 0, 1, :, 0, 0], torch.ones(3))
+    torch.testing.assert_close(processed["action"], torch.tensor([[[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]]))
+    torch.testing.assert_close(postprocessor(processed["action"]), raw_actions[:, :1])
 
 
 @torch.no_grad()

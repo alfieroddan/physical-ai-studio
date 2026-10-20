@@ -14,32 +14,55 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from physicalai.data import Feature, FeatureType
+from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
 if TYPE_CHECKING:
     from .config import PatchPolicyConfig
 
 
-def _statistics(feature: Feature, reference: Tensor) -> tuple[Tensor, Tensor]:
-    """Materialize a feature's normalization statistics like a reference tensor.
+_NORM_MAP = {
+    FeatureType.VISUAL: NormalizationType.MEAN_STD,
+    FeatureType.ACTION: NormalizationType.MEAN_STD,
+}
 
-    Args:
-        feature: Feature containing optional mean and standard-deviation statistics.
-        reference: Tensor supplying the target device and dtype.
 
-    Returns:
-        The mean and standard deviation as tensors.
+def _normalizable_features(features: list[Feature]) -> dict[str, Feature]:
+    """Return indexed features with complete mean/std statistics."""
+    return {
+        f"feature_{index}": feature
+        for index, feature in enumerate(features)
+        if feature.normalization_data is not None
+        and feature.normalization_data.mean is not None
+        and feature.normalization_data.std is not None
+    }
+
+
+def _split_features(values: Tensor, features: list[Feature]) -> dict[str, Tensor]:
+    """Split a concatenated tensor into stable, indexed feature entries.
+
+    Raises:
+        ValueError: If a feature shape is missing or the total width does not match.
     """
-    stats = feature.normalization_data
-    mean = 0.0 if stats is None or stats.mean is None else stats.mean
-    std = 1.0 if stats is None or stats.std is None else stats.std
-    return (
-        torch.as_tensor(mean, device=reference.device, dtype=reference.dtype),
-        torch.as_tensor(std, device=reference.device, dtype=reference.dtype),
-    )
+    pieces: dict[str, Tensor] = {}
+    offset = 0
+    for index, feature in enumerate(features):
+        if not feature.shape:
+            raise ValueError(f"Feature {feature.name!r} has no shape.")
+        width = prod(feature.shape)
+        pieces[f"feature_{index}"] = values[..., offset : offset + width]
+        offset += width
+    if values.shape[-1] != offset:
+        raise ValueError(f"Feature width {values.shape[-1]} does not match configured width {offset}.")
+    return pieces
+
+
+def _join_features(values: dict[str, Tensor], features: list[Feature]) -> Tensor:
+    """Join indexed feature entries in configuration order."""
+    return torch.cat([values[f"feature_{index}"] for index in range(len(features))], dim=-1)
 
 
 class PatchPolicyPreprocessor(nn.Module):
-    """Order camera views, resize images, and normalize action targets.
+    """Order camera views, resize and normalize images, and normalize action targets.
 
     Args:
         input_features: Observation features used to determine camera order.
@@ -57,6 +80,8 @@ class PatchPolicyPreprocessor(nn.Module):
         self.visual_features = [feature for feature in input_features if feature.ftype is FeatureType.VISUAL]
         self.output_features = output_features
         self.image_size = image_size
+        self._image_normalizer = FeatureNormalizeTransform(_normalizable_features(self.visual_features), _NORM_MAP)
+        self._action_normalizer = FeatureNormalizeTransform(_normalizable_features(output_features), _NORM_MAP)
 
     @staticmethod
     def _image(images: Mapping[str, Any] | Tensor, feature: Feature) -> Tensor:
@@ -92,22 +117,9 @@ class PatchPolicyPreprocessor(nn.Module):
         Returns:
             The normalized action tensor.
 
-        Raises:
-            ValueError: If an output shape is missing or the action width is invalid.
         """
-        pieces = []
-        offset = 0
-        for feature in self.output_features:
-            if not feature.shape:
-                raise ValueError(f"Output feature {feature.name!r} has no shape.")
-            width = prod(feature.shape)
-            value = actions[..., offset : offset + width]
-            mean, std = _statistics(feature, value)
-            pieces.append((value - mean) / std.clamp_min(1e-8))
-            offset += width
-        if actions.shape[-1] != offset:
-            raise ValueError(f"Action width {actions.shape[-1]} does not match configured width {offset}.")
-        return torch.cat(pieces, dim=-1)
+        pieces = _split_features(actions, self.output_features)
+        return _join_features(self._action_normalizer(pieces), self.output_features)
 
     def forward(self, batch: Mapping[str, Any], *, require_actions: bool = False) -> dict[str, Tensor]:
         """Convert an observation mapping into model inputs.
@@ -127,7 +139,7 @@ class PatchPolicyPreprocessor(nn.Module):
         if not isinstance(raw_images, (Mapping, Tensor)):
             raise TypeError("Observation.images must be a tensor or camera dictionary.")
         views = []
-        for feature in self.visual_features:
+        for index, feature in enumerate(self.visual_features):
             image = self._image(raw_images, feature).float()
             if image.ndim == 4:
                 image = image[:, None]
@@ -136,7 +148,8 @@ class PatchPolicyPreprocessor(nn.Module):
             flat = image.flatten(0, 1)
             if flat.shape[-2:] != self.image_size:
                 flat = F.interpolate(flat, size=self.image_size, mode="bilinear", align_corners=False)
-            views.append(flat.reshape(*image.shape[:-2], *self.image_size))
+            image = flat.reshape(*image.shape[:-2], *self.image_size)
+            views.append(self._image_normalizer({f"feature_{index}": image})[f"feature_{index}"])
         processed = {"images": torch.stack(views, dim=2)}
 
         action = batch.get("action")
@@ -162,6 +175,11 @@ class PatchPolicyPostprocessor(nn.Module):
         super().__init__()
         self.output_features = output_features
         self.n_action_steps = n_action_steps
+        self._action_denormalizer = FeatureNormalizeTransform(
+            _normalizable_features(output_features),
+            _NORM_MAP,
+            inverse=True,
+        )
 
     def forward(self, actions: Tensor) -> Tensor:
         """Denormalize action features and truncate the predicted horizon.
@@ -172,22 +190,10 @@ class PatchPolicyPostprocessor(nn.Module):
         Returns:
             Denormalized chunks limited to the execution horizon.
 
-        Raises:
-            ValueError: If an output shape is missing or the action width is invalid.
         """
-        pieces = []
-        offset = 0
-        for feature in self.output_features:
-            if not feature.shape:
-                raise ValueError(f"Output feature {feature.name!r} has no shape.")
-            width = prod(feature.shape)
-            value = actions[..., offset : offset + width]
-            mean, std = _statistics(feature, value)
-            pieces.append(value * std + mean)
-            offset += width
-        if actions.shape[-1] != offset:
-            raise ValueError(f"Action width {actions.shape[-1]} does not match configured width {offset}.")
-        return torch.cat(pieces, dim=-1)[:, : self.n_action_steps]
+        pieces = _split_features(actions, self.output_features)
+        denormalized = self._action_denormalizer(pieces)
+        return _join_features(denormalized, self.output_features)[:, : self.n_action_steps]
 
 
 def make_policy_processors(config: PatchPolicyConfig) -> tuple[PatchPolicyPreprocessor, PatchPolicyPostprocessor]:
