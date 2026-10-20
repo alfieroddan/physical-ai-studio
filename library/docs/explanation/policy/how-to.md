@@ -1,5 +1,9 @@
 # Implement a Policy
 
+Use `prek` for repository validation. When a local suppression is necessary, use
+the standard `# noqa: <rule>` form; do not add tool-specific `ruff:` comments to
+source files.
+
 Build the config, model, processors, and policy first. Add optional features later.
 
 ## 1. Config

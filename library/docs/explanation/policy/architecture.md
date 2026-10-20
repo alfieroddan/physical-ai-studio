@@ -21,20 +21,33 @@ Small policies may combine files. Keep the same ownership boundaries.
 
 ## Ownership
 
-| Owner | Responsibility |
-| --- | --- |
-| Config | Ordered features, architecture, and action horizons |
-| Policy | Construction, processing flow, training, and optimizer settings |
-| Base policy | Config property, checkpoint plumbing, device transfer, and action queue |
-| Dataset | Observed features and normalization values |
-| Model | Network, loss, temporal indices, and full-chunk prediction |
-| Processors | Conversion, normalization, and external action shape |
-| Pretrained resolver | Artifact config and weight paths |
-| Capability mixins | PEFT, RTC, and other shared behavior |
-| Export mixin | Schemas, samples, backend settings, and manifests |
+| Owner               | Responsibility                                                          |
+| ------------------- | ----------------------------------------------------------------------- |
+| Config              | Ordered features, architecture, and action horizons                     |
+| Policy              | Construction, processing flow, training, and optimizer settings         |
+| Base policy         | Config property, checkpoint plumbing, device transfer, and action queue |
+| Dataset             | Observed features and normalization values                              |
+| Model               | Network, loss, temporal indices, and full-chunk prediction              |
+| Processors          | Conversion, normalization, and external action shape                    |
+| Pretrained resolver | Artifact config and weight paths                                        |
+| Capability mixins   | PEFT, RTC, and other shared behavior                                    |
+| Export mixin        | Schemas, samples, backend settings, and manifests                       |
 
 The config does not contain optimizer settings, artifact paths, or export destinations.
 The model does not store the config or accept `Feature` objects.
+
+Keep policy construction explicit. Store each constructor value in a clearly named
+attribute and pass every field explicitly in `from_config()` and when creating the
+resolved config. Do not hide constructor state in a generic dictionary such as
+`_config_values`; although shorter, it makes reconstruction paths harder to read,
+review, and type-check.
+
+The policy constructor is a user-facing API, not a mirror of every model argument.
+Expose common choices and training controls there. The serialized config has a
+different responsibility: it must include every argument needed to reconstruct the
+model, including rarely changed internal options. Policy construction may leave those
+fields at config defaults, but model materialization must consume them explicitly so a
+complete config is sufficient to rebuild the architecture.
 
 ## Feature State
 
@@ -80,15 +93,15 @@ Use this order:
 `configure_model()` is a Lightning lifecycle hook, so implementations must follow
 these constraints:
 
-| Constraint | Required behavior |
-| --- | --- |
-| Lightning may call the hook more than once | Make it idempotent and return when the model already exists |
-| Strategies such as FSDP control module creation | Create large modules inside the hook, not before Lightning invokes it |
-| Checkpoint tensors load after module construction | Rebuild the exact module and adapter structure from saved config first |
-| Checkpoint restore must be self-contained | Do not fetch a pretrained artifact or overwrite checkpoint weights |
-| Dataset state may arrive later in `setup()` | Keep architecture independent of normalization state and do not rebuild the model |
-| Manual inference may call the hook without a Trainer | Do not depend on trainer, dataloader, or device state during construction |
-| Config fields and defaults may change | Version or migrate saved config so old checkpoints rebuild the same structure |
+| Constraint                                           | Required behavior                                                                 |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Lightning may call the hook more than once           | Make it idempotent and return when the model already exists                       |
+| Strategies such as FSDP control module creation      | Create large modules inside the hook, not before Lightning invokes it             |
+| Checkpoint tensors load after module construction    | Rebuild the exact module and adapter structure from saved config first            |
+| Checkpoint restore must be self-contained            | Do not fetch a pretrained artifact or overwrite checkpoint weights                |
+| Dataset state may arrive later in `setup()`          | Keep architecture independent of normalization state and do not rebuild the model |
+| Manual inference may call the hook without a Trainer | Do not depend on trainer, dataloader, or device state during construction         |
+| Config fields and defaults may change                | Version or migrate saved config so old checkpoints rebuild the same structure     |
 
 Keep the hook deterministic and free of network access. It should materialize module
 structure from resolved config; `setup()` may validate dataset features and attach
@@ -96,13 +109,13 @@ normalization state without changing that structure.
 
 ## Construction Routes
 
-| Route | Config source | Weight source |
-| --- | --- | --- |
-| Explicit config | Caller | None |
-| Constructor | Features and defaults | None |
-| Training | Config validated against dataset | None |
-| Pretrained | Artifact config | Artifact weights |
-| Checkpoint | Saved config | Lightning state dictionary |
+| Route           | Config source                    | Weight source              |
+| --------------- | -------------------------------- | -------------------------- |
+| Explicit config | Caller                           | None                       |
+| Constructor     | Features and defaults            | None                       |
+| Training        | Config validated against dataset | None                       |
+| Pretrained      | Artifact config                  | Artifact weights           |
+| Checkpoint      | Saved config                     | Lightning state dictionary |
 
 All routes call `configure_model()`. Pretrained resolvers do not create models.
 Checkpoint loading does not fetch the original artifact.

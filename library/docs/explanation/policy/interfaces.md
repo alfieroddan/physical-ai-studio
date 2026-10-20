@@ -14,6 +14,9 @@ The serializable config contains:
 
 The policy owns the config. The model receives flat constructor values.
 
+Use a plain frozen dataclass for configuration. Do not add `kw_only=True` unless
+the config has a concrete inheritance or field-ordering requirement that needs it.
+
 ## Model
 
 ### Required
@@ -84,16 +87,16 @@ Processor state does not define features or model architecture.
 
 ## Optional Interfaces
 
-| Interface | Use when |
-| --- | --- |
-| Pretrained resolver | Loading external artifacts |
+| Interface                          | Use when                                         |
+| ---------------------------------- | ------------------------------------------------ |
+| Pretrained resolver                | Loading external artifacts                       |
 | `set_features()` or rename support | Metadata can change without rebuilding the model |
-| Export properties | Supporting export |
-| PEFT targets | Supporting LoRA |
-| RTC behavior | Supporting real-time chunking |
-| Gradient-checkpointing hook | The model supports it |
-| Custom validation loss | Validation differs from training |
-| Temporal indices | The model consumes temporal context |
+| Export properties                  | Supporting export                                |
+| PEFT targets                       | Supporting LoRA                                  |
+| RTC behavior                       | Supporting real-time chunking                    |
+| Gradient-checkpointing hook        | The model supports it                            |
+| Custom validation loss             | Validation differs from training                 |
+| Temporal indices                   | The model consumes temporal context              |
 
 ## Checklist
 
