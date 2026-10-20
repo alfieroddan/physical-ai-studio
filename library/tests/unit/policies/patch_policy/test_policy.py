@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import lightning as L  # noqa: N812
+import pytest
 import torch
 
 from physicalai.data import Feature, FeatureType, Observation
@@ -95,6 +96,24 @@ def test_from_config_reconstructs_explicit_values() -> None:
     assert isinstance(restored.model, PatchPolicyModel)
     assert getattr(restored.model.action_head, "eta") == 0.0
     assert getattr(restored.model.action_head, "clip_sample_range") == 0.5
+
+
+@pytest.mark.parametrize("image_size", [(224, 224), (112, 224)])
+@torch.no_grad()
+def test_dinov2_uses_configured_image_size(image_size: tuple[int, int]) -> None:
+    """DINOv2 accepts the configured resolution and initializes the matching patch count."""
+    config = replace(
+        make_policy("diffusion").config,
+        encoder_name="dinov2",
+        encoder_output="patches",
+        image_size=image_size,
+    )
+    model = PatchPolicyModel.from_config(config)
+    expected_tokens = (image_size[0] // 14) * (image_size[1] // 14)
+
+    assert model.encoder.num_tokens == expected_tokens
+    tokens = model.encoder(torch.rand(1, 2, 1, 3, *image_size))
+    assert tokens.shape == (1, 2, 1, expected_tokens, model.encoder.output_dim)
 
 
 def test_checkpoint_hooks_restore_complete_config() -> None:

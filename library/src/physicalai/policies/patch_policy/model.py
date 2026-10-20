@@ -31,6 +31,7 @@ class PatchPolicyModel(Model):
         num_views: int,
         n_obs_steps: int = 1,
         chunk_size: int = 16,
+        image_size: tuple[int, int] = (224, 224),
         encoder_name: FeatureEncoderName = "dinov2",
         encoder_output: EncoderOutput = "patches",
         encoder_pretrained: bool = True,
@@ -64,6 +65,7 @@ class PatchPolicyModel(Model):
             encoder_output,
             pretrained=encoder_pretrained,
             frozen=freeze_encoder,
+            image_size=image_size,
         )
         if action_head == "diffusion":
             self.action_head = PatchDiffusionHead(
@@ -118,6 +120,7 @@ class PatchPolicyModel(Model):
             num_views=num_views,
             n_obs_steps=config.n_obs_steps,
             chunk_size=config.chunk_size,
+            image_size=config.image_size,
             encoder_name=config.encoder_name,
             encoder_output=config.encoder_output,
             encoder_pretrained=config.encoder_pretrained,

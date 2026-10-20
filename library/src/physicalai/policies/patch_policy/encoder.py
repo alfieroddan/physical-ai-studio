@@ -43,11 +43,18 @@ class TimmFeatureEncoder(nn.Module):
         *,
         pretrained: bool = True,
         frozen: bool = True,
+        image_size: tuple[int, int] = (224, 224),
     ) -> None:
         super().__init__()
         self.output = output
         self.frozen = frozen
-        self.backbone = _import_timm().create_model(_TIMM_MODELS[name], pretrained=pretrained, num_classes=0)
+        model_kwargs = {} if name == "resnet18" else {"img_size": image_size}
+        self.backbone = _import_timm().create_model(
+            _TIMM_MODELS[name],
+            pretrained=pretrained,
+            num_classes=0,
+            **model_kwargs,
+        )
         self.output_dim = int(self.backbone.num_features)
         patch_embed = getattr(self.backbone, "patch_embed", None)
         self.num_tokens = int(getattr(patch_embed, "num_patches", 1)) if output == "patches" else 1
