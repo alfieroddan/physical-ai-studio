@@ -194,28 +194,45 @@ def _selected_episodes(dataset: LeRobotDataset, metadata: list[dict[str, Any]]) 
 class LeRobotGoalConditionedDataset(GoalConditionedDataset):
     """LeRobot wrapper that selects goal rows by task or episode."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0912, PLR0915
         self,
         dataset: LeRobotDataset | _LeRobotDatasetAdapter,
         goal_source: GoalSource | None = None,
         *,
         episode_goal_frames: EpisodeGoalFrames | None = None,
         task_goal_episodes: TaskGoalEpisodes | None = None,
+        task_goal_source: LeRobotGoalConditionedDataset | None = None,
     ) -> None:
         """Select one goal row per episode and task without decoding images.
+
+        Args:
+            dataset: LeRobot dataset or adapter to wrap.
+            goal_source: Whether observations use task-level or episode-level goals. Defaults to ``"task"``.
+            episode_goal_frames: Optional mapping from episode indices to goal frame offsets, or a JSON file
+                containing that mapping. Offsets may be negative; unspecified episodes use their final frame.
+            task_goal_episodes: Optional mapping from task descriptions to representative episode indices.
+                Episodes outside this dataset split use the first local episode for the task.
+            task_goal_source: Optional training dataset wrapper whose task goals should be reused, typically
+                for validation or test datasets.
 
         Raises:
             ValueError: If source selection or episode metadata is invalid.
         """
+        # if either episode_goal_frames or task_goal_episodes is provided, goal_source must be explicitly set
         selection_configured = episode_goal_frames is not None or task_goal_episodes is not None
         if goal_source is None and selection_configured:
             msg = "'episode_goal_frames' and 'task_goal_episodes' require an explicit goal_source."
             raise ValueError(msg)
+
+        # default goal source to task
         self.goal_source: GoalSource = goal_source or "task"
+
         if self.goal_source not in {"task", "episode"}:
             msg = f"Unknown goal source '{self.goal_source}', expected 'task' or 'episode'."
             raise ValueError(msg)
 
+        # wrap the raw dataset in an adapter if necessary, to extend to non-lerobot datasets
+        # we should modify it here
         if not isinstance(dataset, _LeRobotDatasetAdapter):
             dataset = _LeRobotDatasetAdapter.from_lerobot(dataset)
         super().__init__(dataset)
@@ -224,33 +241,53 @@ class LeRobotGoalConditionedDataset(GoalConditionedDataset):
             msg = "Goal conditioning requires delta_timestamps=None to select a single goal frame."
             raise ValueError(msg)
 
+        # build task indices and parse episode goal frames
         self._task_indices = _build_task_indices(raw_dataset.meta.tasks)
         metadata = _metadata_episodes(raw_dataset)
         configured_frames = _parse_episode_goal_frames(episode_goal_frames)
         _validate_goal_frames(metadata, configured_frames)
         episodes = _selected_episodes(raw_dataset, metadata)
 
-        self._episode_goal_indices = {
-            episode.index: episode.goal_row(configured_frames.get(episode.index, -1)) for episode in episodes
-        }
+        # configure task and episode goal indices based on the provided sources and episodes
+        self._task_goal_source = task_goal_source
+        if task_goal_source is not None and self.goal_source != "task":
+            msg = "A training task-goal source can only be used with goal_source='task'."
+            raise ValueError(msg)
+        if task_goal_source is not None and task_goal_episodes is not None:
+            msg = "Configure task goal episodes on the training task-goal source."
+            raise ValueError(msg)
+        self._episode_goal_indices = (
+            {episode.index: episode.goal_row(configured_frames.get(episode.index, -1)) for episode in episodes}
+            if task_goal_source is None or self.goal_source == "episode"
+            else {}
+        )
         self._task_goal_indices: dict[int, int] = {}
-        for episode in episodes:
-            self._task_goal_indices.setdefault(episode.task_index, self._episode_goal_indices[episode.index])
+        if task_goal_source is not None:
+            training_task_indices = task_goal_source._task_goal_indices.keys()  # noqa: SLF001
+            missing_tasks = {episode.task_index for episode in episodes} - training_task_indices
+            if missing_tasks:
+                msg = f"Validation tasks {sorted(missing_tasks)} have no training goal."
+                raise ValueError(msg)
+        else:
+            for episode in episodes:
+                self._task_goal_indices.setdefault(episode.task_index, self._episode_goal_indices[episode.index])
 
-        episodes_by_id = {episode.index: episode for episode in episodes}
-        for task, episode_index in (task_goal_episodes or {}).items():
-            if type(episode_index) is not int:
-                msg = f"Task '{task}' goal episode must be an integer, got {episode_index!r}."
-                raise ValueError(msg)
-            task_index = self._task_index(task)
-            # A representative outside this split falls back to the first local episode.
-            if episode_index not in episodes_by_id:
-                continue
-            episode = episodes_by_id[episode_index]
-            if episode.task_index != task_index:
-                msg = f"Task '{task}' goal episode {episode_index} does not belong to that task."
-                raise ValueError(msg)
-            self._task_goal_indices[task_index] = self._episode_goal_indices[episode_index]
+        # configure task goal indices based on the provided task goal episodes
+        if task_goal_episodes is not None:
+            episodes_by_id = {episode.index: episode for episode in episodes}
+            for task, episode_index in task_goal_episodes.items():
+                if type(episode_index) is not int:
+                    msg = f"Task '{task}' goal episode must be an integer, got {episode_index!r}."
+                    raise ValueError(msg)
+                task_index = self._task_index(task)
+                # A representative outside this split falls back to the first local episode.
+                if episode_index not in episodes_by_id:
+                    continue
+                episode = episodes_by_id[episode_index]
+                if episode.task_index != task_index:
+                    msg = f"Task '{task}' goal episode {episode_index} does not belong to that task."
+                    raise ValueError(msg)
+                self._task_goal_indices[task_index] = self._episode_goal_indices[episode_index]
 
     def _task_index(self, task: str) -> int:
         normalized = _normalize_task(task)
@@ -279,26 +316,30 @@ class LeRobotGoalConditionedDataset(GoalConditionedDataset):
             goal_index = self._episode_goal_indices[episode_index]
         else:
             task_index = int(observation.task_index)  # type: ignore[arg-type]
-            if task_index not in self._task_goal_indices:
-                msg = f"No goal for task index {task_index} in the wrapped dataset."
-                raise KeyError(msg)
-            goal_index = self._task_goal_indices[task_index]
+            if self._task_goal_source is not None:
+                return self._task_goal_source._get_task_goal_by_index(task_index)  # noqa: SLF001
+            return self._get_task_goal_by_index(task_index)
         return self.dataset[goal_index].images
 
-    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
-        """Read the split-local representative goal for a task through normal dataset access.
-
-        Returns:
-            Representative task goal images.
-
-        Raises:
-            KeyError: If the task is unknown or absent from this split.
-        """
-        task_index = self._task_index(task)
+    def _get_task_goal_by_index(
+        self,
+        task_index: int,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         if task_index not in self._task_goal_indices:
-            msg = f"No goal for task '{task}' in the wrapped dataset."
+            msg = f"No goal for task index {task_index} in the wrapped dataset."
             raise KeyError(msg)
         return self.dataset[self._task_goal_indices[task_index]].images
+
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
+        """Read the configured representative goal for a task through normal dataset access.
+
+        Returns:
+            Representative task goal images, using the configured task-goal source.
+        """
+        task_index = self._task_index(task)
+        if self._task_goal_source is not None:
+            return self._task_goal_source._get_task_goal_by_index(task_index)  # noqa: SLF001
+        return self._get_task_goal_by_index(task_index)
 
 
 __all__ = ["EpisodeGoalFrames", "GoalSource", "LeRobotGoalConditionedDataset", "TaskGoalEpisodes"]

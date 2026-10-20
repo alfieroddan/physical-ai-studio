@@ -102,8 +102,11 @@ def _match_cameras(
         goal = {camera_map.get(k, k): v for k, v in goal.items()}
     if not isinstance(images, dict):
         # The gym gives a single image, so the goal must have exactly one camera too.
-        if isinstance(goal, dict) and len(goal) == 1:
-            return next(iter(goal.values()))
+        if isinstance(goal, dict):
+            if len(goal) == 1:
+                return next(iter(goal.values()))
+            msg = f"Cannot match goal cameras {sorted(goal)} to a single-tensor gym image; expected exactly one camera."
+            raise KeyError(msg)
         return goal
     if not isinstance(goal, dict):
         goal = {"": goal}

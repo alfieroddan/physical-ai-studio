@@ -119,7 +119,11 @@ class FakeLeRobotDataset:
         return {
             "observation.images.top": image,
             "observation.state": torch.full((2,), float(frame)),
+            "observation.state.joint_positions": torch.tensor([float(frame), float(frame + 1)]),
+            "observation.state.gripper_position": torch.tensor([float(frame + 2)]),
             "action": torch.zeros(2),
+            "action.joint_position": torch.tensor([float(frame), float(frame + 1)]),
+            "action.gripper_position": torch.tensor([float(frame + 2)]),
             "episode_index": torch.tensor(episode),
             "frame_index": torch.tensor(frame % EPISODE_LENGTH),
             "index": torch.tensor(frame),
@@ -397,12 +401,34 @@ class TestLeRobotDataModuleGoals:
 
     def test_accepts_wrapped_dataset(self):
         dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset())
+        adapter = dataset.dataset
+        adapter._state_columns = ["observation.state.joint_positions", "observation.state.gripper_position"]
+        adapter._action_columns = ["action.joint_position", "action.gripper_position"]
 
         dm = LeRobotDataModule(dataset=dataset, train_batch_size=2)
 
         assert dm.train_dataset is dataset
+        sample = dm.train_dataset[0]
+        assert torch.equal(sample.state, torch.tensor([0.0, 1.0, 2.0]))
+        assert torch.equal(sample.action, torch.tensor([0.0, 1.0, 2.0]))
 
-    def test_val_split_uses_split_local_task_goals(self, monkeypatch):
+    def test_wrapped_dataset_applies_explicit_columns(self):
+        dataset = LeRobotGoalConditionedDataset(FakeLeRobotDataset())
+        state_columns = ["observation.state.joint_positions", "observation.state.gripper_position"]
+        action_columns = ["action.joint_position", "action.gripper_position"]
+
+        dm = LeRobotDataModule(
+            dataset=dataset,
+            train_batch_size=2,
+            state_columns=state_columns,
+            action_columns=action_columns,
+        )
+
+        sample = dm.train_dataset[0]
+        assert torch.equal(sample.state, torch.tensor([0.0, 1.0, 2.0]))
+        assert torch.equal(sample.action, torch.tensor([0.0, 1.0, 2.0]))
+
+    def test_val_split_uses_training_task_goals(self, monkeypatch):
         monkeypatch.setattr("physicalai.data.lerobot.datamodule._read_total_episodes", lambda *_: 4)
         dm = LeRobotDataModule(
             repo_id="fake",
@@ -414,7 +440,19 @@ class TestLeRobotDataModuleGoals:
 
         assert isinstance(dm.val_eval_dataset, LeRobotGoalConditionedDataset)
         assert _frame(dm.train_dataset[0].goal_images) == _last_frame(0)
-        assert _frame(dm.val_eval_dataset[0].goal_images) == _last_frame(3)
+        assert _frame(dm.val_eval_dataset[0].goal_images) == _last_frame(2)
+
+    def test_val_split_rejects_task_missing_from_training(self, monkeypatch):
+        monkeypatch.setattr("physicalai.data.lerobot.datamodule._read_total_episodes", lambda *_: 4)
+        monkeypatch.setattr("physicalai.data.lerobot.datamodule.random.sample", lambda episodes, count: [0, 1])
+
+        with pytest.raises(ValueError, match="no training goal"):
+            LeRobotDataModule(
+                repo_id="fake",
+                train_batch_size=2,
+                val_split=0.5,
+                goal_source="task",
+            )
 
     def test_raw_gyms_are_wrapped(self):
         dm = LeRobotDataModule(

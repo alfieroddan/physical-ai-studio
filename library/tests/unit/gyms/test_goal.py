@@ -198,3 +198,8 @@ class TestCameraMatching:
         obs, _ = _gym(torch.zeros(1, 3, 2, 2), {"image": _image()}).reset()
 
         assert obs.goal_images.shape == (1, 3, 2, 2)
+
+    @pytest.mark.parametrize("goal_images", [{}, {"image": _image(), "image2": _image()}])
+    def test_single_tensor_gym_rejects_ambiguous_goal_cameras(self, goal_images):
+        with pytest.raises(KeyError, match="exactly one camera"):
+            _gym(torch.zeros(1, 3, 2, 2), goal_images).reset()

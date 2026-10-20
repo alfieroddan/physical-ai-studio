@@ -329,6 +329,10 @@ class LeRobotDataModule(DataModule):
         if conditioned_dataset is not None:
             # Set up the inner dataset like any other; the goal wrapper is restored below.
             train_dataset = cast("_LeRobotDatasetAdapter", conditioned_dataset.dataset)
+            if state_columns is not None:
+                train_dataset._state_columns = state_columns  # noqa: SLF001
+            if action_columns is not None:
+                train_dataset._action_columns = action_columns  # noqa: SLF001
 
         elif dataset is not None:
             if LeRobotDataset is None:
@@ -440,7 +444,10 @@ class LeRobotDataModule(DataModule):
                     val_eval_dataset,
                     goal_source=goal_source,
                     episode_goal_frames=episode_goal_frames,
-                    task_goal_episodes=task_goal_episodes,
+                    task_goal_episodes=task_goal_episodes if goal_source != "task" else None,
+                    task_goal_source=(
+                        cast("LeRobotGoalConditionedDataset", train_dataset) if goal_source == "task" else None
+                    ),
                 )
 
             val_gym = self._wrap_gym(val_gym, train_dataset)
