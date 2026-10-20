@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
-from physicalai.data import GoalConditionedDataset, Observation, ObservationValue
+from physicalai.data import GoalConditionedDataset, Observation
 from physicalai.gyms import GoalConditionedGym, Gym
 
 
@@ -54,10 +55,12 @@ class TaskGoals(GoalConditionedDataset):
         self.tasks = tasks
         self.lookups: list[str] = []
 
-    def get_goal(self, observation: Observation) -> ObservationValue:
+    def get_goal(
+        self, observation: Observation,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         raise NotImplementedError
 
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         if task not in self.tasks:
             raise KeyError(task)
         self.lookups.append(task)
@@ -67,7 +70,7 @@ class TaskGoals(GoalConditionedDataset):
 class PerTaskGoals:
     """Canonical image value derived from a task name's final character."""
 
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         return {"top": _image(float(task[-1]))}
 
 

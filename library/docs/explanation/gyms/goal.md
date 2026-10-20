@@ -19,7 +19,7 @@ classDiagram
         + camera_map : dict[str, str]
         --
         + __init__(gym: Gym, dataset: GoalConditionedDataset, camera_map: dict|None)
-        + get_goal(observation) ObservationValue
+        + get_goal(observation) dict|torch.Tensor|np.ndarray|None
         + reset(seed: int|None, **kwargs) Observation, dict|list[dict]
         + step(action) Observation, float|list[float], bool|list[bool], bool|list[bool], dict|list[dict]
         + render(...) Any

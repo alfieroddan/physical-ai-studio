@@ -13,10 +13,6 @@ import numpy as np
 import torch
 
 type NormalizationValue = float | list[float] | list[list[float]] | list[list[list[float]]] | None
-# A single tensor, or a dict of named tensors (e.g. one per camera).
-type ObservationValue = dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None
-# A task may be text for language-conditioned policies/gyms or an encoded tensor/array.
-type TaskValue = str | list[str] | tuple[str, ...] | torch.Tensor | np.ndarray | None
 
 
 @dataclass
@@ -58,10 +54,10 @@ class Observation:
     """
 
     # Core Observation
-    action: ObservationValue = None
-    task: TaskValue = None
-    state: ObservationValue = None
-    images: ObservationValue = None
+    action: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
+    task: str | list[str] | tuple[str, ...] | torch.Tensor | np.ndarray | None = None
+    state: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
+    images: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
 
     # Inference-only Fields
     # Real-Time Chunking (RTC) inputs: the unconsumed tail of the previously predicted
@@ -74,7 +70,7 @@ class Observation:
 
     # Goal Conditioning
     # Images of the state the policy should reach, in the same layout as `images`.
-    goal_images: ObservationValue = None
+    goal_images: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
 
     # Optional RL & Metadata Fields
     next_reward: torch.Tensor | np.ndarray | None = None

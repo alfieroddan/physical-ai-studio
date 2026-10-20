@@ -17,8 +17,10 @@ import torch
 from .base import Gym
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from physicalai.data.goal import TaskGoalStore
-    from physicalai.data.observation import Observation, ObservationValue
+    from physicalai.data.observation import Observation
 
     from .types import SingleOrBatch
 
@@ -52,7 +54,11 @@ def _task_description(task: Any, batch_size: int) -> str:  # noqa: ANN401
     raise ValueError(msg)
 
 
-def _batch_goal(value: ObservationValue, batch_size: int, device: torch.device) -> ObservationValue:
+def _batch_goal(
+    value: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None,
+    batch_size: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
     """Broadcast an unbatched goal into independent contiguous batch tensors.
 
     Returns:
@@ -68,13 +74,20 @@ def _batch_goal(value: ObservationValue, batch_size: int, device: torch.device) 
     return None if value is None else batch(value)
 
 
-def _clone_goal(value: ObservationValue, device: torch.device) -> ObservationValue:
+def _clone_goal(
+    value: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None,
+    device: torch.device,
+) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
     if isinstance(value, dict):
         return {key: torch.as_tensor(item, device=device).clone().contiguous() for key, item in value.items()}
     return None if value is None else torch.as_tensor(value, device=device).clone().contiguous()
 
 
-def _match_cameras(goal: ObservationValue, images: ObservationValue, camera_map: dict[str, str]) -> ObservationValue:
+def _match_cameras(
+    goal: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None,
+    images: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None,
+    camera_map: dict[str, str],
+) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
     """Put goal images in the same layout as the gym's images (dict of cameras or single tensor).
 
     Returns:
@@ -137,14 +150,17 @@ class GoalConditionedGym(Gym):
         self.gym = gym
         self.dataset = dataset
         self.camera_map = camera_map or {}
-        self._goal: ObservationValue = None
+        self._goal: dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None = None
 
         # Fail early if the gym already knows a task the dataset does not have.
         description = getattr(gym, "task_description", None)
         if isinstance(description, str) and description:
             dataset.get_task_goal(description)
 
-    def get_goal(self, observation: Observation) -> ObservationValue:
+    def get_goal(
+        self,
+        observation: Observation,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Return independent batched goal images for ``observation``'s task."""
         task = _task_description(observation.task, observation.batch_size)
         goal = _match_cameras(self.dataset.get_task_goal(task), observation.images, self.camera_map)

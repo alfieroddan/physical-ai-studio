@@ -1,8 +1,7 @@
 # Goal Conditioning
 
 A goal-conditioned policy receives an image of the state it should reach with every
-observation. This is required for benchmarks such as LIBERO-goal, where tasks can
-start from the same scene.
+observation.
 
 Goal images are attached as `Observation.goal_images` in the same layout as
 `Observation.images`. The field is `None` when goal conditioning is disabled.
@@ -10,8 +9,7 @@ Goal images are attached as `Observation.goal_images` in the same layout as
 ## Goal lookup
 
 `LeRobotGoalConditionedDataset` wraps a normal LeRobot dataset and selects one integer
-goal row per episode and task. It does not decode or cache goal images during
-construction. For every sample read, it uses the observation's task or episode index
+goal row per episode and task. For every sample read, it uses the observation's task or episode index
 to select the goal row and reads the wrapped dataset a second time:
 
 ```python

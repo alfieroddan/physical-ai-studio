@@ -16,13 +16,16 @@ from typing import TYPE_CHECKING, Protocol
 from physicalai.data.dataset import Dataset
 
 if TYPE_CHECKING:
-    from physicalai.data.observation import Feature, Observation, ObservationValue
+    import numpy as np
+    import torch
+
+    from physicalai.data.observation import Feature, Observation
 
 
 class TaskGoalStore(Protocol):
     """Provides rollout goal images for task descriptions."""
 
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Return the goal images for a task description."""
         ...
 
@@ -49,11 +52,14 @@ class GoalConditionedDataset(Dataset):
         self.dataset = dataset
 
     @abstractmethod
-    def get_goal(self, observation: Observation) -> ObservationValue:
+    def get_goal(
+        self,
+        observation: Observation,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Return the goal images for a sample of the wrapped dataset."""
 
     @abstractmethod
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Return the fixed goal images for a task description, e.g. ``Observation.task`` from a gym."""
 
     def __len__(self) -> int:

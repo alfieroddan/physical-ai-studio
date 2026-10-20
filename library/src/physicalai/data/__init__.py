@@ -13,8 +13,6 @@ from .observation import (
     NormalizationParameters,
     NormalizationValue,
     Observation,
-    ObservationValue,
-    TaskValue,
 )
 
 __all__ = [
@@ -27,7 +25,5 @@ __all__ = [
     "NormalizationParameters",
     "NormalizationValue",
     "Observation",
-    "ObservationValue",
     "TaskGoalStore",
-    "TaskValue",
 ]

@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
-from physicalai.data import Dataset, GoalConditionedDataset, Observation, ObservationValue
+from physicalai.data import Dataset, GoalConditionedDataset, Observation
 
 
 class EpisodeDataset(Dataset):
@@ -55,10 +56,12 @@ class EpisodeDataset(Dataset):
 class EpisodeGoalDataset(GoalConditionedDataset):
     """Goal filled with the episode index."""
 
-    def get_goal(self, observation: Observation) -> ObservationValue:
+    def get_goal(
+        self, observation: Observation,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         return {"top": torch.full((3, 2, 2), float(observation.episode_index))}
 
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         return {"top": torch.full((3, 2, 2), float(len(task)))}
 
 

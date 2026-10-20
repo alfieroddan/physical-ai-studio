@@ -17,9 +17,11 @@ from physicalai.data.goal import GoalConditionedDataset
 from .dataset import _LeRobotDatasetAdapter
 
 if TYPE_CHECKING:
+    import numpy as np
+    import torch
     from pandas import DataFrame
 
-    from physicalai.data.observation import Observation, ObservationValue
+    from physicalai.data.observation import Observation
 
 if TYPE_CHECKING or module_available("lerobot"):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -257,7 +259,10 @@ class LeRobotGoalConditionedDataset(GoalConditionedDataset):
             raise KeyError(msg)
         return self._task_indices[normalized]
 
-    def get_goal(self, observation: Observation) -> ObservationValue:
+    def get_goal(
+        self,
+        observation: Observation,
+    ) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Read the goal selected for an observation through normal dataset access.
 
         Returns:
@@ -280,7 +285,7 @@ class LeRobotGoalConditionedDataset(GoalConditionedDataset):
             goal_index = self._task_goal_indices[task_index]
         return self.dataset[goal_index].images
 
-    def get_task_goal(self, task: str) -> ObservationValue:
+    def get_task_goal(self, task: str) -> dict[str, torch.Tensor | np.ndarray] | torch.Tensor | np.ndarray | None:
         """Read the split-local representative goal for a task through normal dataset access.
 
         Returns:

@@ -40,10 +40,7 @@ state is consistent across episodes. There's a second, less obvious reason this
 matters for some policies — see [Why cyclic episodes matter](#why-cyclic-episodes-matter-technical-detail)
 at the end of this guide.
 
-> **Note:** Goal-conditioned policies (e.g. Patch Policy) use the **last frame**
-> of each episode as the goal. In a cyclic episode that frame is the home pose,
-> not the completed task, so crop episodes to end at task completion before
-> training them. See [Goal Conditioning](../../explanation/data/goal-conditioning.md).
+> **Note:** Goal-conditioned policies (e.g. Patch Policy) may differ see [Goal Conditioning](../../explanation/data/goal-conditioning.md).
 
 ---
 
