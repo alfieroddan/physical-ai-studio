@@ -12,6 +12,7 @@ import torch
 from torch import Tensor
 
 from physicalai.data import Dataset, Feature, Observation
+from physicalai.export import ExportablePolicyMixin
 from physicalai.policies.base import Model, Policy
 
 from .config import (
@@ -21,6 +22,7 @@ from .config import (
     PatchPolicyConfig,
     resolve_action_dim,
 )
+from .export import PatchPolicyExportMixin
 from .model import PatchPolicyModel
 from .processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor, make_policy_processors
 
@@ -28,10 +30,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-class PatchPolicy(Policy):
+class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
     """Train a timm visual encoder followed by a diffusion or Behavior Transformer head.
 
-    Export is intentionally not enabled until the stochastic heads have dedicated export contracts.
+    Export supports Torch and OpenVINO with the configured observation window.
 
     Args:
         input_features: Optional observation schema. Resolved from training data when omitted.
@@ -51,12 +53,13 @@ class PatchPolicy(Policy):
         dropout: Dropout probability used by transformer layers.
         num_train_timesteps: Number of diffusion timesteps used during training.
         num_inference_steps: Number of denoising steps used during inference.
+        eta: DDIM stochasticity coefficient used during diffusion inference.
         use_random_input_noise: Whether diffusion sampling starts from random noise.
         optimizer_lr: AdamW learning rate.
         optimizer_weight_decay: AdamW weight-decay coefficient.
     """
 
-    model: Model | None
+    model: Model | None  # pyrefly: ignore[bad-override-mutable-attribute]
 
     def __init__(  # noqa: PLR0913
         self,
@@ -78,6 +81,7 @@ class PatchPolicy(Policy):
         dropout: float = 0.1,
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
+        eta: float = 1.0,
         use_random_input_noise: bool = True,
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
@@ -86,7 +90,7 @@ class PatchPolicy(Policy):
         self.save_hyperparameters(ignore=["input_features", "output_features"])
         self.optimizer_lr = optimizer_lr
         self.optimizer_weight_decay = optimizer_weight_decay
-        self._preprocessor: PatchPolicyPreprocessor | None = None
+        self._preprocessor: PatchPolicyPreprocessor | None = None  # pyrefly: ignore[bad-override-mutable-attribute]
         self._postprocessor: PatchPolicyPostprocessor | None = None
         self._input_features = input_features
         self._output_features = output_features
@@ -106,6 +110,7 @@ class PatchPolicy(Policy):
         self._dropout = dropout
         self._num_train_timesteps = num_train_timesteps
         self._num_inference_steps = num_inference_steps
+        self._eta = eta
         self._use_random_input_noise = use_random_input_noise
         if input_features is not None and output_features is not None:
             self.configure_model()
@@ -146,6 +151,7 @@ class PatchPolicy(Policy):
             dropout=config.dropout,
             num_train_timesteps=config.num_train_timesteps,
             num_inference_steps=config.num_inference_steps,
+            eta=config.eta,
             use_random_input_noise=config.use_random_input_noise,
             optimizer_lr=optimizer_lr,
             optimizer_weight_decay=optimizer_weight_decay,
@@ -243,6 +249,7 @@ class PatchPolicy(Policy):
                 dropout=self._dropout,
                 num_train_timesteps=self._num_train_timesteps,
                 num_inference_steps=self._num_inference_steps,
+                eta=self._eta,
                 use_random_input_noise=self._use_random_input_noise,
             )
         config = self._config

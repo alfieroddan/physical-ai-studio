@@ -146,5 +146,4 @@ class TimmFeatureEncoder(nn.Module):
         leading = images.shape[:-3]
         flat = images.reshape(-1, *images.shape[-3:])
         tokens = self._tokens(flat)
-        self.num_tokens = tokens.shape[-2]
         return tokens.reshape(*leading, *tokens.shape[-2:])

@@ -4,7 +4,8 @@
 """Patch Policy module."""
 
 from .config import PatchPolicyConfig
+from .export import PatchPolicyExportMixin
 from .model import PatchPolicyModel
 from .policy import PatchPolicy
 
-__all__ = ["PatchPolicy", "PatchPolicyConfig", "PatchPolicyModel"]
+__all__ = ["PatchPolicy", "PatchPolicyConfig", "PatchPolicyExportMixin", "PatchPolicyModel"]

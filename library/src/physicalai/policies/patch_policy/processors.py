@@ -26,6 +26,18 @@ _NORM_MAP = {
 }
 
 
+def resolve_camera_name(feature: Feature) -> str:
+    """Return the canonical camera name for a visual feature.
+
+    Raises:
+        ValueError: If the feature has no usable name.
+    """
+    name = (feature.name or "").removeprefix("observation.images.").removeprefix("images.")
+    if not name:
+        raise ValueError("Patch Policy visual features must have non-empty camera names.")
+    return name
+
+
 def _normalizable_features(features: list[Feature]) -> dict[str, Feature]:
     """Return indexed features with complete mean/std statistics."""
     return {
@@ -68,6 +80,7 @@ class PatchPolicyPreprocessor(nn.Module):
         input_features: Observation features used to determine camera order.
         output_features: Action features and their normalization statistics.
         image_size: Target image height and width.
+        n_obs_steps: Required number of temporal observation frames.
     """
 
     def __init__(
@@ -75,11 +88,13 @@ class PatchPolicyPreprocessor(nn.Module):
         input_features: list[Feature],
         output_features: list[Feature],
         image_size: tuple[int, int],
+        n_obs_steps: int = 1,
     ) -> None:
         super().__init__()
         self.visual_features = [feature for feature in input_features if feature.ftype is FeatureType.VISUAL]
         self.output_features = output_features
         self.image_size = image_size
+        self.n_obs_steps = n_obs_steps
         self._image_normalizer = FeatureNormalizeTransform(_normalizable_features(self.visual_features), _NORM_MAP)
         self._action_normalizer = FeatureNormalizeTransform(_normalizable_features(output_features), _NORM_MAP)
 
@@ -102,7 +117,8 @@ class PatchPolicyPreprocessor(nn.Module):
             if len(images.shape) < 4:
                 raise ValueError("Visual input must include batch, channel, height, and width dimensions.")
             return images
-        names = [feature.name or "", (feature.name or "").removeprefix("observation.images.")]
+        canonical_name = resolve_camera_name(feature)
+        names = [feature.name or "", canonical_name, f"images.{canonical_name}"]
         for name in names:
             if name in images and isinstance(images[name], Tensor):
                 return images[name]
@@ -136,6 +152,12 @@ class PatchPolicyPreprocessor(nn.Module):
             ValueError: If an image has an unsupported shape.
         """
         raw_images = batch.get("images")
+        if raw_images is None:
+            raw_images = {
+                key.removeprefix("images."): value
+                for key, value in batch.items()
+                if key.startswith("images.") and isinstance(value, Tensor)
+            }
         if not isinstance(raw_images, (Mapping, Tensor)):
             raise TypeError("Observation.images must be a tensor or camera dictionary.")
         views = []
@@ -145,6 +167,10 @@ class PatchPolicyPreprocessor(nn.Module):
                 image = image[:, None]
             if image.ndim != 5:
                 raise ValueError(f"Expected image shape [B, T, C, H, W], got {tuple(image.shape)}.")
+            if image.shape[1] != self.n_obs_steps:
+                raise ValueError(
+                    f"Expected {self.n_obs_steps} observation timestep(s), got {image.shape[1]} for {feature.name!r}.",
+                )
             flat = image.flatten(0, 1)
             if flat.shape[-2:] != self.image_size:
                 flat = F.interpolate(flat, size=self.image_size, mode="bilinear", align_corners=False)
@@ -206,6 +232,6 @@ def make_policy_processors(config: PatchPolicyConfig) -> tuple[PatchPolicyPrepro
         The input preprocessor and action postprocessor.
     """
     return (
-        PatchPolicyPreprocessor(config.input_features, config.output_features, config.image_size),
+        PatchPolicyPreprocessor(config.input_features, config.output_features, config.image_size, config.n_obs_steps),
         PatchPolicyPostprocessor(config.output_features, config.n_action_steps),
     )
