@@ -207,7 +207,8 @@ class LeRobotGoalConditionedDataset(GoalConditionedDataset):
 
         Args:
             dataset: LeRobot dataset or adapter to wrap.
-            goal_source: Whether observations use task-level or episode-level goals. Defaults to ``"task"``.
+            goal_source: Whether observations use task-level or episode-level goals. Defaults to ``"task"`` when
+                neither goal selection mapping is provided; otherwise, it must be specified.
             episode_goal_frames: Optional mapping from episode indices to goal frame offsets, or a JSON file
                 containing that mapping. Offsets may be negative; unspecified episodes use their final frame.
             task_goal_episodes: Optional mapping from task descriptions to representative episode indices.
