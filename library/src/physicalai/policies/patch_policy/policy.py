@@ -6,13 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import IO, TYPE_CHECKING, Any, cast
 
 import torch
 from torch import Tensor
 
-from physicalai.data import Dataset, Feature, Observation
-from physicalai.export import ExportablePolicyMixin
+from physicalai.data import Dataset, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies.base import Model, Policy
 
 from .config import (
@@ -22,18 +22,58 @@ from .config import (
     PatchPolicyConfig,
     resolve_action_dim,
 )
-from .export import PatchPolicyExportMixin
 from .model import PatchPolicyModel
-from .processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor, make_policy_processors
+from .processors import (
+    PatchPolicyPostprocessor,
+    PatchPolicyPreprocessor,
+    make_policy_processors,
+    resolve_camera_name,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
-class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
-    """Train a timm visual encoder followed by a diffusion or Behavior Transformer head.
+def _feature_key(feature: Feature) -> tuple[FeatureType | None, str | None]:
+    name = resolve_camera_name(feature) if feature.ftype is FeatureType.VISUAL else feature.name
+    return feature.ftype, name
 
-    Export supports Torch and OpenVINO with the configured observation window.
+
+def _copy_normalization_data(features: list[Feature], sources: list[Feature]) -> list[Feature]:
+    """Copy matching dataset statistics onto configured features when not provided."""
+    source_features = {_feature_key(feature): feature for feature in sources}
+    resolved = []
+    for feature in features:
+        source = source_features.get(_feature_key(feature))
+        if feature.normalization_data is not None or source is None or source.normalization_data is None:
+            resolved.append(feature)
+            continue
+        if feature.shape != source.shape:
+            raise ValueError(
+                f"Feature {feature.name!r} shape {feature.shape} does not match dataset feature shape {source.shape}.",
+            )
+        resolved.append(replace(feature, normalization_data=source.normalization_data))
+    return resolved
+
+
+def _attach_encoder_normalization(
+    features: list[Feature],
+    mean: Tensor,
+    std: Tensor,
+) -> list[Feature]:
+    """Attach the selected timm encoder's input statistics to visual features."""
+    normalization = NormalizationParameters(
+        mean=mean.flatten().detach().cpu().tolist(),
+        std=std.flatten().detach().cpu().tolist(),
+    )
+    return [
+        replace(feature, normalization_data=normalization) if feature.ftype is FeatureType.VISUAL else feature
+        for feature in features
+    ]
+
+
+class PatchPolicy(Policy):
+    """Train a timm visual encoder followed by a diffusion or Behavior Transformer head.
 
     Args:
         input_features: Optional observation schema. Resolved from training data when omitted.
@@ -253,7 +293,18 @@ class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
                 use_random_input_noise=self._use_random_input_noise,
             )
         config = self._config
-        self.model = PatchPolicyModel.from_config(config)
+        model = PatchPolicyModel.from_config(config)
+        config = replace(
+            config,
+            input_features=_attach_encoder_normalization(
+                config.input_features,
+                model.encoder.mean,
+                model.encoder.std,
+            ),
+        )
+        self._config = config
+        self._input_features = config.input_features
+        self.model = model
         self._preprocessor, self._postprocessor = make_policy_processors(config)
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
@@ -278,7 +329,12 @@ class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
             raise TypeError("Patch Policy checkpoint is missing a valid policy_config.")
         self._initialize_from_config(PatchPolicyConfig.from_dict(config_data))
 
-    def _prepare_batch(self, batch: Observation, *, require_actions: bool) -> dict[str, Tensor]:
+    def _prepare_batch(
+        self,
+        batch: Observation,
+        *,
+        require_actions: bool,
+    ) -> dict[str, Any]:
         """Flatten action features and preprocess an observation.
 
         Args:
@@ -300,7 +356,9 @@ class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
                 [action_map[feature.name] for feature in self.config.output_features if feature.name is not None],
                 dim=-1,
             )
-        return self._preprocessor(values, require_actions=require_actions)
+        if require_actions and not isinstance(values.get("action"), Tensor):
+            raise TypeError("Training requires tensor actions.")
+        return self._preprocessor(values)
 
     def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
         """Compute training loss or predict actions according to module mode.
@@ -335,7 +393,20 @@ class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
         if self.model is None or self._postprocessor is None:
             raise RuntimeError("Patch Policy is not initialized.")
         model = cast("PatchPolicyModel", self.model)
-        return self._postprocessor(model.predict_action_chunk(self._prepare_batch(batch, require_actions=False)))
+        prepared = self._prepare_batch(batch, require_actions=False)
+        return self._postprocessor(model.predict_action_chunk(prepared))
+
+    def select_action(self, batch: Observation) -> Tensor:
+        """Select an action, reusing queued predictions when available."""
+        queued = self._get_queued_action()
+        if queued is not None:
+            return queued
+        actions = self.predict_action_chunk(batch)
+        return self._queue_actions(actions)
+
+    def reset(self) -> None:
+        """Reset queued actions."""
+        super().reset()
 
     def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute validation loss for an observation batch.
@@ -383,15 +454,35 @@ class PatchPolicy(PatchPolicyExportMixin, ExportablePolicyMixin, Policy):
         Raises:
             TypeError: If the training dataset is not a Physical AI dataset.
         """
-        if stage != "fit" or self.model is not None:
+        if stage != "fit":
             return
         datamodule = self.trainer.datamodule  # pyrefly: ignore[missing-attribute]
         dataset = datamodule.train_dataset
         if not isinstance(dataset, Dataset):
             raise TypeError(f"Expected physicalai Dataset, got {type(dataset)}.")
-        self._input_features = list(dataset.observation_features.values())
-        self._output_features = list(dataset.action_features.values())
-        self.configure_model()
+        dataset_input_features = list(dataset.observation_features.values())
+        dataset_output_features = list(dataset.action_features.values())
+        self._input_features = self._input_features or dataset_input_features
+        self._output_features = _copy_normalization_data(
+            self._output_features or dataset_output_features,
+            dataset_output_features,
+        )
+        if self.model is None:
+            self.configure_model()
+            return
+        model = cast("PatchPolicyModel", self.model)
+        config = replace(
+            self.config,
+            input_features=_attach_encoder_normalization(
+                self._input_features,
+                model.encoder.mean,
+                model.encoder.std,
+            ),
+            output_features=self._output_features,
+        )
+        self._config = config
+        self._input_features = config.input_features
+        self._preprocessor, self._postprocessor = make_policy_processors(config)
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """Create the optimizer for trainable policy parameters.

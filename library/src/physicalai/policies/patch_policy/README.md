@@ -43,10 +43,10 @@ Robot actions [B, n_action_steps, action_dim]
 ```
 
 `n_obs_steps` is the number of temporal frames supplied for every camera. A
-single-frame policy accepts `[B, C, H, W]`; a multi-frame policy requires
-`[B, n_obs_steps, C, H, W]`. Training datasets provide these frames through the
-policy's observation delta indices. At inference time, callers are responsible
-for supplying the temporal window.
+single-frame input `[B, C, H, W]` is shaped as `[B, 1, C, H, W]`; callers
+providing a temporal window use `[B, n_obs_steps, C, H, W]`. Training datasets
+provide these frames through the policy's observation delta indices. The
+processor does not retain or roll image history between inference calls.
 
 The feature definitions also carry dataset normalization statistics. Image and
 action values are normalized with the shared `FeatureNormalizeTransform`, and
@@ -132,54 +132,5 @@ loss, metrics = policy(observation)
 Behavior Transformer-specific quantizer and loss settings are available on
 `PatchPolicyConfig`, including `vq_latent_dim`, `vq_num_embeddings`,
 `vq_num_groups`, and the reconstruction, commitment, offset, secondary-code,
-and focal-loss weights.
-
-## Export
-
-Patch Policy supports Torch and OpenVINO export through the standard
-`policy.export()` API. The initial export contract supports the DINOv2 backbone
-with patch-token output:
-
-```text
-encoder_name="dinov2"
-encoder_output="patches"
-```
-
-Load a trained Lightning checkpoint and export it:
-
-```python
-from physicalai.policies import PatchPolicy
-
-policy = PatchPolicy.load_from_checkpoint(
-    "checkpoints/patch_policy.ckpt",
-    map_location="cpu",
-    weights_only=True,
-).eval()
-
-policy.export("exports/patch-policy-torch", backend="torch")
-policy.export("exports/patch-policy-openvino", backend="openvino")
-```
-
-Torch export stores the complete policy checkpoint. Runtime reloads that policy,
-so its PyTorch preprocessor and postprocessor continue to handle camera packing,
-normalization, action denormalization, and execution-horizon trimming.
-
-OpenVINO export stores the processed model graph. Its manifest configures the
-Runtime NumPy pipeline to:
-
-1. order, resize, and stack camera frames;
-2. normalize images with the exported dataset statistics;
-3. run the OpenVINO graph;
-4. denormalize the action vector; and
-5. trim the chunk to `n_action_steps`.
-
-For deterministic diffusion parity, configure both:
-
-```python
-eta = 0.0
-use_random_input_noise = False
-```
-
-An export preserves `n_obs_steps`. For example, an exported policy configured
-with `n_obs_steps=3` requires three frames per camera at both PyTorch and
-OpenVINO Runtime inference.
+and focal-loss weights. A single-frame input remains one timestep even when
+`n_obs_steps` is larger.

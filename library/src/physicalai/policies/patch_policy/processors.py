@@ -6,24 +6,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from itertools import starmap
 from math import prod
 from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
+from torchvision.transforms.v2 import functional as tvf
 
 from physicalai.data import Feature, FeatureType
+from physicalai.data.observation import ACTION, IMAGES, Observation
 from physicalai.policies.utils.normalization import FeatureNormalizeTransform, NormalizationType
 
 if TYPE_CHECKING:
     from .config import PatchPolicyConfig
-
-
-_NORM_MAP = {
-    FeatureType.VISUAL: NormalizationType.MEAN_STD,
-    FeatureType.ACTION: NormalizationType.MEAN_STD,
-}
 
 
 def resolve_camera_name(feature: Feature) -> str:
@@ -38,39 +34,54 @@ def resolve_camera_name(feature: Feature) -> str:
     return name
 
 
-def _normalizable_features(features: list[Feature]) -> dict[str, Feature]:
-    """Return indexed features with complete mean/std statistics."""
-    return {
-        f"feature_{index}": feature
-        for index, feature in enumerate(features)
-        if feature.normalization_data is not None
-        and feature.normalization_data.mean is not None
-        and feature.normalization_data.std is not None
-    }
+def _normalizer(feature: Feature, key: str, *, inverse: bool = False) -> FeatureNormalizeTransform:
+    """Build a mean/std normalizer when this policy has complete feature stats."""
+    stats = feature.normalization_data
+    has_mean_std = stats is not None and stats.mean is not None and stats.std is not None
+    mode = (
+        NormalizationType.MEAN_STD
+        if has_mean_std and feature.ftype in {FeatureType.VISUAL, FeatureType.ACTION}
+        else NormalizationType.IDENTITY
+    )
+    feature_type = feature.ftype
+    features = {key: feature} if mode is not NormalizationType.IDENTITY else {}
+    norm_map = {feature_type: mode} if feature_type is not None else {}
+    return FeatureNormalizeTransform(features, norm_map, inverse=inverse)
 
 
-def _split_features(values: Tensor, features: list[Feature]) -> dict[str, Tensor]:
-    """Split a concatenated tensor into stable, indexed feature entries.
+def _normalize_features(
+    values: Tensor,
+    features: list[Feature],
+    normalizers: nn.ModuleList,
+) -> Tensor:
+    """Apply shared feature normalizers to slices of a concatenated tensor.
 
     Raises:
-        ValueError: If a feature shape is missing or the total width does not match.
+        ValueError: If a feature has no shape or the configured total width differs from the tensor.
     """
-    pieces: dict[str, Tensor] = {}
+    normalized = values.clone()
     offset = 0
-    for index, feature in enumerate(features):
+    for index, (feature, normalizer) in enumerate(zip(features, normalizers, strict=True)):
         if not feature.shape:
             raise ValueError(f"Feature {feature.name!r} has no shape.")
-        width = prod(feature.shape)
-        pieces[f"feature_{index}"] = values[..., offset : offset + width]
-        offset += width
+        end = offset + prod(feature.shape)
+        key = f"feature_{index}"
+        piece = {key: normalized[..., offset:end]}
+        normalizer(piece)
+        normalized[..., offset:end] = piece[key]
+        offset = end
     if values.shape[-1] != offset:
         raise ValueError(f"Feature width {values.shape[-1]} does not match configured width {offset}.")
-    return pieces
+    return normalized
 
 
-def _join_features(values: dict[str, Tensor], features: list[Feature]) -> Tensor:
-    """Join indexed feature entries in configuration order."""
-    return torch.cat([values[f"feature_{index}"] for index in range(len(features))], dim=-1)
+def _gather_flattened_or_unflattened_key(batch: dict[str, Any], field: str) -> Mapping[str, Any]:
+    """Gather a nested or flattened observation field into a keyed mapping."""
+    if field in batch and isinstance(batch[field], Mapping):
+        return batch[field]
+    prefixed_keys = Observation.get_flattened_keys(batch, field)
+    prefix = f"{field}."
+    return {key.removeprefix(prefix): batch[key] for key in prefixed_keys}
 
 
 class PatchPolicyPreprocessor(nn.Module):
@@ -95,8 +106,15 @@ class PatchPolicyPreprocessor(nn.Module):
         self.output_features = output_features
         self.image_size = image_size
         self.n_obs_steps = n_obs_steps
-        self._image_normalizer = FeatureNormalizeTransform(_normalizable_features(self.visual_features), _NORM_MAP)
-        self._action_normalizer = FeatureNormalizeTransform(_normalizable_features(output_features), _NORM_MAP)
+        camera_names = [resolve_camera_name(feature) for feature in self.visual_features]
+        if len(camera_names) != len(set(camera_names)):
+            raise ValueError(f"Patch Policy camera names must be unique, got {camera_names!r}.")
+        self._image_normalizers = nn.ModuleList(
+            starmap(_normalizer, zip(self.visual_features, camera_names, strict=True)),
+        )
+        self._action_normalizers = nn.ModuleList(
+            _normalizer(feature, f"feature_{index}") for index, feature in enumerate(output_features)
+        )
 
     @staticmethod
     def _image(images: Mapping[str, Any] | Tensor, feature: Feature) -> Tensor:
@@ -124,6 +142,34 @@ class PatchPolicyPreprocessor(nn.Module):
                 return images[name]
         raise KeyError(f"Missing visual feature {feature.name!r} in Observation.images.")
 
+    @staticmethod
+    def _with_time_axis(image: Tensor, feature: Feature, n_obs_steps: int) -> Tensor:
+        if image.ndim == 4:
+            return image[:, None]
+        if image.ndim == 5 and image.shape[1] == n_obs_steps:
+            return image
+        if image.ndim == 5:
+            raise ValueError(
+                f"Expected {n_obs_steps} observation timestep(s), got {image.shape[1]} for {feature.name!r}.",
+            )
+        raise ValueError(
+            f"Expected image shape [B, C, H, W] or [B, T, C, H, W] for key {feature.name}, got {tuple(image.shape)}.",
+        )
+
+    @staticmethod
+    def _actions(batch: dict[str, Any]) -> Tensor | None:
+        if ACTION in batch:
+            actions = batch[ACTION]
+        elif Observation.get_flattened_keys(batch, ACTION):
+            raise TypeError("Expected actions as a tensor, not flattened action fields.")
+        else:
+            return None
+        if not isinstance(actions, Tensor):
+            raise TypeError(f"Expected actions to be a tensor or None, got {type(actions)}.")
+        if actions.ndim != 3:
+            raise ValueError(f"Expected action shape [B, CHUNK, DIM], got {tuple(actions.shape)}.")
+        return actions
+
     def normalize_actions(self, actions: Tensor) -> Tensor:
         """Normalize each action feature with its configured statistics.
 
@@ -134,55 +180,49 @@ class PatchPolicyPreprocessor(nn.Module):
             The normalized action tensor.
 
         """
-        pieces = _split_features(actions, self.output_features)
-        return _join_features(self._action_normalizer(pieces), self.output_features)
+        return _normalize_features(actions, self.output_features, self._action_normalizers)
 
-    def forward(self, batch: Mapping[str, Any], *, require_actions: bool = False) -> dict[str, Tensor]:
+    def forward(
+        self,
+        batch: Mapping[str, Any],
+    ) -> dict[str, Any]:
         """Convert an observation mapping into model inputs.
 
         Args:
             batch: Observation values containing images and optional actions.
-            require_actions: Whether actions must be present and normalized.
 
         Returns:
-            Model inputs containing stacked images and optional action metadata.
+            Model inputs containing per-camera images and optional action metadata.
 
         Raises:
             TypeError: If images or required actions are not tensors in a supported layout.
-            ValueError: If an image has an unsupported shape.
         """
-        raw_images = batch.get("images")
-        if raw_images is None:
-            raw_images = {
-                key.removeprefix("images."): value
-                for key, value in batch.items()
-                if key.startswith("images.") and isinstance(value, Tensor)
-            }
-        if not isinstance(raw_images, (Mapping, Tensor)):
-            raise TypeError("Observation.images must be a tensor or camera dictionary.")
-        views = []
-        for index, feature in enumerate(self.visual_features):
-            image = self._image(raw_images, feature).float()
-            if image.ndim == 4:
-                image = image[:, None]
-            if image.ndim != 5:
-                raise ValueError(f"Expected image shape [B, T, C, H, W], got {tuple(image.shape)}.")
-            if image.shape[1] != self.n_obs_steps:
-                raise ValueError(
-                    f"Expected {self.n_obs_steps} observation timestep(s), got {image.shape[1]} for {feature.name!r}.",
-                )
-            flat = image.flatten(0, 1)
-            if flat.shape[-2:] != self.image_size:
-                flat = F.interpolate(flat, size=self.image_size, mode="bilinear", align_corners=False)
-            image = flat.reshape(*image.shape[:-2], *self.image_size)
-            views.append(self._image_normalizer({f"feature_{index}": image})[f"feature_{index}"])
-        processed = {"images": torch.stack(views, dim=2)}
+        # Gather camera fields from either flattened or nested observations.
+        batch = dict(batch)
+        images = _gather_flattened_or_unflattened_key(batch, IMAGES)
+        if not images:
+            raise TypeError("Observation must contain at least one image tensor.")
+        if len(images) == 1 and IMAGES in images:
+            images = images[IMAGES]
+        if images is None:
+            raise TypeError("Observation.images cannot be None.")
 
-        action = batch.get("action")
-        if require_actions:
-            if not isinstance(action, Tensor):
-                raise TypeError("Training requires tensor actions.")
-            processed["action"] = self.normalize_actions(action)
+        processed: dict[str, Any] = {"images": {}}
+        for feature, normalizer in zip(self.visual_features, self._image_normalizers, strict=True):
+            camera_name = resolve_camera_name(feature)
+            image = self._with_time_axis(self._image(images, feature), feature, self.n_obs_steps)
+            image = tvf.to_dtype(image, torch.float32, scale=True)
+            processed["images"][camera_name] = tvf.resize(
+                image,
+                list(self.image_size),
+                antialias=False,
+            )
+            normalizer(processed["images"])
+
+        # Keep actions as [B, CHUNK, DIM] while normalizing configured features.
+        actions = self._actions(batch)
+        if isinstance(actions, Tensor):
+            processed["action"] = self.normalize_actions(actions)
         extra = batch.get("extra")
         if isinstance(extra, Mapping) and isinstance(extra.get("action_is_pad"), Tensor):
             processed["extra.action_is_pad"] = extra["action_is_pad"]
@@ -201,10 +241,8 @@ class PatchPolicyPostprocessor(nn.Module):
         super().__init__()
         self.output_features = output_features
         self.n_action_steps = n_action_steps
-        self._action_denormalizer = FeatureNormalizeTransform(
-            _normalizable_features(output_features),
-            _NORM_MAP,
-            inverse=True,
+        self._action_denormalizers = nn.ModuleList(
+            _normalizer(feature, f"feature_{index}", inverse=True) for index, feature in enumerate(output_features)
         )
 
     def forward(self, actions: Tensor) -> Tensor:
@@ -217,9 +255,7 @@ class PatchPolicyPostprocessor(nn.Module):
             Denormalized chunks limited to the execution horizon.
 
         """
-        pieces = _split_features(actions, self.output_features)
-        denormalized = self._action_denormalizer(pieces)
-        return _join_features(denormalized, self.output_features)[:, : self.n_action_steps]
+        return _normalize_features(actions, self.output_features, self._action_denormalizers)[:, : self.n_action_steps]
 
 
 def make_policy_processors(config: PatchPolicyConfig) -> tuple[PatchPolicyPreprocessor, PatchPolicyPostprocessor]:

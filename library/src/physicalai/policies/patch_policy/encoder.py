@@ -1,7 +1,7 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""Small timm-backed visual feature encoder."""
+"""Pretrained visual encoders used by Patch Policy."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ if TYPE_CHECKING:
 
 _TIMM_MODELS: dict[FeatureEncoderName, str] = {
     "dinov2": "vit_small_patch14_dinov2.lvd142m",
-    "webssl": "hf-hub:facebook/webssl-dino300m-full2b-224",
-    "resnet18": "resnet18",
 }
+_WEBSSL_REPO = "facebook/webssl-dino300m-full2b-224"
+_IMAGENET_MEAN = (0.485, 0.456, 0.406)
+_IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 def _import_timm() -> ModuleType:
@@ -51,6 +52,7 @@ class TimmFeatureEncoder(nn.Module):
 
     mean: Tensor
     std: Tensor
+    backbone: nn.Module
 
     def __init__(
         self,
@@ -64,20 +66,47 @@ class TimmFeatureEncoder(nn.Module):
         super().__init__()
         self.output = output
         self.frozen = frozen
-        model_kwargs = {} if name == "resnet18" else {"img_size": image_size}
-        self.backbone = _import_timm().create_model(
-            _TIMM_MODELS[name],
-            pretrained=pretrained,
-            num_classes=0,
-            **model_kwargs,
-        )
-        self.output_dim = int(self.backbone.num_features)
-        patch_embed = getattr(self.backbone, "patch_embed", None)
-        self.num_tokens = int(getattr(patch_embed, "num_patches", 1)) if output == "patches" else 1
+        self.name = name
+        if name == "dinov2":
+            backbone = _import_timm().create_model(
+                _TIMM_MODELS[name],
+                pretrained=pretrained,
+                num_classes=0,
+                img_size=image_size,
+            )
+            self.backbone = backbone
+            self.output_dim = int(backbone.num_features)
+            patch_embed = getattr(backbone, "patch_embed", None)
+            self.num_tokens = int(getattr(patch_embed, "num_patches", 1)) if output == "patches" else 1
+        elif name == "webssl":
+            try:
+                from transformers import Dinov2Config, Dinov2Model  # noqa: PLC0415
+            except ImportError as exc:
+                raise ImportError("WebSSL requires transformers. Install physicalai-train[patch_policy].") from exc
 
-        config = getattr(self.backbone, "pretrained_cfg", {}) or {}
-        self.register_buffer("mean", torch.tensor(config.get("mean", (0.485, 0.456, 0.406)))[None, :, None, None])
-        self.register_buffer("std", torch.tensor(config.get("std", (0.229, 0.224, 0.225)))[None, :, None, None])
+            config = Dinov2Config.from_pretrained(_WEBSSL_REPO)
+            backbone = Dinov2Model.from_pretrained(_WEBSSL_REPO) if pretrained else Dinov2Model(config)
+            self.backbone = backbone
+            self.output_dim = int(config.hidden_size)
+            patch_size = config.patch_size
+            if isinstance(patch_size, int):
+                patch_size = (patch_size, patch_size)
+            self.num_tokens = (
+                (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1]) if output == "patches" else 1
+            )
+        else:
+            try:
+                from torchvision.models import ResNet18_Weights, resnet18  # noqa: PLC0415
+            except ImportError as exc:
+                raise ImportError("ResNet18 requires torchvision. Install physicalai-train[patch_policy].") from exc
+
+            model = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
+            self.backbone = nn.Sequential(*list(model.children())[:-1])
+            self.output_dim = int(model.fc.in_features)
+            self.num_tokens = 1
+
+        self.register_buffer("mean", torch.tensor(_IMAGENET_MEAN)[None, :, None, None])
+        self.register_buffer("std", torch.tensor(_IMAGENET_STD)[None, :, None, None])
         if frozen:
             self.requires_grad_(requires_grad=False)
             self.backbone.eval()
@@ -109,9 +138,26 @@ class TimmFeatureEncoder(nn.Module):
             TypeError: If the backbone returns an unsupported value.
             ValueError: If the returned feature tensor has an unsupported rank.
         """
-        features = self.backbone.forward_features((images - self.mean) / self.std)
+        if self.name == "webssl":
+            features = self.backbone(
+                pixel_values=images,
+                interpolate_pos_encoding=images.shape[-2:] != (224, 224),
+            ).last_hidden_state
+            if self.output == "cls":
+                return features[:, :1]
+            patches = features[:, 1:]
+            return patches if self.output == "patches" else patches.mean(dim=1, keepdim=True)
+
+        if isinstance(self.backbone, nn.Sequential):
+            features = self.backbone(images)
+        else:
+            forward_features = getattr(self.backbone, "forward_features", None)
+            if not callable(forward_features):
+                raise TypeError(f"Encoder {self.name!r} does not expose forward_features().")
+            features = forward_features(images)
         if isinstance(features, dict):
-            features = features.get("x_norm_patchtokens", features.get("last_hidden_state"))
+            feature_key = "x_norm_clstoken" if self.output == "cls" else "x_norm_patchtokens"
+            features = features.get(feature_key, features.get("last_hidden_state"))
         if not isinstance(features, Tensor):
             raise TypeError("timm forward_features must return a tensor or a supported tensor dictionary.")
         if features.ndim == 4:

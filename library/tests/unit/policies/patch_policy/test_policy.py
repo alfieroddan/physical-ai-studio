@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import lightning as L  # noqa: N812
 import pytest
@@ -14,6 +15,7 @@ import torch
 from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies.patch_policy import PatchPolicy
 from physicalai.policies.patch_policy.model import PatchPolicyModel
+from physicalai.policies.patch_policy.policy import _copy_normalization_data
 from physicalai.policies.patch_policy.processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor
 
 
@@ -59,7 +61,7 @@ def batch() -> Observation:
 
 @torch.no_grad()
 def test_processors_normalize_images_and_concatenated_actions() -> None:
-    """Shared feature transforms preserve camera and flattened-action ordering."""
+    """Camera features match by name regardless of mapping order."""
     inputs = [
         Feature(
             name="front",
@@ -95,21 +97,161 @@ def test_processors_normalize_images_and_concatenated_actions() -> None:
     processed = preprocessor(
         {
             "images": {
+                "wrist": torch.full((1, 1, 3, 8, 8), 3.0),
                 "front": torch.cat(
-                    [torch.full((1, 1, 1, 4, 4), value) for value in (0.5, 1.0, 2.0)],
+                    [torch.full((1, 1, 1, 8, 8), value) for value in (0.5, 1.0, 2.0)],
                     dim=2,
                 ),
-                "wrist": torch.full((1, 1, 3, 4, 4), 3.0),
             },
             "action": raw_actions,
         },
-        require_actions=True,
+    )
+    flattened = preprocessor(
+        {
+            "images.wrist": torch.full((1, 1, 3, 8, 8), 3.0),
+            "images.front": torch.cat(
+                [torch.full((1, 1, 1, 8, 8), value) for value in (0.5, 1.0, 2.0)],
+                dim=2,
+            ),
+            "action": raw_actions,
+        },
     )
 
-    torch.testing.assert_close(processed["images"][0, 0, 0, :, 0, 0], torch.tensor([0.0, 0.0, 1.0]))
-    torch.testing.assert_close(processed["images"][0, 0, 1, :, 0, 0], torch.ones(3))
+    assert processed["images"]["front"].shape == (1, 1, 3, 4, 4)
+    assert processed["images"]["wrist"].shape == (1, 1, 3, 4, 4)
+    torch.testing.assert_close(processed["images"]["front"][0, 0, :, 0, 0], torch.tensor([0.0, 0.0, 1.0]))
+    torch.testing.assert_close(processed["images"]["wrist"][0, 0, :, 0, 0], torch.ones(3))
+    assert processed["action"].shape == (1, 2, 3)
     torch.testing.assert_close(processed["action"], torch.tensor([[[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]]))
+    torch.testing.assert_close(flattened["images"]["front"], processed["images"]["front"])
+    torch.testing.assert_close(flattened["images"]["wrist"], processed["images"]["wrist"])
+    torch.testing.assert_close(flattened["action"], processed["action"])
     torch.testing.assert_close(postprocessor(processed["action"]), raw_actions[:, :1])
+
+
+def test_preprocessor_adds_singleton_time_axis_to_single_frame() -> None:
+    """Single frames gain a time axis without processor-owned history or padding."""
+    feature = Feature(name="front", ftype=FeatureType.VISUAL, shape=(3, 4, 4))
+    preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4), n_obs_steps=3)
+    frame = torch.full((1, 3, 4, 4), 5.0)
+
+    processed = preprocessor({"images": {"front": frame}})["images"]
+
+    assert processed.shape == (1, 1, 3, 4, 4)
+    torch.testing.assert_close(processed[0, 0, :, 0, 0], torch.full((3,), 5.0))
+
+
+def test_preprocessor_uses_mean_std_feature_statistics() -> None:
+    """Patch Policy applies mean/std normalization when feature statistics exist."""
+    feature = Feature(
+        name="front",
+        ftype=FeatureType.VISUAL,
+        shape=(3, 4, 4),
+        normalization_data=NormalizationParameters(mean=[1.0, 1.0, 1.0], std=[2.0, 2.0, 2.0]),
+    )
+    preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4))
+    image = torch.full((1, 3, 4, 4), 3.0)
+
+    processed = preprocessor({"images": {"front": image}})["images"]["front"]
+
+    torch.testing.assert_close(processed, torch.ones_like(image[:, None]))
+
+
+def test_preprocessor_scales_uint8_before_image_normalization() -> None:
+    """Uint8 pixels are converted to [0, 1] before ImageNet normalization."""
+    mean = [0.485, 0.456, 0.406]
+    std = [0.229, 0.224, 0.225]
+    feature = Feature(
+        name="front",
+        ftype=FeatureType.VISUAL,
+        shape=(3, 4, 4),
+        normalization_data=NormalizationParameters(mean=mean, std=std),
+    )
+    preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4))
+    image = torch.full((1, 3, 4, 4), 255, dtype=torch.uint8)
+
+    processed = preprocessor({"images": {"front": image}})["images"]["front"]
+
+    torch.testing.assert_close(processed[0, 0, :, 0, 0], (1 - torch.tensor(mean)) / torch.tensor(std))
+
+
+def test_policy_attaches_encoder_stats_and_preserves_dataset_action_stats() -> None:
+    """Visual features use encoder stats while action features keep dataset stats."""
+    policy = make_policy("diffusion")
+    visual = policy.config.input_features[0]
+    assert visual.normalization_data is not None
+    assert visual.normalization_data.mean == [0.485, 0.456, 0.406]
+    assert visual.normalization_data.std == [0.229, 0.224, 0.225]
+
+    action_stats = NormalizationParameters(mean=[1.0, 2.0], std=[0.5, 1.5])
+    action_feature = Feature(name="action", ftype=FeatureType.ACTION, shape=(2,))
+    dataset_feature = Feature(
+        name="action",
+        ftype=FeatureType.ACTION,
+        shape=(2,),
+        normalization_data=action_stats,
+    )
+
+    resolved = _copy_normalization_data([action_feature], [dataset_feature])
+
+    assert resolved[0].normalization_data == action_stats
+
+
+def test_encoder_does_not_apply_image_normalization_twice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The encoder passes processor-normalized inputs directly to timm."""
+    model = make_policy("diffusion").model
+    assert isinstance(model, PatchPolicyModel)
+    images = torch.rand(1, 1, 3, 32, 32)
+    received: list[torch.Tensor] = []
+
+    def capture(value: torch.Tensor) -> torch.Tensor:
+        received.append(value)
+        return torch.zeros(value.shape[0], model.encoder.output_dim, 1, 1)
+
+    monkeypatch.setattr(model.encoder.backbone, "forward", capture)
+    model.encoder(images)
+
+    torch.testing.assert_close(received[0], images.reshape(-1, 3, 32, 32))
+
+
+def test_preprocessor_requires_matching_temporal_length() -> None:
+    """Explicit temporal images stay 5D and must match n_obs_steps."""
+    feature = Feature(name="front", ftype=FeatureType.VISUAL, shape=(3, 4, 4))
+    preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4), n_obs_steps=3)
+    images = torch.zeros(1, 3, 3, 4, 4)
+
+    processed = preprocessor({"images": {"front": images}})["images"]
+
+    assert processed["front"].shape == (1, 3, 3, 4, 4)
+
+    with pytest.raises(ValueError, match="Expected 3 observation timestep"):
+        preprocessor({"images": {"front": torch.zeros(1, 2, 3, 4, 4)}})
+
+
+def test_select_action_does_not_track_queued_observations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The policy does not preprocess or retain observations while actions are queued."""
+    policy = make_policy("diffusion")
+    policy.eval()
+    captured: list[torch.Tensor] = []
+
+    def predict(batch: dict[str, Any]) -> torch.Tensor:
+        captured.append(batch["images"]["front"].clone())
+        return torch.zeros(1, 4, 2)
+
+    assert policy.model is not None
+    monkeypatch.setattr(policy.model, "predict_action_chunk", predict)
+    for value in (1.0, 2.0, 3.0):
+        policy.select_action(Observation(images={"front": torch.full((1, 3, 32, 32), value)}))
+
+    assert len(captured) == 2
+    assert captured[0].shape == (1, 1, 3, 32, 32)
+    assert captured[1].shape == (1, 1, 3, 32, 32)
+    torch.testing.assert_close(captured[0][0, 0, 0, 0, 0], torch.tensor(1.0))
+    torch.testing.assert_close(captured[1][0, 0, 0, 0, 0], torch.tensor(3.0))
+
+    policy.reset()
+    policy.select_action(Observation(images={"front": torch.full((1, 3, 32, 32), 4.0)}))
+    torch.testing.assert_close(captured[2][0, 0, 0, 0, 0], torch.tensor(4.0))
 
 
 @torch.no_grad()
