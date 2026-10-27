@@ -1,10 +1,15 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2026 Gaoyue Zhou
+# Authors: Gaoyue Zhou, Zichen Jeff Cui
+# SPDX-License-Identifier: MIT
 
 """Input and output processing for Patch Policy."""
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Mapping
 from itertools import starmap
 from math import prod
@@ -47,6 +52,20 @@ def _normalizer(feature: Feature, key: str, *, inverse: bool = False) -> Feature
     features = {key: feature} if mode is not NormalizationType.IDENTITY else {}
     norm_map = {feature_type: mode} if feature_type is not None else {}
     return FeatureNormalizeTransform(features, norm_map, inverse=inverse)
+
+
+def _warn_missing_action_normalization(features: list[Feature], operation: str) -> None:
+    missing_features = []
+    for index, feature in enumerate(features):
+        stats = feature.normalization_data
+        if stats is None or stats.mean is None or stats.std is None:
+            missing_features.append(feature.name or f"index {index}")
+    if missing_features:
+        warnings.warn(
+            f"Missing action mean/std normalization data for {operation} on: {', '.join(missing_features)}. "
+            "Identity normalization will be used.",
+            stacklevel=3,
+        )
 
 
 def _normalize_features(
@@ -104,6 +123,7 @@ class PatchPolicyPreprocessor(nn.Module):
         super().__init__()
         self.visual_features = [feature for feature in input_features if feature.ftype is FeatureType.VISUAL]
         self.output_features = output_features
+        _warn_missing_action_normalization(output_features, "normalization")
         self.image_size = image_size
         self.n_obs_steps = n_obs_steps
         camera_names = [resolve_camera_name(feature) for feature in self.visual_features]
@@ -240,6 +260,7 @@ class PatchPolicyPostprocessor(nn.Module):
     def __init__(self, output_features: list[Feature], n_action_steps: int) -> None:
         super().__init__()
         self.output_features = output_features
+        _warn_missing_action_normalization(output_features, "de-normalization")
         self.n_action_steps = n_action_steps
         self._action_denormalizers = nn.ModuleList(
             _normalizer(feature, f"feature_{index}", inverse=True) for index, feature in enumerate(output_features)
@@ -258,16 +279,20 @@ class PatchPolicyPostprocessor(nn.Module):
         return _normalize_features(actions, self.output_features, self._action_denormalizers)[:, : self.n_action_steps]
 
 
-def make_policy_processors(config: PatchPolicyConfig) -> tuple[PatchPolicyPreprocessor, PatchPolicyPostprocessor]:
+def make_policy_processors(
+    config: PatchPolicyConfig,
+    image_size: tuple[int, int],
+) -> tuple[PatchPolicyPreprocessor, PatchPolicyPostprocessor]:
     """Create matching Patch Policy processors.
 
     Args:
         config: Resolved policy configuration.
+        image_size: Input image height and width resolved by the encoder.
 
     Returns:
         The input preprocessor and action postprocessor.
     """
     return (
-        PatchPolicyPreprocessor(config.input_features, config.output_features, config.image_size, config.n_obs_steps),
+        PatchPolicyPreprocessor(config.input_features, config.output_features, image_size, config.n_obs_steps),
         PatchPolicyPostprocessor(config.output_features, config.n_action_steps),
     )

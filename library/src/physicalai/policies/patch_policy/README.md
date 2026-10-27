@@ -76,7 +76,6 @@ policy = PatchPolicy(
     encoder_name="dinov2",
     encoder_output="patches",
     encoder_pretrained=False,
-    image_size=(28, 28),
     action_head="diffusion",
     n_obs_steps=2,
     chunk_size=8,

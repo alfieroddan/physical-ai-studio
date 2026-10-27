@@ -1,5 +1,9 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2026 Gaoyue Zhou
+# Authors: Gaoyue Zhou, Zichen Jeff Cui
+# SPDX-License-Identifier: MIT
 
 """Pretrained visual encoders used by Patch Policy."""
 
@@ -19,6 +23,7 @@ _TIMM_MODELS: dict[FeatureEncoderName, str] = {
     "dinov2": "vit_small_patch14_dinov2.lvd142m",
 }
 _WEBSSL_REPO = "facebook/webssl-dino300m-full2b-224"
+_IMAGE_SIZES: dict[FeatureEncoderName, tuple[int, int]] = {"resnet18": (224, 224)}
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -47,7 +52,6 @@ class TimmFeatureEncoder(nn.Module):
         output: Encoder representation to return for each image.
         pretrained: Whether to load pretrained backbone weights.
         frozen: Whether to freeze the backbone in evaluation mode.
-        image_size: Input image height and width.
     """
 
     mean: Tensor
@@ -61,7 +65,6 @@ class TimmFeatureEncoder(nn.Module):
         *,
         pretrained: bool = True,
         frozen: bool = True,
-        image_size: tuple[int, int] = (224, 224),
     ) -> None:
         super().__init__()
         self.output = output
@@ -72,11 +75,13 @@ class TimmFeatureEncoder(nn.Module):
                 _TIMM_MODELS[name],
                 pretrained=pretrained,
                 num_classes=0,
-                img_size=image_size,
             )
             self.backbone = backbone
             self.output_dim = int(backbone.num_features)
             patch_embed = getattr(backbone, "patch_embed", None)
+            if patch_embed is None:
+                raise ValueError(f"Encoder {name!r} does not expose a patch embedding with image-size metadata.")
+            self.image_size = (int(patch_embed.img_size[0]), int(patch_embed.img_size[1]))
             self.num_tokens = int(getattr(patch_embed, "num_patches", 1)) if output == "patches" else 1
         elif name == "webssl":
             try:
@@ -88,11 +93,15 @@ class TimmFeatureEncoder(nn.Module):
             backbone = Dinov2Model.from_pretrained(_WEBSSL_REPO) if pretrained else Dinov2Model(config)
             self.backbone = backbone
             self.output_dim = int(config.hidden_size)
+            size = config.image_size
+            self.image_size = (size, size) if isinstance(size, int) else (int(size[0]), int(size[1]))
             patch_size = config.patch_size
             if isinstance(patch_size, int):
                 patch_size = (patch_size, patch_size)
             self.num_tokens = (
-                (image_size[0] // patch_size[0]) * (image_size[1] // patch_size[1]) if output == "patches" else 1
+                (self.image_size[0] // patch_size[0]) * (self.image_size[1] // patch_size[1])
+                if output == "patches"
+                else 1
             )
         else:
             try:
@@ -102,6 +111,7 @@ class TimmFeatureEncoder(nn.Module):
 
             model = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
             self.backbone = nn.Sequential(*list(model.children())[:-1])
+            self.image_size = _IMAGE_SIZES[name]
             self.output_dim = int(model.fc.in_features)
             self.num_tokens = 1
 
@@ -141,7 +151,7 @@ class TimmFeatureEncoder(nn.Module):
         if self.name == "webssl":
             features = self.backbone(
                 pixel_values=images,
-                interpolate_pos_encoding=images.shape[-2:] != (224, 224),
+                interpolate_pos_encoding=images.shape[-2:] != self.image_size,
             ).last_hidden_state
             if self.output == "cls":
                 return features[:, :1]

@@ -1,5 +1,9 @@
 # Copyright (C) 2025-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
+#
+# Copyright 2026 Gaoyue Zhou
+# Authors: Gaoyue Zhou, Zichen Jeff Cui
+# SPDX-License-Identifier: MIT
 
 """Serializable configuration for Patch Policy."""
 
@@ -51,7 +55,6 @@ class PatchPolicyConfig(Config):
         n_obs_steps: Number of observation timesteps used as context.
         chunk_size: Number of action timesteps predicted per chunk.
         n_action_steps: Number of predicted actions executed per invocation.
-        image_size: Image height and width expected by the visual encoder.
         encoder_name: Name of the timm visual encoder architecture.
         encoder_output: Visual representation extracted from the encoder.
         encoder_pretrained: Whether to initialize the encoder with pretrained weights.
@@ -86,7 +89,6 @@ class PatchPolicyConfig(Config):
     n_obs_steps: int = 1
     chunk_size: int = 16
     n_action_steps: int = 16
-    image_size: tuple[int, int] = (224, 224)
 
     encoder_name: FeatureEncoderName = "dinov2"
     encoder_output: EncoderOutput = "patches"
