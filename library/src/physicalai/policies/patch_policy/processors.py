@@ -243,9 +243,12 @@ class PatchPolicyPreprocessor(nn.Module):
         actions = self._actions(batch)
         if isinstance(actions, Tensor):
             processed["action"] = self.normalize_actions(actions)
+        action_is_pad = batch.get("extra.action_is_pad")
         extra = batch.get("extra")
-        if isinstance(extra, Mapping) and isinstance(extra.get("action_is_pad"), Tensor):
-            processed["extra.action_is_pad"] = extra["action_is_pad"]
+        if action_is_pad is None and isinstance(extra, Mapping):
+            action_is_pad = extra.get("action_is_pad")
+        if isinstance(action_is_pad, Tensor):
+            processed["extra.action_is_pad"] = action_is_pad
         return processed
 
 

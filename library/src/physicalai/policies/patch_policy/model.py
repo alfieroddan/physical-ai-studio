@@ -221,8 +221,13 @@ class PatchPolicyModel(Model):
         Returns:
             The scalar loss and detached logging metrics.
         """
-        losses = self.action_head.compute_loss(batch["action"], self._context(batch))
-        loss = reduce_losses(losses, in_episode_bound(batch))
+        valid_steps = in_episode_bound(batch)
+        context = self._context(batch)
+        if isinstance(self.action_head, PatchBehaviorTransformerHead):
+            losses = self.action_head.compute_loss(batch["action"], context, valid_steps=valid_steps)
+        else:
+            losses = self.action_head.compute_loss(batch["action"], context)
+        loss = reduce_losses(losses, valid_steps)
         return loss, {"loss": loss.detach()}
 
     @torch.no_grad()

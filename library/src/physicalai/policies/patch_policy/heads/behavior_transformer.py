@@ -242,16 +242,26 @@ class PatchBehaviorTransformerHead(ActionHead):
         logits, offsets = self._predictions(context)
         return self._actions(logits, offsets)
 
-    def compute_loss(self, actions: Tensor, context: Context) -> Tensor:
+    def compute_loss(self, actions: Tensor, context: Context, *, valid_steps: Tensor | None = None) -> Tensor:
         """Compute focal-code, offset, reconstruction, and commitment losses.
 
         Args:
             actions: Ground-truth action chunks.
             context: Context containing flattened visual tokens.
+            valid_steps: Optional boolean mask of non-padded action timesteps with shape ``[B, T]``.
 
         Returns:
             Unreduced per-action-element losses.
         """
+        if valid_steps is not None:
+            if valid_steps.dtype != torch.bool or valid_steps.shape != actions.shape[:2]:
+                raise ValueError("valid_steps must be a boolean tensor with shape [B, T] matching actions.")
+            step_indices = torch.arange(actions.shape[1], device=actions.device).expand_as(valid_steps)
+            last_valid = torch.where(valid_steps, step_indices, -1).amax(dim=1).clamp_min(0)
+            last_action = actions[torch.arange(actions.shape[0], device=actions.device), last_valid]
+            last_action = torch.where(valid_steps.any(dim=1, keepdim=True), last_action, 0)
+            actions = torch.where(valid_steps.unsqueeze(-1), actions, last_action[:, None])
+
         logits, offsets = self._predictions(context)
         latent, target_codes, commitment = self.quantizer.encode(actions)
         reconstructed = self.quantizer.decode(latent)
@@ -264,7 +274,14 @@ class PatchBehaviorTransformerHead(ActionHead):
         if self.groups > 1:
             weights[1:] = self.secondary_code_weight
         code_loss = (focal * weights).mean(-1)
-        reconstruction = F.mse_loss(reconstructed, actions, reduction="none").mean((-2, -1))
+        reconstruction = F.mse_loss(reconstructed, actions, reduction="none")
+        if valid_steps is None:
+            reconstruction = reconstruction.mean((-2, -1))
+        else:
+            reconstruction = torch.where(valid_steps.unsqueeze(-1), reconstruction, 0).sum((-2, -1)) / (
+                valid_steps.sum(-1) * actions.shape[-1]
+            ).clamp_min(1)
         global_loss = code_loss + self.reconstruction_weight * reconstruction + self.commitment_weight * commitment
         offset = F.l1_loss(predicted, actions, reduction="none") * self.offset_loss_weight
-        return offset + global_loss[:, None, None]
+        losses = offset + global_loss[:, None, None]
+        return losses if valid_steps is None else torch.where(valid_steps.unsqueeze(-1), losses, 0)

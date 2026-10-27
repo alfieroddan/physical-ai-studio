@@ -4,19 +4,25 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+import warnings
+from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import lightning as L  # noqa: N812
 import pytest
 import torch
 
-from physicalai.data import Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data import DataModule, Dataset, Feature, FeatureType, NormalizationParameters, Observation
 from physicalai.policies.patch_policy import PatchPolicy
+from physicalai.policies.patch_policy.encoder import TimmFeatureEncoder
+from physicalai.policies.patch_policy.heads import PatchBehaviorTransformerHead
 from physicalai.policies.patch_policy.model import PatchPolicyModel
 from physicalai.policies.patch_policy.policy import _copy_normalization_data
 from physicalai.policies.patch_policy.processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor
+from physicalai.policies.utils import in_episode_bound, reduce_losses
+from physicalai.train import Trainer
 
 
 def features() -> tuple[list[Feature], list[Feature]]:
@@ -36,7 +42,6 @@ def make_policy(action_head: str, *, use_random_input_noise: bool = True) -> Pat
         encoder_name="resnet18",
         encoder_output="average",
         encoder_pretrained=False,
-        image_size=(32, 32),
         action_head=action_head,  # type: ignore[arg-type]
         n_obs_steps=2,
         chunk_size=4,
@@ -57,6 +62,132 @@ def batch() -> Observation:
         images={"front": torch.rand(2, 2, 3, 32, 32)},
         action=torch.rand(2, 4, 2) * 2 - 1,
     )
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+def test_preprocessor_preserves_action_padding(flatten: bool) -> None:
+    inputs, outputs = features()
+    processor = PatchPolicyPreprocessor(inputs, outputs, (4, 4), n_obs_steps=2)
+    observation = batch()
+    padding = torch.tensor([[False, False, True, True], [True, True, True, True]])
+    observation.extra = {"action_is_pad": padding}
+
+    processed = processor(observation.to_dict(flatten=flatten))
+
+    torch.testing.assert_close(processed["extra.action_is_pad"], padding)
+    torch.testing.assert_close(in_episode_bound(processed), ~padding)
+    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
+    torch.testing.assert_close(reduce_losses(losses, in_episode_bound(processed)), torch.tensor(2.0))
+
+
+@pytest.mark.parametrize("all_padded", [False, True])
+def test_behavior_transformer_padding_ignores_targets_and_gradients(all_padded: bool) -> None:
+    torch.manual_seed(0)
+    head = PatchBehaviorTransformerHead(
+        8,
+        2,
+        4,
+        n_obs_steps=1,
+        n_patches=1,
+        hidden_dim=8,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        latent_dim=4,
+        num_embeddings=4,
+        groups=2,
+    ).eval()
+    head.trunk.requires_grad_(False)
+    valid_steps = torch.tensor(
+        [[False, False, False, False] if all_padded else [True, True, False, False], [False, False, False, False]],
+    )
+    actions = torch.randn(2, 4, 2, requires_grad=True)
+    changed = torch.where(valid_steps.unsqueeze(-1), actions.detach(), 100.0).requires_grad_()
+    context = {"tokens": torch.zeros(2, 1, 8)}
+
+    first_losses = head.compute_loss(actions, context, valid_steps=valid_steps)
+    first_loss = reduce_losses(first_losses, valid_steps)
+    first_loss.backward()
+    first_gradients = {
+        name: parameter.grad.clone() for name, parameter in head.named_parameters() if parameter.grad is not None
+    }
+    head.zero_grad(set_to_none=True)
+    second_loss = reduce_losses(head.compute_loss(changed, context, valid_steps=valid_steps), valid_steps)
+    second_loss.backward()
+
+    torch.testing.assert_close(first_loss, second_loss)
+    assert torch.isfinite(first_loss)
+    assert actions.grad is not None
+    assert changed.grad is not None
+    torch.testing.assert_close(actions.grad, changed.grad)
+    torch.testing.assert_close(actions.grad[~valid_steps], torch.zeros_like(actions.grad[~valid_steps]))
+    for name, parameter in head.named_parameters():
+        if parameter.grad is not None:
+            torch.testing.assert_close(parameter.grad, first_gradients[name])
+            if all_padded:
+                torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter.grad))
+    torch.testing.assert_close(first_losses[~valid_steps], torch.zeros_like(first_losses[~valid_steps]))
+    if all_padded:
+        torch.testing.assert_close(first_loss, torch.tensor(0.0))
+
+
+def test_behavior_transformer_unpadded_loss_is_unchanged() -> None:
+    head = PatchBehaviorTransformerHead(
+        8,
+        2,
+        4,
+        n_obs_steps=1,
+        n_patches=1,
+        hidden_dim=8,
+        num_layers=1,
+        num_heads=2,
+        dropout=0.0,
+        latent_dim=4,
+        num_embeddings=4,
+        groups=2,
+    ).eval()
+    actions = torch.randn(2, 4, 2)
+    context = {"tokens": torch.zeros(2, 1, 8)}
+
+    without_mask = head.compute_loss(actions, context)
+    with_mask = head.compute_loss(actions, context, valid_steps=torch.ones(2, 4, dtype=torch.bool))
+
+    torch.testing.assert_close(with_mask, without_mask)
+
+
+@pytest.mark.parametrize("action_head", ["diffusion", "behavior_transformer"])
+def test_model_training_and_validation_use_action_padding(action_head: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = make_policy(action_head)
+    model = policy.model
+    assert isinstance(model, PatchPolicyModel)
+    observation = batch()
+    padding = torch.tensor([[False, False, True, True], [True, True, True, True]])
+    observation.extra = {"action_is_pad": padding}
+    prepared = policy._prepare_batch(observation, require_actions=True)
+    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
+    compute_loss = Mock(return_value=losses)
+    monkeypatch.setattr(model, "_context", Mock(return_value={}))
+    monkeypatch.setattr(model.action_head, "compute_loss", compute_loss)
+    monkeypatch.setattr(model.action_head, "sample", Mock(return_value=prepared["action"] + losses.sqrt()))
+
+    training_loss, _ = model.compute_loss(prepared)
+    validation_loss, _ = model.compute_val_loss(prepared)
+
+    torch.testing.assert_close(training_loss, torch.tensor(2.0))
+    torch.testing.assert_close(validation_loss, torch.tensor(2.0))
+    if action_head == "behavior_transformer":
+        torch.testing.assert_close(compute_loss.call_args.kwargs["valid_steps"], ~padding)
+    else:
+        assert not compute_loss.call_args.kwargs
+
+
+def test_processors_warn_when_action_normalization_data_is_missing() -> None:
+    _, outputs = features()
+
+    with pytest.warns(UserWarning, match="normalization"):
+        PatchPolicyPreprocessor([], outputs, (32, 32))
+    with pytest.warns(UserWarning, match="de-normalization"):
+        PatchPolicyPostprocessor(outputs, n_action_steps=1)
 
 
 @torch.no_grad()
@@ -180,8 +311,8 @@ def test_policy_attaches_encoder_stats_and_preserves_dataset_action_stats() -> N
     policy = make_policy("diffusion")
     visual = policy.config.input_features[0]
     assert visual.normalization_data is not None
-    assert visual.normalization_data.mean == [0.485, 0.456, 0.406]
-    assert visual.normalization_data.std == [0.229, 0.224, 0.225]
+    assert visual.normalization_data.mean == pytest.approx([0.485, 0.456, 0.406])
+    assert visual.normalization_data.std == pytest.approx([0.229, 0.224, 0.225])
 
     action_stats = NormalizationParameters(mean=[1.0, 2.0], std=[0.5, 1.5])
     action_feature = Feature(name="action", ftype=FeatureType.ACTION, shape=(2,))
@@ -195,6 +326,166 @@ def test_policy_attaches_encoder_stats_and_preserves_dataset_action_stats() -> N
     resolved = _copy_normalization_data([action_feature], [dataset_feature])
 
     assert resolved[0].normalization_data == action_stats
+
+
+def test_setup_resolves_features_from_training_dataset() -> None:
+    inputs, outputs = features()
+    action_stats = NormalizationParameters(mean=[1.0, 2.0], std=[0.5, 1.5])
+    dataset_outputs = [replace(outputs[0], normalization_data=action_stats)]
+    train_dataset = Mock(spec=Dataset)
+    train_dataset.observation_features = {feature.name: feature for feature in inputs}
+    train_dataset.action_features = {feature.name: feature for feature in dataset_outputs}
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    policy = PatchPolicy(
+        encoder_name="resnet18",
+        encoder_output="average",
+        encoder_pretrained=False,
+    )
+    policy._trainer = trainer
+
+    policy.setup("fit")
+
+    assert policy.model is None
+    assert policy.config is None
+    assert policy._preprocessor is None
+    assert policy._postprocessor is None
+    assert policy.input_features == inputs
+    assert policy.output_features == dataset_outputs
+
+    policy.configure_model()
+
+    assert policy.config is not None
+    assert isinstance(policy.model, PatchPolicyModel)
+    assert policy.input_features == policy.config.input_features
+    assert policy.output_features == dataset_outputs
+    assert policy.output_features[0].normalization_data == action_stats
+
+
+def test_configure_model_is_idempotent() -> None:
+    policy = make_policy("diffusion")
+    model = policy.model
+    config = policy.config
+    preprocessor = policy._preprocessor
+    postprocessor = policy._postprocessor
+
+    policy.configure_model()
+
+    assert policy.model is model
+    assert policy.config is config
+    assert policy._preprocessor is preprocessor
+    assert policy._postprocessor is postprocessor
+
+
+def test_configure_model_defers_until_features_are_resolved() -> None:
+    policy = PatchPolicy()
+
+    policy.configure_model()
+
+    assert policy.model is None
+    assert policy.config is None
+    assert policy._preprocessor is None
+    assert policy._postprocessor is None
+    with pytest.raises(RuntimeError, match="features and model are resolved"):
+        policy.configure_optimizers()
+
+
+@pytest.mark.parametrize("dataset_stats", [None, NormalizationParameters(mean=[10.0, 20.0], std=[2.0, 2.0])])
+def test_setup_replaces_existing_action_statistics(dataset_stats: NormalizationParameters | None) -> None:
+    policy = make_policy("diffusion")
+    assert policy.output_features is not None
+    old_stats = NormalizationParameters(mean=[1.0, 2.0], std=[1.0, 1.0])
+    policy.output_features = [replace(policy.output_features[0], normalization_data=old_stats)]
+    policy.configure_model()
+    model = policy.model
+    inputs, outputs = features()
+    train_dataset = Mock(spec=Dataset)
+    train_dataset.observation_features = {feature.name: feature for feature in inputs}
+    train_dataset.action_features = {"action": replace(outputs[0], normalization_data=dataset_stats)}
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    policy.trainer = trainer
+
+    with pytest.warns(UserWarning, match="Replacing normalization statistics"):
+        policy.setup("fit")
+    policy.configure_model()
+
+    assert policy.model is model
+    assert policy.config is not None
+    assert policy.config.output_features[0].normalization_data == dataset_stats
+    assert policy._preprocessor is not None
+    assert policy._postprocessor is not None
+    assert policy._preprocessor.output_features == policy.config.output_features
+    assert policy._postprocessor.output_features == policy.config.output_features
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        policy.setup("fit")
+        policy.configure_model()
+    assert not captured
+
+
+def test_configure_model_refreshes_processors_without_rebuilding_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = make_policy("diffusion")
+    model = policy.model
+    assert model is not None
+    preprocessor = policy._preprocessor
+    postprocessor = policy._postprocessor
+    monkeypatch.setattr(PatchPolicyModel, "from_config", Mock(side_effect=AssertionError("Model was rebuilt.")))
+    inputs, outputs = features()
+    action_stats = NormalizationParameters(mean=[1.0, 2.0], std=[0.5, 1.5])
+    dataset_outputs = [replace(outputs[0], normalization_data=action_stats)]
+    train_dataset = Mock(spec=Dataset)
+    train_dataset.observation_features = {feature.name: feature for feature in inputs}
+    train_dataset.action_features = {feature.name: feature for feature in dataset_outputs}
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    policy._trainer = trainer
+
+    policy.setup("fit")
+
+    assert policy._preprocessor is preprocessor
+    assert policy._postprocessor is postprocessor
+
+    policy.configure_model()
+
+    assert policy.model is model
+    assert policy.config is not None
+    assert policy.config.output_features == dataset_outputs
+    assert policy._preprocessor is not None
+    assert policy._postprocessor is not None
+    assert policy._preprocessor.image_size == model.encoder.image_size
+    assert policy._preprocessor is not preprocessor
+    assert policy._postprocessor is not postprocessor
+    assert policy.input_features is not None
+    assert policy.input_features[0].normalization_data is not None
+    assert policy.input_features[0].normalization_data.mean == pytest.approx([0.485, 0.456, 0.406])
+
+    preprocessor = policy._preprocessor
+    postprocessor = policy._postprocessor
+    policy.configure_model()
+    assert policy.model is model
+    assert policy._preprocessor is preprocessor
+    assert policy._postprocessor is postprocessor
+
+
+@pytest.mark.parametrize("feature_kind", ["input", "output"])
+def test_setup_rejects_mismatched_explicit_features(feature_kind: str) -> None:
+    inputs, outputs = features()
+    train_dataset = Mock(spec=Dataset)
+    train_dataset.observation_features = {feature.name: feature for feature in inputs}
+    train_dataset.action_features = {feature.name: feature for feature in outputs}
+    trainer = Mock()
+    trainer.datamodule.train_dataset = train_dataset
+    if feature_kind == "input":
+        policy = PatchPolicy(input_features=[replace(inputs[0], shape=(3, 16, 16))])
+        error = "input_features"
+    else:
+        policy = PatchPolicy(output_features=[replace(outputs[0], shape=(3,))])
+        error = "output_features"
+    policy._trainer = trainer
+
+    with pytest.raises(ValueError, match=error):
+        policy.setup("fit")
 
 
 def test_encoder_does_not_apply_image_normalization_twice(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -244,8 +535,8 @@ def test_select_action_does_not_track_queued_observations(monkeypatch: pytest.Mo
         policy.select_action(Observation(images={"front": torch.full((1, 3, 32, 32), value)}))
 
     assert len(captured) == 2
-    assert captured[0].shape == (1, 1, 3, 32, 32)
-    assert captured[1].shape == (1, 1, 3, 32, 32)
+    assert captured[0].shape == (1, 1, 3, *policy.model.encoder.image_size)
+    assert captured[1].shape == (1, 1, 3, *policy.model.encoder.image_size)
     torch.testing.assert_close(captured[0][0, 0, 0, 0, 0], torch.tensor(1.0))
     torch.testing.assert_close(captured[1][0, 0, 0, 0, 0], torch.tensor(3.0))
 
@@ -307,22 +598,56 @@ def test_random_input_noise_propagates_from_policy() -> None:
     assert getattr(policy.model.action_head, "use_random_input_noise") is False
 
 
-@pytest.mark.parametrize("image_size", [(224, 224), (112, 224)])
 @torch.no_grad()
-def test_dinov2_uses_configured_image_size(image_size: tuple[int, int]) -> None:
-    """DINOv2 accepts the configured resolution and initializes the matching patch count."""
+def test_dinov2_uses_native_image_size() -> None:
+    """DINOv2 supplies the resolution used by preprocessing and patch counts."""
     config = replace(
         make_policy("diffusion").config,
         encoder_name="dinov2",
         encoder_output="patches",
-        image_size=image_size,
     )
-    model = PatchPolicyModel.from_config(config)
+    policy = PatchPolicy.from_config(config)
+    model = policy.model
+    assert model is not None
+    image_size = model.encoder.image_size
+    assert image_size == model.encoder.backbone.patch_embed.img_size
+    assert policy._preprocessor.image_size == image_size
+    assert "image_size" not in policy.hparams
+    assert "image_size" not in policy.config.to_dict()
     expected_tokens = (image_size[0] // 14) * (image_size[1] // 14)
 
     assert model.encoder.num_tokens == expected_tokens
-    tokens = model.encoder(torch.rand(1, 2, 1, 3, *image_size))
-    assert tokens.shape == (1, 2, 1, expected_tokens, model.encoder.output_dim)
+    tokens = model.encoder(torch.rand(1, 1, 1, 3, *image_size))
+    assert tokens.shape == (1, 1, 1, expected_tokens, model.encoder.output_dim)
+
+
+def test_resnet18_uses_fallback_image_size() -> None:
+    policy = make_policy("diffusion")
+
+    assert policy.model.encoder.image_size == (224, 224)
+    assert policy._preprocessor.image_size == (224, 224)
+    prepared = policy._prepare_batch(batch(), require_actions=False)
+    assert prepared["images"]["front"].shape[-2:] == (224, 224)
+
+
+@pytest.mark.parametrize("image_size", [224, (112, 224)])
+def test_webssl_uses_config_image_size(image_size: int | tuple[int, int], monkeypatch: pytest.MonkeyPatch) -> None:
+    from transformers import Dinov2Config  # noqa: PLC0415
+
+    config = Dinov2Config(
+        image_size=image_size,
+        hidden_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        intermediate_size=16,
+    )
+    monkeypatch.setattr(Dinov2Config, "from_pretrained", Mock(return_value=config))
+
+    encoder = TimmFeatureEncoder("webssl", "patches", pretrained=False)
+
+    expected_size = (image_size, image_size) if isinstance(image_size, int) else image_size
+    assert encoder.image_size == expected_size
+    assert encoder.num_tokens == (expected_size[0] // config.patch_size) * (expected_size[1] // config.patch_size)
 
 
 def test_checkpoint_hooks_restore_complete_config() -> None:
@@ -336,6 +661,62 @@ def test_checkpoint_hooks_restore_complete_config() -> None:
 
     assert restored.config == original.config
     assert isinstance(restored.model, PatchPolicyModel)
+    assert restored.config is not None
+    for field in fields(restored.config):
+        if field.name in restored.hparams:
+            assert getattr(restored, field.name) == getattr(restored.config, field.name)
+            assert restored.hparams[field.name] == getattr(restored.config, field.name)
+
+
+@pytest.mark.parametrize("processor_name", ["_preprocessor", "_postprocessor"])
+def test_checkpoint_repairs_existing_model_processors(processor_name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    policy = make_policy("diffusion")
+    checkpoint: dict[str, Any] = {}
+    policy.on_save_checkpoint(checkpoint)
+    model = policy.model
+    setattr(policy, processor_name, None)
+    monkeypatch.setattr(PatchPolicyModel, "from_config", Mock(side_effect=AssertionError("Model was rebuilt.")))
+
+    policy.on_load_checkpoint(checkpoint)
+
+    assert policy.model is model
+    assert policy._preprocessor is not None
+    assert policy._postprocessor is not None
+
+
+def test_checkpoint_refreshes_statistics_without_rebuilding_model() -> None:
+    policy = make_policy("diffusion")
+    model = policy.model
+    assert policy.config is not None
+    stats = NormalizationParameters(mean=[10.0, 20.0], std=[2.0, 3.0])
+    config = replace(
+        policy.config,
+        output_features=[replace(policy.config.output_features[0], normalization_data=stats)],
+    )
+
+    policy.on_load_checkpoint({"policy_config": config.to_dict()})
+
+    assert policy.model is model
+    assert policy.config == config
+    assert policy.output_features == config.output_features
+    assert policy._preprocessor is not None
+    assert policy._postprocessor is not None
+    normalized = policy._preprocessor.normalize_actions(torch.tensor([[[12.0, 23.0]]]))
+    torch.testing.assert_close(normalized, torch.ones_like(normalized))
+    torch.testing.assert_close(policy._postprocessor(normalized), torch.tensor([[[12.0, 23.0]]]))
+
+
+def test_checkpoint_rejects_incompatible_existing_model() -> None:
+    policy = make_policy("diffusion")
+    model = policy.model
+    assert policy.config is not None
+    config = policy.config
+
+    with pytest.raises(ValueError, match="does not match"):
+        policy.on_load_checkpoint({"policy_config": replace(config, hidden_dim=64).to_dict()})
+
+    assert policy.model is model
+    assert policy.config is config
 
 
 def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:
@@ -356,3 +737,67 @@ def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:
     assert restored.config == original.config
     assert set(restored.state_dict()) == set(original.state_dict())
     assert restored.config.use_random_input_noise is False
+    for name, value in original.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value)
+
+
+@pytest.mark.parametrize("initialization", ["features", "dataset", "checkpoint"])
+def test_configure_model_initialization_paths(initialization: str, dummy_dataset: Any, tmp_path: Path) -> None:
+    dataset = dummy_dataset(num_samples=2)
+    dataset.delta_indices = {"action": [0, 1, 2, 3]}
+    inputs = list(dataset.observation_features.values())
+    outputs = list(dataset.action_features.values())
+    kwargs: dict[str, Any] = {
+        "encoder_name": "resnet18",
+        "encoder_output": "average",
+        "encoder_pretrained": False,
+        "action_head": "diffusion",
+        "n_obs_steps": 1,
+        "chunk_size": 4,
+        "n_action_steps": 2,
+        "hidden_dim": 32,
+        "num_layers": 1,
+        "num_heads": 4,
+        "num_train_timesteps": 10,
+        "num_inference_steps": 2,
+    }
+    policy = PatchPolicy(
+        input_features=None if initialization == "dataset" else inputs,
+        output_features=None if initialization == "dataset" else outputs,
+        **kwargs,
+    )
+    if initialization == "checkpoint":
+        checkpoint = {
+            "state_dict": policy.state_dict(),
+            "hyper_parameters": dict(policy.hparams),
+            "pytorch-lightning_version": L.__version__,
+        }
+        policy.on_save_checkpoint(checkpoint)
+        path = tmp_path / "fit.ckpt"
+        torch.save(checkpoint, path)
+        policy = PatchPolicy.load_from_checkpoint(path)
+    model = policy.model
+    datamodule = DataModule(dataset, train_batch_size=2, num_workers=0, persistent_workers=False)
+    trainer = Trainer(
+        accelerator="cpu",
+        devices=1,
+        max_steps=0,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+
+    trainer.fit(policy, datamodule=datamodule)
+
+    assert trainer.global_step == 0
+    assert policy.model is not None
+    if model is not None:
+        assert policy.model is model
+    assert policy.config is not None
+    assert policy.input_features == policy.config.input_features
+    assert policy.output_features == policy.config.output_features
+    assert policy._preprocessor is not None
+    assert policy._postprocessor is not None
+    assert policy._preprocessor.output_features == policy.config.output_features
+    assert policy._postprocessor.output_features == policy.config.output_features
