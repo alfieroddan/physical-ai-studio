@@ -29,7 +29,7 @@ Make the config the feature source of truth.
 1. Add ordered `input_features` and `output_features` to the config.
 2. Add derived model dimensions such as `action_dim`.
 3. Stop deriving feature identity from `dataset_stats`.
-4. Keep normalization values in dataset or processor state.
+4. Keep normalization values on the config's features and let processors consume them.
 5. Read dataset features directly in `setup("fit")`.
 6. Validate dataset features against an existing config.
 7. Pass plain dimensions to the model. Do not pass `Feature` objects.
@@ -86,7 +86,7 @@ Use one model materialization path.
 1. Put all reconstruction values in the policy config.
 2. Keep the model constructor flat and config-free.
 3. Create the model and processors only in `configure_model()`.
-4. Start with `if self.model is not None: return`.
+4. Defer when features are unresolved. Guard model creation, not the entire hook.
 5. Keep dataset interaction in `setup(stage)`.
 6. Make pretrained helpers return config and weight paths only.
 7. Route every construction source through `configure_model()`.
@@ -94,20 +94,29 @@ Use one model materialization path.
 9. Save the resolved config in checkpoints.
 10. Clear pretrained paths before checkpoint construction.
 11. Materialize the model before Lightning loads checkpoint tensors.
-12. Delete old `_initialize_model()` and `_initialize_policy()` helpers.
+12. Refresh missing or stale processors without replacing an existing model.
+13. Reject incompatible configs before mutating an initialized policy.
+14. Delete alternate materialization helpers such as `_initialize_model()` and
+    `_initialize_policy()`. Keep narrow config validation or restoration helpers only
+    when they delegate module creation to `configure_model()`.
 
-| Route | Config source | Weight source |
-| --- | --- | --- |
-| Explicit config | Caller | None |
-| Constructor | Features and defaults | None |
-| Training | Config validated against dataset | None |
-| Pretrained | Artifact config | Artifact weights |
-| Checkpoint | Saved config | Lightning state dictionary |
+| Route           | Config source                        | Weight source              |
+| --------------- | ------------------------------------ | -------------------------- |
+| Explicit config | Caller                               | None                       |
+| Constructor     | Features and defaults                | None                       |
+| Training        | Dataset features or validated config | None                       |
+| Pretrained      | Artifact config                      | Artifact weights           |
+| Checkpoint      | Saved config                         | Lightning state dictionary |
 
 ### Complete When
 
 - Every route calls `configure_model()`.
 - Calling it twice keeps the same model.
+- Unchanged calls preserve processor identity as well as model identity.
+- Dataset setup creates no modules; later configuration refreshes changed statistics.
+- Missing processors can be repaired without rebuilding the model.
+- Processor refresh never reloads base weights or reinjects adapters.
+- Incompatible checkpoint configs fail before changing an initialized policy.
 - Pretrained resolution does not create a model.
 - Checkpoint loading does not fetch external weights.
 - Config, model, and processors agree on features and horizons.
@@ -148,6 +157,9 @@ Run:
 
 - policy unit tests;
 - config and checkpoint round trips;
+- eager features, lazy dataset setup, and explicit-config construction;
+- normalization refresh and missing-processor repair with model identity preserved;
+- checkpoint rejection for incompatible architecture or ordered feature contracts;
 - one training step;
 - one inference pass;
 - each supported export backend;

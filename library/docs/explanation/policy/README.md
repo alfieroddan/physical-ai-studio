@@ -26,9 +26,10 @@ cleanup.
 
 - Keep the concrete policy short enough to understand by inspection.
 - Put ordered feature identity, architecture, and horizons in one policy-owned config.
-- Keep normalization statistics in dataset or processor state.
+- Keep normalization statistics on the config's features; processors consume them.
 - Keep model constructors flat, plain-typed, and config-free.
 - Materialize model-dependent objects only in `configure_model()`.
+- Defer unresolved construction; preserve the model while refreshing stale processors.
 - Return the model's full native action chunk before runtime adaptation.
 - Inherit stable lifecycle and backend flows instead of repeating them per policy.
 - Isolate optional capabilities and export behavior in cooperative mixins.

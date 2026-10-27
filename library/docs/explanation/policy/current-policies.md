@@ -8,14 +8,15 @@ inputs but uses one model creation method: `configure_model()`.
 
 ## Summary
 
-| Concern | Current | Proposed |
-| --- | --- | --- |
-| Model creation | Policy-specific helpers | One guarded `configure_model()` |
-| Features | Often rebuilt from `dataset_stats` | Ordered features in the policy config |
-| Normalization | Mixed with feature metadata | Dataset or processor state |
-| Pretrained loading | Policy-specific handling | Resolve config and weights, then build once |
-| Checkpoints | Constructor args and often `dataset_stats` | Saved config builds the model before tensor loading |
-| Capabilities | Policy-specific code | Shared PEFT and RTC mixins |
+| Concern            | Current                                    | Proposed                                              |
+| ------------------ | ------------------------------------------ | ----------------------------------------------------- |
+| Model creation     | Policy-specific helpers                    | One `configure_model()` with guarded model creation   |
+| Processor refresh  | Coupled to initialization                  | Synchronize changed state without replacing the model |
+| Features           | Often rebuilt from `dataset_stats`         | Ordered features in the policy config                 |
+| Normalization      | Mixed with architecture resolution         | Config features carry statistics used by processors   |
+| Pretrained loading | Policy-specific handling                   | Resolve config and weights, then build once           |
+| Checkpoints        | Constructor args and often `dataset_stats` | Saved config builds the model before tensor loading   |
+| Capabilities       | Policy-specific code                       | Shared PEFT and RTC mixins                            |
 
 ## Current Design
 
@@ -91,14 +92,14 @@ into `dataset_stats`. Other policies mainly use large constructors.
 
 ### Current Initializers
 
-| Policy | Helper |
-| --- | --- |
-| ACT | `_initialize_model(dataset_stats, weights_file)` |
-| Groot | `_initialize_model(env_action_dim, dataset_stats)` |
-| Pi0 | `_initialize_model(dataset_stats)` |
-| Pi05 | `_initialize_model(dataset_stats, weight_file)` |
-| SmolVLA | `_initialize_model(dataset_stats, weights_file)` |
-| RLDX1 | `_initialize_model(dataset_stats, shard_files)` |
+| Policy  | Helper                                                                       |
+| ------- | ---------------------------------------------------------------------------- |
+| ACT     | `_initialize_model(dataset_stats, weights_file)`                             |
+| Groot   | `_initialize_model(env_action_dim, dataset_stats)`                           |
+| Pi0     | `_initialize_model(dataset_stats)`                                           |
+| Pi05    | `_initialize_model(dataset_stats, weight_file)`                              |
+| SmolVLA | `_initialize_model(dataset_stats, weights_file)`                             |
+| RLDX1   | `_initialize_model(dataset_stats, shard_files)`                              |
 | LeRobot | `_initialize_policy(input_features, output_features, config, dataset_stats)` |
 
 ## Current Feature Ownership
@@ -115,31 +116,31 @@ flowchart LR
     N --> P[Processors]
 ```
 
-| Policy | Feature source | Normalization source |
-| --- | --- | --- |
-| ACT | `dataset_stats` | Model and feature state |
-| Groot | Dataset metadata and stats | `dataset_stats` |
-| Pi0 | `dataset_stats` | `dataset_stats` |
-| Pi05 | Config plus `dataset_stats` | Processor and export state |
-| SmolVLA | Config plus `dataset_stats` | Processor and export state |
-| RLDX1 | Features merged into `dataset_stats` | Merged stats |
-| LeRobot | Explicit or LeRobot features | Separate stats passed to processors |
+| Policy  | Feature source                       | Normalization source                |
+| ------- | ------------------------------------ | ----------------------------------- |
+| ACT     | `dataset_stats`                      | Model and feature state             |
+| Groot   | Dataset metadata and stats           | `dataset_stats`                     |
+| Pi0     | `dataset_stats`                      | `dataset_stats`                     |
+| Pi05    | Config plus `dataset_stats`          | Processor and export state          |
+| SmolVLA | Config plus `dataset_stats`          | Processor and export state          |
+| RLDX1   | Features merged into `dataset_stats` | Merged stats                        |
+| LeRobot | Explicit or LeRobot features         | Separate stats passed to processors |
 
 ## Why Problems Occur
 
 Current routes make the same decisions in different places. Each route may resolve
 features, dimensions, processors, weights, and capabilities differently.
 
-| Cause | Possible result |
-| --- | --- |
-| Constructor and `setup()` can both create the model | The model is built twice or guarded differently per policy |
-| Pretrained and checkpoint paths use separate loaders | One route applies weights or capabilities in a different order |
-| Features are rebuilt from `dataset_stats` | Missing stats can block model creation even when architecture is known |
-| Stats contain features and normalization | New normalization values can appear to change model structure |
-| Export reads `dataset_stats` again | Training and export can use different names, shapes, or order |
-| Checkpoints save constructor inputs instead of one resolved config | Restore can depend on old defaults or the original artifact |
-| LoRA is injected after checkpoint loading | Adapter keys do not match the checkpoint state dictionary |
-| Action chunks are trimmed inside the model | RTC loses future actions needed for blending |
+| Cause                                                              | Possible result                                                        |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Constructor and `setup()` can both create the model                | The model is built twice or guarded differently per policy             |
+| Pretrained and checkpoint paths use separate loaders               | One route applies weights or capabilities in a different order         |
+| Features are rebuilt from `dataset_stats`                          | Missing stats can block model creation even when architecture is known |
+| Stats contain features and normalization                           | New normalization values can appear to change model structure          |
+| Export reads `dataset_stats` again                                 | Training and export can use different names, shapes, or order          |
+| Checkpoints save constructor inputs instead of one resolved config | Restore can depend on old defaults or the original artifact            |
+| LoRA is injected after checkpoint loading                          | Adapter keys do not match the checkpoint state dictionary              |
+| Action chunks are trimmed inside the model                         | RTC loses future actions needed for blending                           |
 
 These bugs are route-dependent. A policy may work in training but fail when loaded
 from a checkpoint or exported.
@@ -156,44 +157,42 @@ flowchart TD
     X[Explicit config] --> C
     K[Checkpoint config] --> C
     C --> G[configure_model]
-    G -->|model exists| N[No-op]
-    G --> M[Model.from_config]
-    G --> P[Create processors]
+    G --> V[Validate existing model contract]
+    V -->|model absent| M[Model.from_config]
+    V -->|compatible model exists| P[Check processor state]
+    M --> P
+    P -->|changed or missing| U[Create or refresh processors]
+    P -->|unchanged| N[Preserve processors]
     A --> W[Base weights]
     W --> M
     G --> MX[Apply reconstruction mixins]
-    D[Dataset stats] --> P
-    D --> V[Validate features]
-    C --> V
+    D[Dataset features with statistics] --> C
+    D --> DV[Validate or adopt features]
+    C --> DV
 ```
 
-```python
-def configure_model(self) -> None:
-    if self.model is not None:
-        return
-
-    config = self._config or self._resolve_config()
-    self._config = config
-    self.model = MyModel.from_config(config)
-    self._preprocessor, self._postprocessor = make_policy_processors(config)
-```
-
-The guard prevents duplicate construction and repeated capability injection.
+The explicit implementation in [Implement a Policy](how-to.md#6-materialization)
+defers unresolved features, validates config compatibility, and guards model creation
+separately from processor synchronization. An unchanged call preserves all identities;
+changed normalization or missing processors refresh only the processor pair. Base
+weights and structure-changing capabilities are applied only on first materialization,
+with external weights skipped during checkpoint reconstruction.
 
 ### Proposed Routes
 
-| Route | Config source | Normalization | Weights |
-| --- | --- | --- | --- |
-| YAML or constructor | Explicit policy inputs | Dataset or processor artifact | Fresh or selected artifact |
-| Explicit config | Caller | Dataset or processor state | Fresh |
-| Pretrained | Artifact config | Artifact or dataset | Artifact weights |
-| Checkpoint | Saved config | Saved processor state or dataset | Checkpoint state dictionary |
-| Training | Existing config validated against dataset | Dataset | Fresh or loaded |
+| Route               | Config source                             | Normalization                  | Weights                     |
+| ------------------- | ----------------------------------------- | ------------------------------ | --------------------------- |
+| YAML or constructor | Explicit policy inputs                    | Config features                | Fresh or selected artifact  |
+| Explicit config     | Caller                                    | Config features                | Fresh                       |
+| Pretrained          | Artifact config                           | Artifact config features       | Artifact weights            |
+| Checkpoint          | Saved config                              | Saved config features          | Checkpoint state dictionary |
+| Training            | Existing config validated against dataset | Dataset statistics on features | Fresh or loaded             |
 
 All routes call `configure_model()`.
 
 - Constructors may call it when all inputs are present.
-- `setup("fit")` validates or adopts dataset features.
+- `setup("fit")` validates or adopts dataset features and normalization without creating
+  modules; the subsequent hook creates or synchronizes processors.
 - Pretrained resolvers return config and weight paths only.
 - Checkpoints restore config before Lightning loads tensors.
 - Checkpoint loading never fetches the original artifact.
@@ -203,21 +202,22 @@ All routes call `configure_model()`.
 ```mermaid
 flowchart LR
     C[Policy config] --> F[Names types shapes order]
+    C --> N[Feature normalization data]
     F --> M[Model dimensions]
     F --> P[Processor order]
     F --> E[Export schemas]
-    D[Dataset] --> N[Normalization values]
-    A[Processor artifact] --> N
+    D[Dataset] --> C
+    A[Pretrained artifact] --> C
     N --> P
     D --> V[Contract validation]
     F --> V
 ```
 
-The config defines features. Dataset or processor state defines normalization. No route
-parses `dataset_stats` to rebuild feature identity.
-
-The executable prototype still supports lazy dataset feature adoption and stores
-normalization on `Feature`. These are temporary migration aids.
+The config defines features, including their normalization data. Datasets and encoder
+requirements supply statistics; processors consume them from the resolved features.
+No route parses `dataset_stats` to rebuild feature identity, and no separate policy
+normalization state is needed. Statistics-only changes refresh processors without
+changing model architecture. Lazy dataset feature adoption remains supported.
 
 ## Mixins
 
@@ -266,22 +266,24 @@ flowchart TB
         A4[Checkpoint config] --> C
         C --> G[configure_model]
         G --> M[One model]
-        G --> P[One processor pair]
-        N[Normalization state] --> P
+        G --> P[Create or refresh processor pair]
+        C --> F[Features with normalization]
+        F --> P
         W[External weights] --> M
     end
 ```
 
 ### What Changes
 
-| Current | Proposed |
-| --- | --- |
-| Each route can create a model | Routes only resolve inputs |
-| Each route may infer features | One config owns the feature contract |
-| Stats drive structure and normalization | Config drives structure; processor state drives normalization |
-| Weight order varies by loader | `configure_model()` fixes the order |
-| Checkpoint restore may replay pretrained loading | Checkpoint config rebuilds locally |
-| Export can rediscover the contract | Export derives from the same config |
+| Current                                          | Proposed                                                             |
+| ------------------------------------------------ | -------------------------------------------------------------------- |
+| Each route can create a model                    | Routes only resolve inputs                                           |
+| Each route may infer features                    | One config owns the feature contract                                 |
+| Stats drive structure and normalization          | Config owns features and statistics; only structure builds the model |
+| Weight order varies by loader                    | `configure_model()` fixes the order                                  |
+| Existing model skips all initialization          | Preserve the model while processors synchronize                      |
+| Checkpoint restore may replay pretrained loading | Checkpoint config rebuilds locally                                   |
+| Export can rediscover the contract               | Export derives from the same config                                  |
 
 The new design does not remove input routes. It removes route-specific model creation.
 This makes training, restore, inference, and export use the same resolved contract.
