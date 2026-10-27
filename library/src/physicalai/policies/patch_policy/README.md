@@ -13,10 +13,11 @@ uv sync --extra patch_policy
 ## Model structure
 
 ```text
-Camera observations [B, T, V, C, H, W]
+Camera observations dict[str, B × T × C × H × W]
     │
     ├─ order and resize camera views
     ├─ normalize each camera with dataset statistics
+    ├─ stack views internally as [B, T, V, C, H, W]
     ▼
 TimmFeatureEncoder
     │
@@ -34,7 +35,7 @@ Visual tokens [B, T × V × P, E]
          Predicts residual-VQ action codes and code-conditioned continuous
          offsets with a patch-aware causal transformer.
     ▼
-Normalized action chunk [B, chunk_size, action_dim]
+Action chunk [B, chunk_size, action_dim]
     │
     ├─ denormalize with dataset statistics
     └─ retain n_action_steps
@@ -42,16 +43,19 @@ Normalized action chunk [B, chunk_size, action_dim]
 Robot actions [B, n_action_steps, action_dim]
 ```
 
-`n_obs_steps` is the number of temporal frames supplied for every camera. A
+`n_obs_steps` is the number of temporal frames used for every camera. A
 single-frame input `[B, C, H, W]` is shaped as `[B, 1, C, H, W]`; callers
 providing a temporal window use `[B, n_obs_steps, C, H, W]`. Training datasets
-provide these frames through the policy's observation delta indices. The
-processor does not retain or roll image history between inference calls.
+provide the complete window through the policy's observation delta indices.
+During inference, the encoder processes only the current frame and an embedding
+memory bank retains previous encoded observations. Missing history at the start
+of an episode repeats the first encoded observation, matching the original
+Patch Policy, and `policy.reset()` clears it.
 
-The feature definitions also carry dataset normalization statistics. Image and
-action values are normalized with the shared `FeatureNormalizeTransform`, and
-predicted actions are transformed back to the original action space before
-they are returned.
+The feature definitions also carry dataset normalization statistics. Images
+use the encoder statistics. Diffusion actions use min/max normalization to
+`[-1, 1]`, matching the original policy, while Behavior Transformer actions
+remain in dataset units and use `vq_action_scale` inside the quantizer.
 
 ## Basic forward pass
 
@@ -99,12 +103,12 @@ with torch.no_grad():
 print(actions.shape)  # torch.Size([1, 4, 6])
 ```
 
-For training, include an action tensor shaped
-`[B, chunk_size, action_dim]`, put the policy in training mode, and call the
-same forward method:
+For training, include the overlapping action target shaped
+`[B, n_obs_steps + chunk_size - 1, action_dim]`, put the policy in training
+mode, and call the same forward method:
 
 ```python
-observation.action = torch.rand(batch_size, 8, 6)
+observation.action = torch.rand(batch_size, 9, 6)
 policy.train()
 loss, metrics = policy(observation)
 ```
@@ -130,6 +134,6 @@ loss, metrics = policy(observation)
 
 Behavior Transformer-specific quantizer and loss settings are available on
 `PatchPolicyConfig`, including `vq_latent_dim`, `vq_num_embeddings`,
-`vq_num_groups`, and the reconstruction, commitment, offset, secondary-code,
-and focal-loss weights. A single-frame input remains one timestep even when
+`vq_num_groups`, `vq_action_scale`, and the offset, secondary-code, and
+focal-loss weights. A single-frame input remains one timestep even when
 `n_obs_steps` is larger.

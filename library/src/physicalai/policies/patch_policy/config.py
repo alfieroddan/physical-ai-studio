@@ -64,6 +64,7 @@ class PatchPolicyConfig(Config):
         num_layers: Number of transformer layers in the action head.
         num_heads: Number of attention heads in each transformer layer.
         dropout: Dropout probability used by transformer layers.
+        embedding_dropout: Dropout applied to diffusion action and context embeddings.
         num_train_timesteps: Number of diffusion timesteps used during training.
         num_inference_steps: Number of denoising steps used during inference.
         beta_schedule: Noise schedule used by the diffusion head.
@@ -75,8 +76,7 @@ class PatchPolicyConfig(Config):
         vq_latent_dim: Latent width of the Behavior Transformer quantizer.
         vq_num_embeddings: Number of codebook entries in each residual VQ group.
         vq_num_groups: Number of residual vector-quantization groups.
-        vq_reconstruction_weight: Weight applied to the VQ reconstruction loss.
-        vq_commitment_weight: Weight applied to the VQ commitment loss.
+        vq_action_scale: Action scale used inside the Behavior Transformer VQ-VAE.
         offset_loss_weight: Weight applied to continuous action-offset loss.
         secondary_code_weight: Relative loss weight for residual code groups after the first.
         focal_loss_gamma: Focusing exponent used by the code-prediction loss.
@@ -100,6 +100,7 @@ class PatchPolicyConfig(Config):
     num_layers: int = 4
     num_heads: int = 4
     dropout: float = 0.1
+    embedding_dropout: float = 0.0
 
     num_train_timesteps: int = 100
     num_inference_steps: int = 100
@@ -110,11 +111,10 @@ class PatchPolicyConfig(Config):
     eta: float = 1.0
     use_random_input_noise: bool = True
 
-    vq_latent_dim: int = 128
+    vq_latent_dim: int = 512
     vq_num_embeddings: int = 16
     vq_num_groups: int = 2
-    vq_reconstruction_weight: float = 1.0
-    vq_commitment_weight: float = 0.25
+    vq_action_scale: float = 1.0
     offset_loss_weight: float = 10.0
     secondary_code_weight: float = 0.5
     focal_loss_gamma: float = 2.0
@@ -135,3 +135,5 @@ class PatchPolicyConfig(Config):
             raise ValueError("num_layers and num_heads must be positive.")
         if self.vq_num_groups <= 0 or self.vq_num_embeddings <= 0:
             raise ValueError("VQ group and embedding counts must be positive.")
+        if self.vq_action_scale <= 0:
+            raise ValueError("vq_action_scale must be positive.")

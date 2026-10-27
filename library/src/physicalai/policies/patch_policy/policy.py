@@ -124,7 +124,7 @@ class PatchPolicy(Policy):
     _preprocessor: PatchPolicyPreprocessor | None
     _postprocessor: PatchPolicyPostprocessor | None
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         input_features: list[Feature] | None = None,
         output_features: list[Feature] | None = None,
@@ -141,10 +141,18 @@ class PatchPolicy(Policy):
         num_layers: int = 4,
         num_heads: int = 4,
         dropout: float = 0.1,
+        embedding_dropout: float = 0.0,
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
         eta: float = 1.0,
         use_random_input_noise: bool = True,
+        vq_latent_dim: int = 512,
+        vq_num_embeddings: int = 16,
+        vq_num_groups: int = 2,
+        vq_action_scale: float = 1.0,
+        offset_loss_weight: float = 10.0,
+        secondary_code_weight: float = 0.5,
+        focal_loss_gamma: float = 2.0,
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
     ) -> None:
@@ -174,10 +182,18 @@ class PatchPolicy(Policy):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.dropout = dropout
+        self.embedding_dropout = embedding_dropout
         self.num_train_timesteps = num_train_timesteps
         self.num_inference_steps = num_inference_steps
         self.eta = eta
         self.use_random_input_noise = use_random_input_noise
+        self.vq_latent_dim = vq_latent_dim
+        self.vq_num_embeddings = vq_num_embeddings
+        self.vq_num_groups = vq_num_groups
+        self.vq_action_scale = vq_action_scale
+        self.offset_loss_weight = offset_loss_weight
+        self.secondary_code_weight = secondary_code_weight
+        self.focal_loss_gamma = focal_loss_gamma
 
         # Extra params for training
         self.optimizer_lr = optimizer_lr
@@ -244,10 +260,18 @@ class PatchPolicy(Policy):
             num_layers=config.num_layers,
             num_heads=config.num_heads,
             dropout=config.dropout,
+            embedding_dropout=config.embedding_dropout,
             num_train_timesteps=config.num_train_timesteps,
             num_inference_steps=config.num_inference_steps,
             eta=config.eta,
             use_random_input_noise=config.use_random_input_noise,
+            vq_latent_dim=config.vq_latent_dim,
+            vq_num_embeddings=config.vq_num_embeddings,
+            vq_num_groups=config.vq_num_groups,
+            vq_action_scale=config.vq_action_scale,
+            offset_loss_weight=config.offset_loss_weight,
+            secondary_code_weight=config.secondary_code_weight,
+            focal_loss_gamma=config.focal_loss_gamma,
             optimizer_lr=optimizer_lr,
             optimizer_weight_decay=optimizer_weight_decay,
         )
@@ -298,10 +322,18 @@ class PatchPolicy(Policy):
                 num_layers=self.num_layers,
                 num_heads=self.num_heads,
                 dropout=self.dropout,
+                embedding_dropout=self.embedding_dropout,
                 num_train_timesteps=self.num_train_timesteps,
                 num_inference_steps=self.num_inference_steps,
                 eta=self.eta,
                 use_random_input_noise=self.use_random_input_noise,
+                vq_latent_dim=self.vq_latent_dim,
+                vq_num_embeddings=self.vq_num_embeddings,
+                vq_num_groups=self.vq_num_groups,
+                vq_action_scale=self.vq_action_scale,
+                offset_loss_weight=self.offset_loss_weight,
+                secondary_code_weight=self.secondary_code_weight,
+                focal_loss_gamma=self.focal_loss_gamma,
             )
 
         # Init model from local config
@@ -319,10 +351,18 @@ class PatchPolicy(Policy):
         self.num_layers = config.num_layers
         self.num_heads = config.num_heads
         self.dropout = config.dropout
+        self.embedding_dropout = config.embedding_dropout
         self.num_train_timesteps = config.num_train_timesteps
         self.num_inference_steps = config.num_inference_steps
         self.eta = config.eta
         self.use_random_input_noise = config.use_random_input_noise
+        self.vq_latent_dim = config.vq_latent_dim
+        self.vq_num_embeddings = config.vq_num_embeddings
+        self.vq_num_groups = config.vq_num_groups
+        self.vq_action_scale = config.vq_action_scale
+        self.offset_loss_weight = config.offset_loss_weight
+        self.secondary_code_weight = config.secondary_code_weight
+        self.focal_loss_gamma = config.focal_loss_gamma
         self.hparams.update(
             encoder_name=config.encoder_name,
             encoder_output=config.encoder_output,
@@ -336,10 +376,18 @@ class PatchPolicy(Policy):
             num_layers=config.num_layers,
             num_heads=config.num_heads,
             dropout=config.dropout,
+            embedding_dropout=config.embedding_dropout,
             num_train_timesteps=config.num_train_timesteps,
             num_inference_steps=config.num_inference_steps,
             eta=config.eta,
             use_random_input_noise=config.use_random_input_noise,
+            vq_latent_dim=config.vq_latent_dim,
+            vq_num_embeddings=config.vq_num_embeddings,
+            vq_num_groups=config.vq_num_groups,
+            vq_action_scale=config.vq_action_scale,
+            offset_loss_weight=config.offset_loss_weight,
+            secondary_code_weight=config.secondary_code_weight,
+            focal_loss_gamma=config.focal_loss_gamma,
         )
 
         model = self.model
@@ -457,6 +505,12 @@ class PatchPolicy(Policy):
         loss, metrics = result
         self.log_dict({f"train/{name}": value for name, value in metrics.items()}, prog_bar=True)
         return loss
+
+    def on_before_zero_grad(self, optimizer: torch.optim.Optimizer) -> None:
+        """Update diffusion EMA weights after each optimizer step."""
+        del optimizer
+        if isinstance(self.model, PatchPolicyModel):
+            self.model.update_ema()
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         if self.model is None:

@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -20,6 +22,8 @@ from physicalai.policies.utils import in_episode_bound, reduce_losses
 
 from .encoder import TimmFeatureEncoder
 from .heads import PatchBehaviorTransformerHead, PatchDiffusionHead
+from .memory import EmbeddingMemoryBank
+from .processors import resolve_camera_name
 
 if TYPE_CHECKING:
     from .config import ActionHeadName, EncoderOutput, FeatureEncoderName, PatchPolicyConfig
@@ -30,7 +34,7 @@ class PatchPolicyModel(Model):
 
     Args:
         action_dim: Width of each action timestep.
-        num_views: Number of configured camera views.
+        camera_names: Camera names in their configured view order.
         n_obs_steps: Number of observation timesteps used as context.
         chunk_size: Number of action timesteps predicted per chunk.
         encoder_name: Name of the timm visual encoder architecture.
@@ -42,6 +46,7 @@ class PatchPolicyModel(Model):
         num_layers: Number of transformer layers in the action head.
         num_heads: Number of attention heads in each transformer layer.
         dropout: Dropout probability used by transformer layers.
+        embedding_dropout: Dropout applied to diffusion action and context embeddings.
         num_train_timesteps: Number of diffusion timesteps used during training.
         num_inference_steps: Number of denoising steps used during inference.
         beta_schedule: Noise schedule used by the diffusion head.
@@ -53,8 +58,7 @@ class PatchPolicyModel(Model):
         vq_latent_dim: Latent width of the Behavior Transformer quantizer.
         vq_num_embeddings: Number of codebook entries in each residual VQ group.
         vq_num_groups: Number of residual vector-quantization groups.
-        vq_reconstruction_weight: Weight applied to the VQ reconstruction loss.
-        vq_commitment_weight: Weight applied to the VQ commitment loss.
+        vq_action_scale: Action scale used inside the Behavior Transformer VQ-VAE.
         offset_loss_weight: Weight applied to continuous action-offset loss.
         secondary_code_weight: Relative loss weight for residual code groups after the first.
         focal_loss_gamma: Focusing exponent used by the code-prediction loss.
@@ -64,7 +68,7 @@ class PatchPolicyModel(Model):
         self,
         *,
         action_dim: int,
-        num_views: int,
+        camera_names: list[str],
         n_obs_steps: int = 1,
         chunk_size: int = 16,
         encoder_name: FeatureEncoderName = "dinov2",
@@ -76,6 +80,7 @@ class PatchPolicyModel(Model):
         num_layers: int = 4,
         num_heads: int = 4,
         dropout: float = 0.1,
+        embedding_dropout: float = 0.0,
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
         beta_schedule: str = "squaredcos_cap_v2",
@@ -87,15 +92,19 @@ class PatchPolicyModel(Model):
         vq_latent_dim: int = 128,
         vq_num_embeddings: int = 16,
         vq_num_groups: int = 2,
-        vq_reconstruction_weight: float = 1.0,
-        vq_commitment_weight: float = 0.25,
+        vq_action_scale: float = 1.0,
         offset_loss_weight: float = 10.0,
         secondary_code_weight: float = 0.5,
         focal_loss_gamma: float = 2.0,
     ) -> None:
         super().__init__()
+        if not camera_names or len(camera_names) != len(set(camera_names)):
+            message = f"camera_names must be non-empty and unique, got {camera_names!r}."
+            raise ValueError(message)
+        self.camera_names = tuple(camera_names)
         self._n_obs_steps = n_obs_steps
         self._chunk_size = chunk_size
+        self.memory_bank = EmbeddingMemoryBank(n_obs_steps)
         self.encoder = TimmFeatureEncoder(
             encoder_name,
             encoder_output,
@@ -107,10 +116,13 @@ class PatchPolicyModel(Model):
                 self.encoder.output_dim,
                 action_dim,
                 chunk_size,
+                n_obs_steps=n_obs_steps,
+                n_patches=self.encoder.num_tokens * len(camera_names),
                 hidden_dim=hidden_dim,
                 num_layers=num_layers,
                 num_heads=num_heads,
                 dropout=dropout,
+                embedding_dropout=embedding_dropout,
                 num_train_timesteps=num_train_timesteps,
                 num_inference_steps=num_inference_steps,
                 beta_schedule=beta_schedule,  # type: ignore[arg-type]
@@ -120,13 +132,17 @@ class PatchPolicyModel(Model):
                 eta=eta,
                 use_random_input_noise=use_random_input_noise,
             )
+            self.ema_action_head: PatchDiffusionHead | None = copy.deepcopy(self.action_head)
+            self.ema_action_head.requires_grad_(requires_grad=False).eval()
+            self.register_buffer("ema_optimization_step", torch.tensor(0, dtype=torch.int64))
         else:
+            self.ema_action_head = None
             self.action_head = PatchBehaviorTransformerHead(
                 self.encoder.output_dim,
                 action_dim,
                 chunk_size,
                 n_obs_steps=n_obs_steps,
-                n_patches=self.encoder.num_tokens * num_views,
+                n_patches=self.encoder.num_tokens * len(camera_names),
                 hidden_dim=hidden_dim,
                 num_layers=num_layers,
                 num_heads=num_heads,
@@ -134,8 +150,7 @@ class PatchPolicyModel(Model):
                 latent_dim=vq_latent_dim,
                 num_embeddings=vq_num_embeddings,
                 groups=vq_num_groups,
-                reconstruction_weight=vq_reconstruction_weight,
-                commitment_weight=vq_commitment_weight,
+                action_scale=vq_action_scale,
                 offset_loss_weight=offset_loss_weight,
                 secondary_code_weight=secondary_code_weight,
                 focal_loss_gamma=focal_loss_gamma,
@@ -151,12 +166,14 @@ class PatchPolicyModel(Model):
         Returns:
             A model containing the encoder and configured action head.
         """
-        num_views = sum(
-            feature.ftype is not None and feature.ftype.value == "VISUAL" for feature in config.input_features
-        )
+        camera_names = [
+            resolve_camera_name(feature)
+            for feature in config.input_features
+            if feature.ftype is not None and feature.ftype.value == "VISUAL"
+        ]
         return cls(
             action_dim=config.action_dim,
-            num_views=num_views,
+            camera_names=camera_names,
             n_obs_steps=config.n_obs_steps,
             chunk_size=config.chunk_size,
             encoder_name=config.encoder_name,
@@ -168,6 +185,7 @@ class PatchPolicyModel(Model):
             num_layers=config.num_layers,
             num_heads=config.num_heads,
             dropout=config.dropout,
+            embedding_dropout=config.embedding_dropout,
             num_train_timesteps=config.num_train_timesteps,
             num_inference_steps=config.num_inference_steps,
             beta_schedule=config.beta_schedule,
@@ -179,8 +197,7 @@ class PatchPolicyModel(Model):
             vq_latent_dim=config.vq_latent_dim,
             vq_num_embeddings=config.vq_num_embeddings,
             vq_num_groups=config.vq_num_groups,
-            vq_reconstruction_weight=config.vq_reconstruction_weight,
-            vq_commitment_weight=config.vq_commitment_weight,
+            vq_action_scale=config.vq_action_scale,
             offset_loss_weight=config.offset_loss_weight,
             secondary_code_weight=config.secondary_code_weight,
             focal_loss_gamma=config.focal_loss_gamma,
@@ -194,10 +211,52 @@ class PatchPolicyModel(Model):
 
         Returns:
             Action-head context containing visual tokens.
+
+        Raises:
+            KeyError: If a configured camera tensor is missing.
+            TypeError: If images are not provided as a mapping.
+            ValueError: If camera shapes, names, or temporal lengths are invalid.
         """
-        images = batch["images"]
-        tokens = self.encoder(images)
-        return {"tokens": tokens.flatten(1, 3)}
+        images = batch.get("images")
+        if not isinstance(images, Mapping):
+            message = "Patch Policy expects images as a dictionary of camera tensors."
+            raise TypeError(message)
+
+        views: list[Tensor] = []
+        reference_shape: torch.Size | None = None
+        for camera_name in self.camera_names:
+            image = images.get(camera_name)
+            if not isinstance(image, Tensor):
+                message = f"Missing tensor for configured camera {camera_name!r}."
+                raise KeyError(message)
+            if image.ndim != 5:  # noqa: PLR2004
+                message = f"Camera {camera_name!r} must have shape [B, T, C, H, W], got {tuple(image.shape)}."
+                raise ValueError(message)
+            if reference_shape is None:
+                reference_shape = image.shape
+            elif image.shape != reference_shape:
+                message = (
+                    "All Patch Policy camera tensors must have matching [B, T, C, H, W] shapes; "
+                    f"camera {camera_name!r} has {tuple(image.shape)}, expected {tuple(reference_shape)}."
+                )
+                raise ValueError(message)
+            views.append(image)
+
+        unexpected = set(images) - set(self.camera_names)
+        if unexpected:
+            message = f"Received unconfigured Patch Policy cameras: {sorted(unexpected)!r}."
+            raise ValueError(message)
+
+        # The public input remains one 5D tensor per camera. A view axis exists
+        # only internally while all images share one encoder invocation.
+        stacked = torch.stack(views, dim=2)  # [B, T, V, C, H, W]
+        tokens = self.encoder(stacked)  # [B, T, V, P, E]
+        temporal_tokens = tokens.flatten(2, 3)  # [B, T, V * P, E]
+        if self.training and temporal_tokens.shape[1] != self._n_obs_steps:
+            message = f"Training requires {self._n_obs_steps} observation steps, got {temporal_tokens.shape[1]}."
+            raise ValueError(message)
+        temporal_tokens = self.memory_bank(temporal_tokens)
+        return {"tokens": temporal_tokens.flatten(1, 2)}
 
     def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
         """Compute training loss or sample actions according to module mode.
@@ -212,6 +271,32 @@ class PatchPolicyModel(Model):
             return self.compute_loss(batch)
         return self.predict_action_chunk(batch)
 
+    def train(self, mode: bool = True) -> PatchPolicyModel:  # noqa: FBT001, FBT002
+        """Set module mode while keeping diffusion EMA weights in evaluation mode.
+
+        Returns:
+            This model.
+        """
+        super().train(mode=mode)
+        if self.ema_action_head is not None:
+            self.ema_action_head.eval()
+        return self
+
+    @torch.no_grad()
+    def update_ema(self) -> None:
+        """Update diffusion inference weights with the upstream EMA schedule."""
+        if self.ema_action_head is None:
+            return
+        step = max(0, int(self.ema_optimization_step) - 1)
+        decay = min(1 - (1 + step) ** -0.75, 0.9999) if step > 0 else 0.0
+        for averaged, current in zip(
+            self.ema_action_head.parameters(),
+            self.action_head.parameters(),
+            strict=True,
+        ):
+            averaged.lerp_(current.detach().to(averaged.dtype), 1 - decay)
+        self.ema_optimization_step += 1
+
     def compute_loss(self, batch: dict[str, Any]) -> tuple[Tensor, dict[str, Tensor | float]]:
         """Compute the reduced training loss and metrics.
 
@@ -224,9 +309,9 @@ class PatchPolicyModel(Model):
         valid_steps = in_episode_bound(batch)
         context = self._context(batch)
         if isinstance(self.action_head, PatchBehaviorTransformerHead):
-            losses = self.action_head.compute_loss(batch["action"], context, valid_steps=valid_steps)
-        else:
-            losses = self.action_head.compute_loss(batch["action"], context)
+            loss = self.action_head.compute_loss(batch["action"], context, valid_steps=valid_steps)
+            return loss, {"loss": loss.detach()}
+        losses = self.action_head.compute_loss(batch["action"], context)
         loss = reduce_losses(losses, valid_steps)
         return loss, {"loss": loss.detach()}
 
@@ -240,8 +325,13 @@ class PatchPolicyModel(Model):
         Returns:
             The scalar validation loss and detached logging metrics.
         """
-        actions = self.action_head.sample(self._context(batch))
-        loss = reduce_losses(F.mse_loss(actions, batch["action"], reduction="none"), in_episode_bound(batch))
+        sampling_head = self.ema_action_head or self.action_head
+        actions = sampling_head.sample(self._context(batch))
+        target = batch["action"][:, self._n_obs_steps - 1 : self._n_obs_steps - 1 + self._chunk_size]
+        valid_steps = in_episode_bound(batch)
+        if valid_steps is not None:
+            valid_steps = valid_steps[:, self._n_obs_steps - 1 : self._n_obs_steps - 1 + self._chunk_size]
+        loss = reduce_losses(F.mse_loss(actions, target, reduction="none"), valid_steps)
         return loss, {"loss": loss.detach(), "action_mse": loss.detach()}
 
     @torch.no_grad()
@@ -254,7 +344,8 @@ class PatchPolicyModel(Model):
         Returns:
             A normalized action chunk for each batch item.
         """
-        return self.action_head.sample(self._context(batch))
+        sampling_head = self.ema_action_head or self.action_head
+        return sampling_head.sample(self._context(batch))
 
     @property
     def action_delta_indices(self) -> list[int]:
@@ -263,7 +354,7 @@ class PatchPolicyModel(Model):
         Returns:
             Consecutive offsets covering the action horizon.
         """
-        return list(range(self._chunk_size))
+        return list(range(1 - self._n_obs_steps, self._chunk_size))
 
     @property
     def observation_delta_indices(self) -> list[int]:

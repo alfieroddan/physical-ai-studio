@@ -159,9 +159,8 @@ class Block(nn.Module):
         Returns:
             Contextualized token embeddings.
         """
-        x += self.attn(self.ln_1(x))
-        x += self.mlp(self.ln_2(x))
-        return x
+        attention_residual = torch.add(x, self.attn(self.ln_1(x)))
+        return torch.add(attention_residual, self.mlp(self.ln_2(attention_residual)))
 
 
 @dataclass

@@ -17,113 +17,94 @@ from physicalai.policies.components.action_heads import ActionHead, Context
 from physicalai.policies.patch_policy.gpt import PatchGPT
 
 
-def _mlp(input_dim: int, output_dim: int, hidden_dim: int) -> nn.Sequential:
-    """Build a two-layer ReLU MLP.
+class _MLP(nn.Sequential):
+    """Upstream Behavior Transformer prediction MLP."""
 
-    Args:
-        input_dim: Input feature width.
-        output_dim: Output feature width.
-        hidden_dim: Hidden-layer width.
+    def __init__(self, input_dim: int, output_dim: int) -> None:
+        super().__init__(
+            nn.Linear(input_dim, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.0),
+            nn.Linear(1024, 1024),
+            nn.ReLU(),
+            nn.Dropout(0.0),
+            nn.Linear(1024, output_dim),
+            nn.Dropout(0.0),
+        )
 
-    Returns:
-        The assembled MLP.
-    """
-    return nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, output_dim))
+
+class _ActionMLP(nn.Module):
+    """MLP used by the upstream action VQ-VAE encoder and decoder."""
+
+    def __init__(self, input_dim: int, output_dim: int) -> None:
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+            nn.ReLU(),
+        )
+        self.fc = nn.Linear(128, output_dim)
+        self.apply(self._initialize)
+
+    @staticmethod
+    def _initialize(module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            nn.init.orthogonal_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def forward(self, values: Tensor) -> Tensor:
+        """Project flattened action windows."""
+        return self.fc(self.encoder(values))
 
 
 class ResidualActionQuantizer(nn.Module):
-    """Compact residual vector quantizer for flattened action chunks.
+    """Residual action VQ-VAE with the upstream encoder/decoder equations."""
 
-    Args:
-        action_dim: Width of each action timestep.
-        chunk_size: Number of action timesteps in each chunk.
-        latent_dim: Width of the encoded action latent.
-        num_embeddings: Number of entries in each codebook group.
-        groups: Number of residual quantization groups.
-    """
-
-    def __init__(self, action_dim: int, chunk_size: int, latent_dim: int, num_embeddings: int, groups: int) -> None:
+    def __init__(
+        self,
+        action_dim: int,
+        chunk_size: int,
+        latent_dim: int,
+        num_embeddings: int,
+        groups: int,
+        *,
+        action_scale: float,
+    ) -> None:
         super().__init__()
         flat_dim = action_dim * chunk_size
         self.action_dim = action_dim
         self.chunk_size = chunk_size
         self.groups = groups
-        self.encoder = _mlp(flat_dim, latent_dim, 128)
-        self.decoder = _mlp(latent_dim, flat_dim, 128)
-        self.codebook = nn.Parameter(torch.randn(groups, num_embeddings, latent_dim) * 0.02)
+        self.action_scale = action_scale
+        self.encoder = _ActionMLP(flat_dim, latent_dim)
+        self.decoder = _ActionMLP(latent_dim, flat_dim)
+        codebook = torch.empty(groups, num_embeddings, latent_dim)
+        nn.init.kaiming_uniform_(codebook)
+        self.codebook = nn.Parameter(codebook)
 
-    def encode(self, actions: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Quantize flattened action chunks.
-
-        Args:
-            actions: Action chunks with shape ``[B, T, A]``.
-
-        Returns:
-            The straight-through latent, residual code indices, and commitment loss.
-        """
-        latent = self.encoder(actions.flatten(-2))
+    def encode(self, actions: Tensor) -> Tensor:
+        """Return residual code indices for action windows."""
+        latent = self.encoder((actions / self.action_scale).flatten(-2))
         residual = latent
-        quantized = torch.zeros_like(latent)
         codes = []
-        for group in range(self.groups):
-            distances = (residual[:, None] - self.codebook[group][None]).square().sum(-1)
+        for codebook in self.codebook:
+            distances = torch.cdist(residual[:, None], codebook[None]).squeeze(1)
             code = distances.argmin(-1)
-            selected = self.codebook[group][code]
-            quantized += selected
-            residual -= selected.detach()
+            residual = torch.sub(residual, codebook[code])
             codes.append(code)
-        commitment = (latent - quantized.detach()).square().mean(-1)
-        quantized = latent + (quantized - latent).detach()
-        return quantized, torch.stack(codes, dim=-1), commitment
+        return torch.stack(codes, dim=-1)
 
     def decode_codes(self, codes: Tensor) -> Tensor:
-        """Decode residual code indices to action chunks.
-
-        Args:
-            codes: Code index for every residual group and batch item.
-
-        Returns:
-            Reconstructed action chunks.
-        """
-        latent = torch.stack(
-            [self.codebook[group][codes[:, group]] for group in range(self.groups)],
-        ).sum(0)
-        return self.decode(latent)
-
-    def decode(self, latent: Tensor) -> Tensor:
-        """Decode continuous latents to action chunks.
-
-        Args:
-            latent: Quantized action latent.
-
-        Returns:
-            Reconstructed action chunks with shape ``[B, T, A]``.
-        """
-        return self.decoder(latent).reshape(-1, self.chunk_size, self.action_dim)
+        """Decode residual code indices into action centers."""
+        groups = torch.arange(self.groups, device=codes.device)
+        latent = self.codebook[groups[:, None], codes.transpose(0, 1)].sum(0)
+        decoded = self.decoder(latent) * self.action_scale
+        return decoded.reshape(-1, self.chunk_size, self.action_dim)
 
 
 class PatchBehaviorTransformerHead(ActionHead):
-    """Predict residual-VQ action centers and continuous offsets from patch tokens.
-
-    Args:
-        context_dim: Width of each visual context token.
-        action_dim: Width of each action timestep.
-        chunk_size: Number of action timesteps predicted per sample.
-        n_obs_steps: Number of observation timesteps in the context.
-        n_patches: Number of visual patch tokens per observation timestep.
-        hidden_dim: Transformer and prediction-head hidden width.
-        num_layers: Number of transformer blocks.
-        num_heads: Number of self-attention heads.
-        dropout: Dropout probability used by the transformer.
-        latent_dim: Width of the VQ action latent.
-        num_embeddings: Number of entries in each codebook group.
-        groups: Number of residual vector-quantization groups.
-        reconstruction_weight: Weight applied to the VQ reconstruction loss.
-        commitment_weight: Weight applied to the VQ commitment loss.
-        offset_loss_weight: Weight applied to the continuous offset loss.
-        secondary_code_weight: Relative loss weight for code groups after the first.
-        focal_loss_gamma: Focusing exponent used by the code-prediction loss.
-    """
+    """Upstream-compatible patch-aware Behavior Transformer head."""
 
     def __init__(
         self,
@@ -137,11 +118,10 @@ class PatchBehaviorTransformerHead(ActionHead):
         num_layers: int = 4,
         num_heads: int = 4,
         dropout: float = 0.1,
-        latent_dim: int = 128,
+        latent_dim: int = 512,
         num_embeddings: int = 16,
         groups: int = 2,
-        reconstruction_weight: float = 1.0,
-        commitment_weight: float = 0.25,
+        action_scale: float = 1.0,
         offset_loss_weight: float = 10.0,
         secondary_code_weight: float = 0.5,
         focal_loss_gamma: float = 2.0,
@@ -151,56 +131,49 @@ class PatchBehaviorTransformerHead(ActionHead):
         self.n_patches = n_patches
         self.groups = groups
         self.num_embeddings = num_embeddings
-        self.reconstruction_weight = reconstruction_weight
-        self.commitment_weight = commitment_weight
         self.offset_loss_weight = offset_loss_weight
         self.secondary_code_weight = secondary_code_weight
         self.focal_loss_gamma = focal_loss_gamma
         self.trunk = PatchGPT(
             input_dim=context_dim,
-            output_dim=hidden_dim,
+            output_dim=256,
             n_patches=n_patches,
-            n_obs_steps=n_obs_steps,
+            n_obs_steps=n_obs_steps + chunk_size,
             n_layer=num_layers,
             n_head=num_heads,
             n_embd=hidden_dim,
             dropout=dropout,
         )
-        self.code_head = _mlp(hidden_dim, groups * num_embeddings, hidden_dim)
-        self.offset_head = _mlp(hidden_dim, groups * num_embeddings * chunk_size * action_dim, hidden_dim)
-        self.quantizer = ResidualActionQuantizer(action_dim, chunk_size, latent_dim, num_embeddings, groups)
+        self.code_head = _MLP(256, groups * num_embeddings)
+        self.offset_head = _MLP(256, groups * num_embeddings * chunk_size * action_dim)
+        self.quantizer = ResidualActionQuantizer(
+            action_dim,
+            chunk_size,
+            latent_dim,
+            num_embeddings,
+            groups,
+            action_scale=action_scale,
+        )
 
-    def _embedding(self, context: Context) -> Tensor:
-        """Encode visual context into the final observation embedding.
-
-        Args:
-            context: Context containing flattened visual tokens.
-
-        Returns:
-            The final timestep embedding.
-
-        Raises:
-            ValueError: If the context contains an unexpected number of tokens.
-        """
+    def _embeddings(self, context: Context) -> Tensor:
         tokens = context["tokens"]
         expected = self.n_obs_steps * self.n_patches
         if tokens.shape[1] != expected:
-            raise ValueError(f"Expected {expected} context tokens, got {tokens.shape[1]}.")
-        return self.trunk(tokens.reshape(tokens.shape[0], self.n_obs_steps, self.n_patches, tokens.shape[-1]))[:, -1]
+            message = f"Expected {expected} context tokens, got {tokens.shape[1]}."
+            raise ValueError(message)
+        return self.trunk(tokens.reshape(tokens.shape[0], self.n_obs_steps, self.n_patches, tokens.shape[-1]))
 
     def _predictions(self, context: Context) -> tuple[Tensor, Tensor]:
-        """Predict code logits and code-conditioned continuous offsets.
-
-        Args:
-            context: Context containing flattened visual tokens.
-
-        Returns:
-            Code logits and continuous offsets.
-        """
-        embedding = self._embedding(context)
-        logits = self.code_head(embedding).reshape(-1, self.groups, self.num_embeddings)
-        offsets = self.offset_head(embedding).reshape(
-            -1,
+        embeddings = self._embeddings(context)
+        logits = self.code_head(embeddings).reshape(
+            embeddings.shape[0],
+            self.n_obs_steps,
+            self.groups,
+            self.num_embeddings,
+        )
+        offsets = self.offset_head(embeddings).reshape(
+            embeddings.shape[0],
+            self.n_obs_steps,
             self.groups,
             self.num_embeddings,
             self.chunk_size,
@@ -209,79 +182,53 @@ class PatchBehaviorTransformerHead(ActionHead):
         return logits, offsets
 
     def _actions(self, logits: Tensor, offsets: Tensor, codes: Tensor | None = None) -> Tensor:
-        """Combine quantized action centers with predicted offsets.
-
-        Args:
-            logits: Predicted code logits for each residual group.
-            offsets: Predicted action offsets for every possible code.
-            codes: Optional code indices to use instead of the most likely codes.
-
-        Returns:
-            Predicted action chunks.
-        """
         if codes is None:
-            codes = logits.argmax(-1)
-        centers = self.quantizer.decode_codes(codes)
-        batch = torch.arange(logits.shape[0], device=logits.device)[:, None]
-        groups = torch.arange(self.groups, device=logits.device)[None]
-        selected_offsets = offsets[batch, groups, codes].sum(1)
-        return centers + selected_offsets
+            probabilities = logits.softmax(-1)
+            codes = torch.multinomial(probabilities.flatten(0, -2), 1).reshape(*logits.shape[:-1])
+        flat_codes = codes.flatten(0, 1)
+        centers = self.quantizer.decode_codes(flat_codes).reshape(
+            logits.shape[0],
+            logits.shape[1],
+            self.chunk_size,
+            self.action_dim,
+        )
+        batch = torch.arange(logits.shape[0], device=logits.device)[:, None, None]
+        time = torch.arange(logits.shape[1], device=logits.device)[None, :, None]
+        groups = torch.arange(self.groups, device=logits.device)[None, None, :]
+        selected_offsets = offsets[batch, time, groups, codes].sum(2)
+        return centers.detach() + selected_offsets
 
     def sample(self, context: Context, *, noise: Tensor | None = None, num_steps: int | None = None) -> Tensor:
-        """Return the most likely action chunk.
-
-        Args:
-            context: Context containing flattened visual tokens.
-            noise: Ignored iterative-head compatibility argument.
-            num_steps: Ignored iterative-head compatibility argument.
-
-        Returns:
-            The most likely action chunk.
-        """
+        """Sample the final observation timestep's action chunk."""
         del noise, num_steps
         logits, offsets = self._predictions(context)
-        return self._actions(logits, offsets)
+        return self._actions(logits, offsets)[:, -1]
 
     def compute_loss(self, actions: Tensor, context: Context, *, valid_steps: Tensor | None = None) -> Tensor:
-        """Compute focal-code, offset, reconstruction, and commitment losses.
+        """Compute the upstream focal-code and continuous-offset loss.
 
-        Args:
-            actions: Ground-truth action chunks.
-            context: Context containing flattened visual tokens.
-            valid_steps: Optional boolean mask of non-padded action timesteps with shape ``[B, T]``.
-
-        Returns:
-            Unreduced per-action-element losses.
+        Raises:
+            ValueError: If actions do not cover every overlapping target window.
         """
-        if valid_steps is not None:
-            if valid_steps.dtype != torch.bool or valid_steps.shape != actions.shape[:2]:
-                raise ValueError("valid_steps must be a boolean tensor with shape [B, T] matching actions.")
-            step_indices = torch.arange(actions.shape[1], device=actions.device).expand_as(valid_steps)
-            last_valid = torch.where(valid_steps, step_indices, -1).amax(dim=1).clamp_min(0)
-            last_action = actions[torch.arange(actions.shape[0], device=actions.device), last_valid]
-            last_action = torch.where(valid_steps.any(dim=1, keepdim=True), last_action, 0)
-            actions = torch.where(valid_steps.unsqueeze(-1), actions, last_action[:, None])
-
+        del valid_steps
+        expected = self.n_obs_steps + self.chunk_size - 1
+        if actions.shape[1] != expected:
+            message = f"Expected {expected} action steps, got {actions.shape[1]}."
+            raise ValueError(message)
+        windows = actions.unfold(1, self.chunk_size, 1).transpose(-1, -2)
         logits, offsets = self._predictions(context)
-        latent, target_codes, commitment = self.quantizer.encode(actions)
-        reconstructed = self.quantizer.decode(latent)
-        predicted = self._actions(logits, offsets, target_codes)
+        target_codes = self.quantizer.encode(windows.flatten(0, 1)).reshape(
+            actions.shape[0],
+            self.n_obs_steps,
+            self.groups,
+        )
+        predicted = self._actions(logits, offsets)
 
         probabilities = logits.softmax(-1)
         target_probability = probabilities.gather(-1, target_codes[..., None]).squeeze(-1).clamp_min(1e-8)
         focal = -((1 - target_probability) ** self.focal_loss_gamma) * target_probability.log()
-        weights = focal.new_ones(self.groups)
+        code_loss = 5 * focal[..., 0].mean()
         if self.groups > 1:
-            weights[1:] = self.secondary_code_weight
-        code_loss = (focal * weights).mean(-1)
-        reconstruction = F.mse_loss(reconstructed, actions, reduction="none")
-        if valid_steps is None:
-            reconstruction = reconstruction.mean((-2, -1))
-        else:
-            reconstruction = torch.where(valid_steps.unsqueeze(-1), reconstruction, 0).sum((-2, -1)) / (
-                valid_steps.sum(-1) * actions.shape[-1]
-            ).clamp_min(1)
-        global_loss = code_loss + self.reconstruction_weight * reconstruction + self.commitment_weight * commitment
-        offset = F.l1_loss(predicted, actions, reduction="none") * self.offset_loss_weight
-        losses = offset + global_loss[:, None, None]
-        return losses if valid_steps is None else torch.where(valid_steps.unsqueeze(-1), losses, 0)
+            code_loss = torch.add(code_loss, self.secondary_code_weight * focal[..., 1:].mean())
+        offset_loss = F.l1_loss(predicted, windows)
+        return code_loss + self.offset_loss_weight * offset_loss

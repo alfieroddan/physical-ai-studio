@@ -5,53 +5,55 @@
 # Authors: Gaoyue Zhou, Zichen Jeff Cui
 # SPDX-License-Identifier: MIT
 
-"""Patch-conditioned diffusion action head."""
+"""Upstream-compatible patch-conditioned diffusion action head."""
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
 from torch import Tensor, nn
 
-from physicalai.policies.components import DiffusionActionHead, SinusoidalPositionalEncoding
+from physicalai.policies.components import DiffusionActionHead
 
 if TYPE_CHECKING:
     from physicalai.policies.components.action_heads import Context
     from physicalai.policies.components.action_heads.diffusion.diffusion import BetaSchedule, PredictionType
 
 
+class _SinusoidalPositionalEmbedding(nn.Module):
+    """Timestep embedding used by the original Patch Policy."""
+
+    def __init__(self, hidden_dim: int) -> None:
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+    def forward(self, timesteps: Tensor) -> Tensor:
+        """Encode one timestep per batch item."""
+        half_dim = self.hidden_dim // 2
+        scale = math.log(10000) / (half_dim - 1)
+        frequencies = torch.exp(torch.arange(half_dim, device=timesteps.device) * -scale)
+        values = timesteps[:, None] * frequencies[None]
+        return torch.cat((values.sin(), values.cos()), dim=-1)
+
+
 class PatchDiffusionHead(DiffusionActionHead):
-    """Denoise action tokens by cross-attending to visual patch tokens.
+    """Patch Policy's causal transformer diffusion network."""
 
-    Args:
-        context_dim: Width of each visual context token.
-        action_dim: Width of each action timestep.
-        chunk_size: Number of action timesteps predicted per sample.
-        hidden_dim: Transformer decoder hidden width.
-        num_layers: Number of transformer decoder layers.
-        num_heads: Number of attention heads in each decoder layer.
-        dropout: Dropout probability used by decoder layers.
-        num_train_timesteps: Number of diffusion timesteps used for training.
-        num_inference_steps: Number of denoising steps used for sampling.
-        beta_schedule: Noise schedule used by the diffusion scheduler.
-        prediction_type: Diffusion target represented by the denoiser output.
-        clip_sample: Whether to clip samples after each scheduler step.
-        clip_sample_range: Symmetric range used to clip samples.
-        eta: DDIM stochasticity coefficient used during sampling.
-        use_random_input_noise: Whether sampling starts from random noise.
-    """
-
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         context_dim: int,
         action_dim: int,
         chunk_size: int,
         *,
+        n_obs_steps: int,
+        n_patches: int,
         hidden_dim: int = 256,
         num_layers: int = 4,
         num_heads: int = 4,
         dropout: float = 0.1,
+        embedding_dropout: float = 0.0,
         num_train_timesteps: int = 100,
         num_inference_steps: int = 100,
         beta_schedule: BetaSchedule = "squaredcos_cap_v2",
@@ -61,8 +63,12 @@ class PatchDiffusionHead(DiffusionActionHead):
         eta: float = 1.0,
         use_random_input_noise: bool = True,
     ) -> None:
+        self.action_horizon = chunk_size
+        self.n_obs_steps = n_obs_steps
+        self.n_patches = n_patches
+        prediction_horizon = n_obs_steps + chunk_size - 1
         super().__init__(
-            chunk_size,
+            prediction_horizon,
             action_dim,
             num_train_timesteps=num_train_timesteps,
             num_inference_steps=num_inference_steps,
@@ -75,8 +81,16 @@ class PatchDiffusionHead(DiffusionActionHead):
         )
         self.action_in = nn.Linear(action_dim, hidden_dim)
         self.context_in = nn.Linear(context_dim, hidden_dim)
-        self.time_encoder = SinusoidalPositionalEncoding(hidden_dim)
-        self.action_position = nn.Parameter(torch.zeros(1, chunk_size, hidden_dim))
+        self.time_encoder = _SinusoidalPositionalEmbedding(hidden_dim)
+        self.action_position = nn.Parameter(torch.zeros(1, prediction_horizon, hidden_dim))
+        context_length = 1 + n_obs_steps * n_patches
+        self.context_position = nn.Parameter(torch.zeros(1, context_length, hidden_dim))
+        self.context_encoder = nn.Sequential(
+            nn.Linear(hidden_dim, 4 * hidden_dim),
+            nn.Mish(),
+            nn.Linear(4 * hidden_dim, hidden_dim),
+        )
+        self.input_dropout = nn.Dropout(embedding_dropout)
         layer = nn.TransformerDecoderLayer(
             d_model=hidden_dim,
             nhead=num_heads,
@@ -89,34 +103,59 @@ class PatchDiffusionHead(DiffusionActionHead):
         self.decoder = nn.TransformerDecoder(layer, num_layers=num_layers)
         self.norm = nn.LayerNorm(hidden_dim)
         self.action_out = nn.Linear(hidden_dim, action_dim)
+        self.register_buffer("target_mask", self._target_mask(prediction_horizon), persistent=False)
+        self.register_buffer(
+            "memory_mask",
+            self._memory_mask(prediction_horizon, n_obs_steps, n_patches),
+            persistent=False,
+        )
+        self.apply(self._initialize)
+        nn.init.normal_(self.action_position, mean=0.0, std=0.02)
+        nn.init.normal_(self.context_position, mean=0.0, std=0.02)
 
-    def prepare_context(self, context: Context) -> Context:
-        """Project visual tokens once for the complete denoising loop.
+    @staticmethod
+    def _target_mask(length: int) -> Tensor:
+        allowed = torch.ones(length, length, dtype=torch.bool).tril()
+        return torch.zeros(length, length).masked_fill(~allowed, float("-inf"))
 
-        Args:
-            context: Context containing visual tokens or preprojected memory.
+    @staticmethod
+    def _memory_mask(action_steps: int, observation_steps: int, patches: int) -> Tensor:
+        allowed = torch.zeros(action_steps, 1 + observation_steps * patches, dtype=torch.bool)
+        allowed[:, 0] = True
+        for action_step in range(action_steps):
+            observed = min(action_step, observation_steps - 1) + 1
+            allowed[action_step, 1 : 1 + observed * patches] = True
+        return torch.zeros_like(allowed, dtype=torch.float32).masked_fill(~allowed, float("-inf"))
 
-        Returns:
-            Context containing projected visual memory.
-        """
-        if "memory" in context:
-            return context
-        return {**context, "memory": self.context_in(context["tokens"])}
+    @staticmethod
+    def _initialize(module: nn.Module) -> None:
+        if isinstance(module, (nn.Linear, nn.MultiheadAttention)):
+            for name, parameter in module.named_parameters(recurse=False):
+                if "weight" in name:
+                    nn.init.normal_(parameter, mean=0.0, std=0.02)
+                elif "bias" in name:
+                    nn.init.zeros_(parameter)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.zeros_(module.bias)
+            nn.init.ones_(module.weight)
 
     def denoise(self, x_t: Tensor, t: Tensor, context: Context) -> Tensor:
-        """Predict noise or clean actions from noisy actions and visual memory.
+        """Predict noise from actions, timestep, and causal visual context."""
+        tokens = context["tokens"]
+        time = self.time_encoder(t.to(x_t.dtype))[:, None]
+        memory = torch.cat((time, self.context_in(tokens)), dim=1)
+        memory = self.context_encoder(self.input_dropout(memory + self.context_position))
+        hidden = self.input_dropout(self.action_in(x_t) + self.action_position)
+        decoded = self.decoder(
+            hidden,
+            memory,
+            tgt_mask=self.target_mask,
+            memory_mask=self.memory_mask,
+        )
+        return self.action_out(self.norm(decoded))
 
-        Args:
-            x_t: Noisy action chunks at the current diffusion timestep.
-            t: Diffusion timestep for each batch item.
-            context: Context containing visual tokens or projected memory.
-
-        Returns:
-            The configured diffusion prediction for each action element.
-        """
-        time = self.time_encoder(t[:, None].to(x_t.dtype))
-        hidden = self.action_in(x_t) + self.action_position + time
-        memory = context.get("memory")
-        if memory is None:
-            memory = self.context_in(context["tokens"])
-        return self.action_out(self.norm(self.decoder(hidden, memory)))
+    def sample(self, context: Context, *, noise: Tensor | None = None, num_steps: int | None = None) -> Tensor:
+        """Sample the full trajectory and return the current action chunk."""
+        trajectory = super().sample(context, noise=noise, num_steps=num_steps)
+        start = self.n_obs_steps - 1
+        return trajectory[:, start : start + self.action_horizon]

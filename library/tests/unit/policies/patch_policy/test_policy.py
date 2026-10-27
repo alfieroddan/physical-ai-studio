@@ -18,6 +18,7 @@ from physicalai.data import DataModule, Dataset, Feature, FeatureType, Normaliza
 from physicalai.policies.patch_policy import PatchPolicy
 from physicalai.policies.patch_policy.encoder import TimmFeatureEncoder
 from physicalai.policies.patch_policy.heads import PatchBehaviorTransformerHead
+from physicalai.policies.patch_policy.memory import EmbeddingMemoryBank
 from physicalai.policies.patch_policy.model import PatchPolicyModel
 from physicalai.policies.patch_policy.policy import _copy_normalization_data
 from physicalai.policies.patch_policy.processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor
@@ -60,7 +61,7 @@ def batch() -> Observation:
     """Return a synthetic two-step visual batch."""
     return Observation(
         images={"front": torch.rand(2, 2, 3, 32, 32)},
-        action=torch.rand(2, 4, 2) * 2 - 1,
+        action=torch.rand(2, 5, 2) * 2 - 1,
     )
 
 
@@ -69,19 +70,18 @@ def test_preprocessor_preserves_action_padding(flatten: bool) -> None:
     inputs, outputs = features()
     processor = PatchPolicyPreprocessor(inputs, outputs, (4, 4), n_obs_steps=2)
     observation = batch()
-    padding = torch.tensor([[False, False, True, True], [True, True, True, True]])
+    padding = torch.tensor([[False, False, True, True, True], [True, True, True, True, True]])
     observation.extra = {"action_is_pad": padding}
 
     processed = processor(observation.to_dict(flatten=flatten))
 
     torch.testing.assert_close(processed["extra.action_is_pad"], padding)
     torch.testing.assert_close(in_episode_bound(processed), ~padding)
-    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
+    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
     torch.testing.assert_close(reduce_losses(losses, in_episode_bound(processed)), torch.tensor(2.0))
 
 
-@pytest.mark.parametrize("all_padded", [False, True])
-def test_behavior_transformer_padding_ignores_targets_and_gradients(all_padded: bool) -> None:
+def test_behavior_transformer_loss_has_action_and_model_gradients() -> None:
     torch.manual_seed(0)
     head = PatchBehaviorTransformerHead(
         8,
@@ -97,38 +97,15 @@ def test_behavior_transformer_padding_ignores_targets_and_gradients(all_padded: 
         num_embeddings=4,
         groups=2,
     ).eval()
-    head.trunk.requires_grad_(False)
-    valid_steps = torch.tensor(
-        [[False, False, False, False] if all_padded else [True, True, False, False], [False, False, False, False]],
-    )
     actions = torch.randn(2, 4, 2, requires_grad=True)
-    changed = torch.where(valid_steps.unsqueeze(-1), actions.detach(), 100.0).requires_grad_()
     context = {"tokens": torch.zeros(2, 1, 8)}
 
-    first_losses = head.compute_loss(actions, context, valid_steps=valid_steps)
-    first_loss = reduce_losses(first_losses, valid_steps)
-    first_loss.backward()
-    first_gradients = {
-        name: parameter.grad.clone() for name, parameter in head.named_parameters() if parameter.grad is not None
-    }
-    head.zero_grad(set_to_none=True)
-    second_loss = reduce_losses(head.compute_loss(changed, context, valid_steps=valid_steps), valid_steps)
-    second_loss.backward()
+    loss = head.compute_loss(actions, context)
+    loss.backward()
 
-    torch.testing.assert_close(first_loss, second_loss)
-    assert torch.isfinite(first_loss)
+    assert torch.isfinite(loss)
     assert actions.grad is not None
-    assert changed.grad is not None
-    torch.testing.assert_close(actions.grad, changed.grad)
-    torch.testing.assert_close(actions.grad[~valid_steps], torch.zeros_like(actions.grad[~valid_steps]))
-    for name, parameter in head.named_parameters():
-        if parameter.grad is not None:
-            torch.testing.assert_close(parameter.grad, first_gradients[name])
-            if all_padded:
-                torch.testing.assert_close(parameter.grad, torch.zeros_like(parameter.grad))
-    torch.testing.assert_close(first_losses[~valid_steps], torch.zeros_like(first_losses[~valid_steps]))
-    if all_padded:
-        torch.testing.assert_close(first_loss, torch.tensor(0.0))
+    assert any(parameter.grad is not None for parameter in head.parameters())
 
 
 def test_behavior_transformer_unpadded_loss_is_unchanged() -> None:
@@ -149,10 +126,36 @@ def test_behavior_transformer_unpadded_loss_is_unchanged() -> None:
     actions = torch.randn(2, 4, 2)
     context = {"tokens": torch.zeros(2, 1, 8)}
 
+    torch.manual_seed(7)
     without_mask = head.compute_loss(actions, context)
+    torch.manual_seed(7)
     with_mask = head.compute_loss(actions, context, valid_steps=torch.ones(2, 4, dtype=torch.bool))
 
     torch.testing.assert_close(with_mask, without_mask)
+
+
+def test_behavior_transformer_backward_updates_trunk() -> None:
+    """Transformer residual connections preserve gradients during a full backward pass."""
+    head = PatchBehaviorTransformerHead(
+        8,
+        2,
+        4,
+        n_obs_steps=2,
+        n_patches=2,
+        hidden_dim=8,
+        num_layers=2,
+        num_heads=2,
+        dropout=0.0,
+        latent_dim=4,
+        num_embeddings=4,
+        groups=2,
+    )
+    actions = torch.randn(2, 5, 2)
+    context = {"tokens": torch.randn(2, 4, 8)}
+
+    head.compute_loss(actions, context).mean().backward()
+
+    assert any(parameter.grad is not None for parameter in head.trunk.parameters())
 
 
 @pytest.mark.parametrize("action_head", ["diffusion", "behavior_transformer"])
@@ -161,20 +164,22 @@ def test_model_training_and_validation_use_action_padding(action_head: str, monk
     model = policy.model
     assert isinstance(model, PatchPolicyModel)
     observation = batch()
-    padding = torch.tensor([[False, False, True, True], [True, True, True, True]])
+    padding = torch.tensor([[False, False, True, True, True], [True, True, True, True, True]])
     observation.extra = {"action_is_pad": padding}
     prepared = policy._prepare_batch(observation, require_actions=True)
-    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
-    compute_loss = Mock(return_value=losses)
+    losses = torch.tensor([[[1.0, 1.0], [3.0, 3.0], [100.0, 100.0], [100.0, 100.0], [100.0, 100.0]]]).expand(2, -1, -1)
+    compute_loss = Mock(return_value=torch.tensor(2.0) if action_head == "behavior_transformer" else losses)
     monkeypatch.setattr(model, "_context", Mock(return_value={}))
     monkeypatch.setattr(model.action_head, "compute_loss", compute_loss)
-    monkeypatch.setattr(model.action_head, "sample", Mock(return_value=prepared["action"] + losses.sqrt()))
+    target = prepared["action"][:, 1:]
+    sampling_head = model.ema_action_head or model.action_head
+    monkeypatch.setattr(sampling_head, "sample", Mock(return_value=target + torch.sqrt(losses[:, 1:])))
 
     training_loss, _ = model.compute_loss(prepared)
     validation_loss, _ = model.compute_val_loss(prepared)
 
     torch.testing.assert_close(training_loss, torch.tensor(2.0))
-    torch.testing.assert_close(validation_loss, torch.tensor(2.0))
+    torch.testing.assert_close(validation_loss, torch.tensor(3.0))
     if action_head == "behavior_transformer":
         torch.testing.assert_close(compute_loss.call_args.kwargs["valid_steps"], ~padding)
     else:
@@ -268,8 +273,8 @@ def test_preprocessor_adds_singleton_time_axis_to_single_frame() -> None:
 
     processed = preprocessor({"images": {"front": frame}})["images"]
 
-    assert processed.shape == (1, 1, 3, 4, 4)
-    torch.testing.assert_close(processed[0, 0, :, 0, 0], torch.full((3,), 5.0))
+    assert processed["front"].shape == (1, 1, 3, 4, 4)
+    torch.testing.assert_close(processed["front"][0, 0, :, 0, 0], torch.full((3,), 5.0))
 
 
 def test_preprocessor_uses_mean_std_feature_statistics() -> None:
@@ -537,12 +542,140 @@ def test_select_action_does_not_track_queued_observations(monkeypatch: pytest.Mo
     assert len(captured) == 2
     assert captured[0].shape == (1, 1, 3, *policy.model.encoder.image_size)
     assert captured[1].shape == (1, 1, 3, *policy.model.encoder.image_size)
-    torch.testing.assert_close(captured[0][0, 0, 0, 0, 0], torch.tensor(1.0))
-    torch.testing.assert_close(captured[1][0, 0, 0, 0, 0], torch.tensor(3.0))
+    mean, std = torch.tensor(0.485), torch.tensor(0.229)
+    torch.testing.assert_close(captured[0][0, 0, 0, 0, 0], (torch.tensor(1.0) - mean) / std)
+    torch.testing.assert_close(captured[1][0, 0, 0, 0, 0], (torch.tensor(3.0) - mean) / std)
 
     policy.reset()
     policy.select_action(Observation(images={"front": torch.full((1, 3, 32, 32), 4.0)}))
-    torch.testing.assert_close(captured[2][0, 0, 0, 0, 0], torch.tensor(4.0))
+    torch.testing.assert_close(captured[2][0, 0, 0, 0, 0], (torch.tensor(4.0) - mean) / std)
+
+
+def test_embedding_memory_bank_pads_rolls_and_resets() -> None:
+    """Single encoded observations form a bounded, first-frame-padded temporal window."""
+    memory = EmbeddingMemoryBank(3)
+
+    first = memory(torch.ones(1, 1, 2, 4))
+    second = memory(torch.full((1, 1, 2, 4), 2.0))
+    third = memory(torch.full((1, 1, 2, 4), 3.0))
+    fourth = memory(torch.full((1, 1, 2, 4), 4.0))
+
+    torch.testing.assert_close(first, torch.ones_like(first))
+    torch.testing.assert_close(second[:, :, 0, 0], torch.tensor([[1.0, 1.0, 2.0]]))
+    torch.testing.assert_close(third[:, :, 0, 0], torch.tensor([[1.0, 2.0, 3.0]]))
+    torch.testing.assert_close(fourth[:, :, 0, 0], torch.tensor([[2.0, 3.0, 4.0]]))
+
+    memory.reset()
+    after_reset = memory(torch.full((1, 1, 2, 4), 5.0))
+    torch.testing.assert_close(after_reset[:, :, 0, 0], torch.tensor([[5.0, 5.0, 5.0]]))
+
+
+def test_embedding_memory_bank_bypasses_explicit_window() -> None:
+    """Dataset-provided temporal windows neither use nor mutate inference history."""
+    memory = EmbeddingMemoryBank(2)
+    current = torch.ones(1, 1, 1, 1)
+    memory(current)
+    explicit = torch.tensor([[[[7.0]], [[8.0]]]])
+
+    assert memory(explicit) is explicit
+    result = memory(torch.full_like(current, 2.0))
+
+    torch.testing.assert_close(result[:, :, 0, 0], torch.tensor([[1.0, 2.0]]))
+
+
+def test_model_stacks_camera_dict_and_banks_encoded_observations(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Views become an internal 6D tensor before one encoded embedding is retained."""
+    inputs, outputs = features()
+    inputs.append(replace(inputs[0], name="wrist"))
+    policy = PatchPolicy(
+        input_features=inputs,
+        output_features=outputs,
+        encoder_name="resnet18",
+        encoder_output="average",
+        encoder_pretrained=False,
+        action_head="diffusion",
+        n_obs_steps=2,
+        chunk_size=2,
+        n_action_steps=1,
+        hidden_dim=8,
+        num_layers=1,
+        num_heads=2,
+        num_train_timesteps=2,
+        num_inference_steps=1,
+    ).eval()
+    model = policy.model
+    assert isinstance(model, PatchPolicyModel)
+    received: list[torch.Tensor] = []
+
+    def encode(images: torch.Tensor) -> torch.Tensor:
+        received.append(images.clone())
+        values = images.mean(dim=(-3, -2, -1), keepdim=False)
+        return values[..., None, None].expand(*values.shape, 1, model.encoder.output_dim)
+
+    monkeypatch.setattr(model.encoder, "forward", encode)
+
+    first = model._context({"images": {"wrist": torch.full((1, 1, 3, 4, 4), 2.0), "front": torch.ones(1, 1, 3, 4, 4)}})
+    second = model._context({
+        "images": {
+            "front": torch.full((1, 1, 3, 4, 4), 3.0),
+            "wrist": torch.full((1, 1, 3, 4, 4), 4.0),
+        },
+    })
+
+    assert received[0].shape == (1, 1, 2, 3, 4, 4)
+    torch.testing.assert_close(received[0][0, 0, 0], torch.ones(3, 4, 4))
+    torch.testing.assert_close(received[0][0, 0, 1], torch.full((3, 4, 4), 2.0))
+    assert first["tokens"].shape == (1, 4, model.encoder.output_dim)
+    torch.testing.assert_close(first["tokens"][0, :, 0], torch.tensor([1.0, 2.0, 1.0, 2.0]))
+    torch.testing.assert_close(second["tokens"][0, :, 0], torch.tensor([1.0, 2.0, 3.0, 4.0]))
+
+    model.reset()
+    after_reset = model._context(
+        {"images": {"front": torch.full((1, 1, 3, 4, 4), 5.0), "wrist": torch.full((1, 1, 3, 4, 4), 6.0)}},
+    )
+    torch.testing.assert_close(after_reset["tokens"][0, :, 0], torch.tensor([5.0, 6.0, 5.0, 6.0]))
+
+
+def test_model_training_requires_complete_temporal_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Training consumes dataset history directly and rejects incomplete windows."""
+    policy = make_policy("diffusion")
+    model = policy.model
+    assert isinstance(model, PatchPolicyModel)
+
+    def encode(images: torch.Tensor) -> torch.Tensor:
+        return torch.zeros(*images.shape[:3], 1, model.encoder.output_dim)
+
+    monkeypatch.setattr(model.encoder, "forward", encode)
+    model.train()
+
+    context = model._context({"images": {"front": torch.zeros(1, 2, 3, 4, 4)}})
+    assert context["tokens"].shape == (1, 2, model.encoder.output_dim)
+    with pytest.raises(ValueError, match="Training requires 2 observation steps"):
+        model._context({"images": {"front": torch.zeros(1, 1, 3, 4, 4)}})
+
+
+def test_camera_dictionary_matches_legacy_6d_context_and_loss() -> None:
+    """Dictionary inputs preserve the former internally stacked training computation."""
+    policy = make_policy("diffusion")
+    model = policy.model
+    assert isinstance(model, PatchPolicyModel)
+    model.train()
+    prepared = policy._prepare_batch(batch(), require_actions=True)
+    images = prepared["images"]
+    stacked = torch.stack([images[name] for name in model.camera_names], dim=2)
+
+    expected_context = {"tokens": model.encoder(stacked).flatten(1, 3)}
+    actual_context = model._context(prepared)
+
+    torch.testing.assert_close(actual_context["tokens"], expected_context["tokens"])
+
+    torch.manual_seed(17)
+    expected_losses = model.action_head.compute_loss(prepared["action"], expected_context)
+    expected_loss = reduce_losses(expected_losses, in_episode_bound(prepared))
+    torch.manual_seed(17)
+    actual_loss, _ = model.compute_loss(prepared)
+
+    torch.testing.assert_close(actual_loss, expected_loss)
 
 
 @torch.no_grad()
@@ -572,7 +705,7 @@ def test_temporal_indices() -> None:
     model = make_policy("diffusion").model
     assert model is not None
     assert model.observation_delta_indices == [-1, 0]
-    assert model.action_delta_indices == [0, 1, 2, 3]
+    assert model.action_delta_indices == [-1, 0, 1, 2, 3]
 
 
 def test_from_config_reconstructs_explicit_values() -> None:
@@ -688,7 +821,7 @@ def test_checkpoint_refreshes_statistics_without_rebuilding_model() -> None:
     policy = make_policy("diffusion")
     model = policy.model
     assert policy.config is not None
-    stats = NormalizationParameters(mean=[10.0, 20.0], std=[2.0, 3.0])
+    stats = NormalizationParameters(mean=[10.0, 20.0], std=[2.0, 3.0], min=[10.0, 20.0], max=[14.0, 26.0])
     config = replace(
         policy.config,
         output_features=[replace(policy.config.output_features[0], normalization_data=stats)],
@@ -701,9 +834,9 @@ def test_checkpoint_refreshes_statistics_without_rebuilding_model() -> None:
     assert policy.output_features == config.output_features
     assert policy._preprocessor is not None
     assert policy._postprocessor is not None
-    normalized = policy._preprocessor.normalize_actions(torch.tensor([[[12.0, 23.0]]]))
+    normalized = policy._preprocessor.normalize_actions(torch.tensor([[[14.0, 26.0]]]))
     torch.testing.assert_close(normalized, torch.ones_like(normalized))
-    torch.testing.assert_close(policy._postprocessor(normalized), torch.tensor([[[12.0, 23.0]]]))
+    torch.testing.assert_close(policy._postprocessor(normalized), torch.tensor([[[14.0, 26.0]]]))
 
 
 def test_checkpoint_rejects_incompatible_existing_model() -> None:

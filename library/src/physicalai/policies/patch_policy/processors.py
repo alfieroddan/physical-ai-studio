@@ -39,13 +39,24 @@ def resolve_camera_name(feature: Feature) -> str:
     return name
 
 
-def _normalizer(feature: Feature, key: str, *, inverse: bool = False) -> FeatureNormalizeTransform:
+def _normalizer(
+    feature: Feature,
+    key: str,
+    *,
+    mode: NormalizationType = NormalizationType.MEAN_STD,
+    inverse: bool = False,
+) -> FeatureNormalizeTransform:
     """Build a mean/std normalizer when this policy has complete feature stats."""
     stats = feature.normalization_data
     has_mean_std = stats is not None and stats.mean is not None and stats.std is not None
+    stats_available = (
+        has_mean_std
+        if mode is NormalizationType.MEAN_STD
+        else stats is not None and stats.min is not None and stats.max is not None
+    )
     mode = (
-        NormalizationType.MEAN_STD
-        if has_mean_std and feature.ftype in {FeatureType.VISUAL, FeatureType.ACTION}
+        mode
+        if stats_available and feature.ftype in {FeatureType.VISUAL, FeatureType.ACTION}
         else NormalizationType.IDENTITY
     )
     feature_type = feature.ftype
@@ -119,13 +130,16 @@ class PatchPolicyPreprocessor(nn.Module):
         output_features: list[Feature],
         image_size: tuple[int, int],
         n_obs_steps: int = 1,
+        action_normalization: NormalizationType = NormalizationType.MEAN_STD,
     ) -> None:
         super().__init__()
         self.visual_features = [feature for feature in input_features if feature.ftype is FeatureType.VISUAL]
         self.output_features = output_features
-        _warn_missing_action_normalization(output_features, "normalization")
+        if action_normalization is NormalizationType.MEAN_STD:
+            _warn_missing_action_normalization(output_features, "normalization")
         self.image_size = image_size
         self.n_obs_steps = n_obs_steps
+        self.action_normalization = action_normalization
         camera_names = [resolve_camera_name(feature) for feature in self.visual_features]
         if len(camera_names) != len(set(camera_names)):
             raise ValueError(f"Patch Policy camera names must be unique, got {camera_names!r}.")
@@ -133,7 +147,8 @@ class PatchPolicyPreprocessor(nn.Module):
             starmap(_normalizer, zip(self.visual_features, camera_names, strict=True)),
         )
         self._action_normalizers = nn.ModuleList(
-            _normalizer(feature, f"feature_{index}") for index, feature in enumerate(output_features)
+            _normalizer(feature, f"feature_{index}", mode=action_normalization)
+            for index, feature in enumerate(output_features)
         )
 
     @staticmethod
@@ -183,6 +198,8 @@ class PatchPolicyPreprocessor(nn.Module):
         elif Observation.get_flattened_keys(batch, ACTION):
             raise TypeError("Expected actions as a tensor, not flattened action fields.")
         else:
+            return None
+        if actions is None:
             return None
         if not isinstance(actions, Tensor):
             raise TypeError(f"Expected actions to be a tensor or None, got {type(actions)}.")
@@ -260,13 +277,20 @@ class PatchPolicyPostprocessor(nn.Module):
         n_action_steps: Number of action timesteps to retain.
     """
 
-    def __init__(self, output_features: list[Feature], n_action_steps: int) -> None:
+    def __init__(
+        self,
+        output_features: list[Feature],
+        n_action_steps: int,
+        action_normalization: NormalizationType = NormalizationType.MEAN_STD,
+    ) -> None:
         super().__init__()
         self.output_features = output_features
-        _warn_missing_action_normalization(output_features, "de-normalization")
+        if action_normalization is NormalizationType.MEAN_STD:
+            _warn_missing_action_normalization(output_features, "de-normalization")
         self.n_action_steps = n_action_steps
         self._action_denormalizers = nn.ModuleList(
-            _normalizer(feature, f"feature_{index}", inverse=True) for index, feature in enumerate(output_features)
+            _normalizer(feature, f"feature_{index}", mode=action_normalization, inverse=True)
+            for index, feature in enumerate(output_features)
         )
 
     def forward(self, actions: Tensor) -> Tensor:
@@ -295,7 +319,16 @@ def make_policy_processors(
     Returns:
         The input preprocessor and action postprocessor.
     """
+    action_normalization = (
+        NormalizationType.MIN_MAX if config.action_head == "diffusion" else NormalizationType.IDENTITY
+    )
     return (
-        PatchPolicyPreprocessor(config.input_features, config.output_features, image_size, config.n_obs_steps),
-        PatchPolicyPostprocessor(config.output_features, config.n_action_steps),
+        PatchPolicyPreprocessor(
+            config.input_features,
+            config.output_features,
+            image_size,
+            config.n_obs_steps,
+            action_normalization,
+        ),
+        PatchPolicyPostprocessor(config.output_features, config.n_action_steps, action_normalization),
     )
