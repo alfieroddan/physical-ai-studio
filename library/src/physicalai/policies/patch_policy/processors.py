@@ -26,16 +26,24 @@ from physicalai.policies.utils.normalization import FeatureNormalizeTransform, N
 if TYPE_CHECKING:
     from .config import PatchPolicyConfig
 
+_BATCHED_IMAGE_NDIM = 4
+_TEMPORAL_IMAGE_NDIM = 5
+_ACTION_NDIM = 3
+
 
 def resolve_camera_name(feature: Feature) -> str:
     """Return the canonical camera name for a visual feature.
 
+    Returns:
+        Camera name without observation or image prefixes.
+
     Raises:
         ValueError: If the feature has no usable name.
     """
-    name = (feature.name or "").removeprefix("observation.images.").removeprefix("images.")
+    name = (feature.name or "").removeprefix(f"observation.{IMAGES}.").removeprefix(f"{IMAGES}.")
     if not name:
-        raise ValueError("Patch Policy visual features must have non-empty camera names.")
+        msg = "Patch Policy visual features must have non-empty camera names."
+        raise ValueError(msg)
     return name
 
 
@@ -46,7 +54,11 @@ def _normalizer(
     mode: NormalizationType = NormalizationType.MEAN_STD,
     inverse: bool = False,
 ) -> FeatureNormalizeTransform:
-    """Build a mean/std normalizer when this policy has complete feature stats."""
+    """Build a normalizer using complete feature statistics when available.
+
+    Returns:
+        Feature transform using the requested mode or identity when statistics are missing.
+    """
     stats = feature.normalization_data
     has_mean_std = stats is not None and stats.mean is not None and stats.std is not None
     stats_available = (
@@ -86,6 +98,9 @@ def _normalize_features(
 ) -> Tensor:
     """Apply shared feature normalizers to slices of a concatenated tensor.
 
+    Returns:
+        Concatenated normalized feature values.
+
     Raises:
         ValueError: If a feature has no shape or the configured total width differs from the tensor.
     """
@@ -93,7 +108,8 @@ def _normalize_features(
     offset = 0
     for index, (feature, normalizer) in enumerate(zip(features, normalizers, strict=True)):
         if not feature.shape:
-            raise ValueError(f"Feature {feature.name!r} has no shape.")
+            msg = f"Feature {feature.name!r} has no shape."
+            raise ValueError(msg)
         end = offset + prod(feature.shape)
         key = f"feature_{index}"
         piece = {key: normalized[..., offset:end]}
@@ -101,12 +117,17 @@ def _normalize_features(
         normalized[..., offset:end] = piece[key]
         offset = end
     if values.shape[-1] != offset:
-        raise ValueError(f"Feature width {values.shape[-1]} does not match configured width {offset}.")
+        msg = f"Feature width {values.shape[-1]} does not match configured width {offset}."
+        raise ValueError(msg)
     return normalized
 
 
 def _gather_flattened_or_unflattened_key(batch: dict[str, Any], field: str) -> Mapping[str, Any]:
-    """Gather a nested or flattened observation field into a keyed mapping."""
+    """Gather a nested or flattened observation field into a keyed mapping.
+
+    Returns:
+        Field values keyed by their names without the field prefix.
+    """
     if field in batch and isinstance(batch[field], Mapping):
         return batch[field]
     prefixed_keys = Observation.get_flattened_keys(batch, field)
@@ -132,6 +153,11 @@ class PatchPolicyPreprocessor(nn.Module):
         n_obs_steps: int = 1,
         action_normalization: NormalizationType = NormalizationType.MEAN_STD,
     ) -> None:
+        """Initialize camera and action transforms.
+
+        Raises:
+            ValueError: If configured camera names are duplicated.
+        """
         super().__init__()
         self.visual_features = [feature for feature in input_features if feature.ftype is FeatureType.VISUAL]
         self.output_features = output_features
@@ -142,9 +168,10 @@ class PatchPolicyPreprocessor(nn.Module):
         self.action_normalization = action_normalization
         camera_names = [resolve_camera_name(feature) for feature in self.visual_features]
         if len(camera_names) != len(set(camera_names)):
-            raise ValueError(f"Patch Policy camera names must be unique, got {camera_names!r}.")
+            msg = f"Patch Policy camera names must be unique, got {camera_names!r}."
+            raise ValueError(msg)
         self._image_normalizers = nn.ModuleList(
-            starmap(_normalizer, zip(self.visual_features, camera_names, strict=True)),
+            starmap(_normalizer, zip(self.visual_features, (f"{IMAGES}.{name}" for name in camera_names), strict=True)),
         )
         self._action_normalizers = nn.ModuleList(
             _normalizer(feature, f"feature_{index}", mode=action_normalization)
@@ -167,44 +194,47 @@ class PatchPolicyPreprocessor(nn.Module):
             ValueError: If a shared image tensor has too few dimensions.
         """
         if isinstance(images, Tensor):
-            if len(images.shape) < 4:
-                raise ValueError("Visual input must include batch, channel, height, and width dimensions.")
+            if len(images.shape) < _BATCHED_IMAGE_NDIM:
+                msg = "Visual input must include batch, channel, height, and width dimensions."
+                raise ValueError(msg)
             return images
         canonical_name = resolve_camera_name(feature)
-        names = [feature.name or "", canonical_name, f"images.{canonical_name}"]
+        names = [feature.name or "", canonical_name, f"{IMAGES}.{canonical_name}"]
         for name in names:
             if name in images and isinstance(images[name], Tensor):
                 return images[name]
-        raise KeyError(f"Missing visual feature {feature.name!r} in Observation.images.")
+        msg = f"Missing visual feature {feature.name!r} in Observation.images."
+        raise KeyError(msg)
 
     @staticmethod
     def _with_time_axis(image: Tensor, feature: Feature, n_obs_steps: int) -> Tensor:
-        if image.ndim == 4:
+        if image.ndim == _BATCHED_IMAGE_NDIM:
             return image[:, None]
-        if image.ndim == 5 and image.shape[1] == n_obs_steps:
+        if image.ndim == _TEMPORAL_IMAGE_NDIM and image.shape[1] in {1, n_obs_steps}:
             return image
-        if image.ndim == 5:
-            raise ValueError(
-                f"Expected {n_obs_steps} observation timestep(s), got {image.shape[1]} for {feature.name!r}.",
-            )
-        raise ValueError(
-            f"Expected image shape [B, C, H, W] or [B, T, C, H, W] for key {feature.name}, got {tuple(image.shape)}.",
-        )
+        if image.ndim == _TEMPORAL_IMAGE_NDIM:
+            msg = f"Expected {n_obs_steps} observation timestep(s), got {image.shape[1]} for {feature.name!r}."
+            raise ValueError(msg)
+        msg = f"Expected image shape [B, C, H, W] or [B, T, C, H, W] for key {feature.name}, got {tuple(image.shape)}."
+        raise ValueError(msg)
 
     @staticmethod
     def _actions(batch: dict[str, Any]) -> Tensor | None:
         if ACTION in batch:
             actions = batch[ACTION]
         elif Observation.get_flattened_keys(batch, ACTION):
-            raise TypeError("Expected actions as a tensor, not flattened action fields.")
+            msg = "Expected actions as a tensor, not flattened action fields."
+            raise TypeError(msg)
         else:
             return None
         if actions is None:
             return None
         if not isinstance(actions, Tensor):
-            raise TypeError(f"Expected actions to be a tensor or None, got {type(actions)}.")
-        if actions.ndim != 3:
-            raise ValueError(f"Expected action shape [B, CHUNK, DIM], got {tuple(actions.shape)}.")
+            msg = f"Expected actions to be a tensor or None, got {type(actions)}."
+            raise TypeError(msg)
+        if actions.ndim != _ACTION_NDIM:
+            msg = f"Expected action shape [B, CHUNK, DIM], got {tuple(actions.shape)}."
+            raise ValueError(msg)
         return actions
 
     def normalize_actions(self, actions: Tensor) -> Tensor:
@@ -238,23 +268,25 @@ class PatchPolicyPreprocessor(nn.Module):
         batch = dict(batch)
         images = _gather_flattened_or_unflattened_key(batch, IMAGES)
         if not images:
-            raise TypeError("Observation must contain at least one image tensor.")
+            msg = "Observation must contain at least one image tensor."
+            raise TypeError(msg)
         if len(images) == 1 and IMAGES in images:
             images = images[IMAGES]
         if images is None:
-            raise TypeError("Observation.images cannot be None.")
+            msg = "Observation.images cannot be None."
+            raise TypeError(msg)
 
-        processed: dict[str, Any] = {"images": {}}
+        processed: dict[str, Any] = {}
         for feature, normalizer in zip(self.visual_features, self._image_normalizers, strict=True):
             camera_name = resolve_camera_name(feature)
             image = self._with_time_axis(self._image(images, feature), feature, self.n_obs_steps)
             image = tvf.to_dtype(image, torch.float32, scale=True)
-            processed["images"][camera_name] = tvf.resize(
+            processed[f"{IMAGES}.{camera_name}"] = tvf.resize(
                 image,
                 list(self.image_size),
                 antialias=False,
             )
-            normalizer(processed["images"])
+            normalizer(processed)
 
         # Keep actions as [B, CHUNK, DIM] while normalizing configured features.
         actions = self._actions(batch)
@@ -283,6 +315,7 @@ class PatchPolicyPostprocessor(nn.Module):
         n_action_steps: int,
         action_normalization: NormalizationType = NormalizationType.MEAN_STD,
     ) -> None:
+        """Initialize action denormalizers and the execution horizon."""
         super().__init__()
         self.output_features = output_features
         if action_normalization is NormalizationType.MEAN_STD:

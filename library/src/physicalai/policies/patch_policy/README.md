@@ -122,7 +122,7 @@ loss, metrics = policy(observation)
 | `encoder_name`                                     | Visual backbone: `dinov2`, `webssl`, or `resnet18`.                |
 | `encoder_output`                                   | Backbone representation: `patches`, `cls`, or `average`.           |
 | `encoder_pretrained`                               | Load the backbone's pretrained weights.                            |
-| `freeze_encoder`                                   | Keep the visual backbone frozen during training.                   |
+| `image_size`                                       | Encoder input `(height, width)`, defaulting to `(224, 224)`.       |
 | `action_head`                                      | `diffusion` or `behavior_transformer`.                             |
 | `n_obs_steps`                                      | Number of temporal frames per camera.                              |
 | `chunk_size`                                       | Number of future actions predicted by the model.                   |

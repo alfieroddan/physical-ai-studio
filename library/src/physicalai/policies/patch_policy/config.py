@@ -35,11 +35,13 @@ def resolve_action_dim(output_features: list[Feature]) -> int:
         ValueError: If no features are provided or a feature is not a valid action.
     """
     if not output_features:
-        raise ValueError("Patch Policy requires at least one output feature.")
+        msg = "Patch Policy requires at least one output feature."
+        raise ValueError(msg)
     width = 0
     for feature in output_features:
         if feature.ftype is not FeatureType.ACTION or not feature.shape:
-            raise ValueError(f"Output feature {feature.name!r} must be an action with a non-empty shape.")
+            msg = f"Output feature {feature.name!r} must be an action with a non-empty shape."
+            raise ValueError(msg)
         width += prod(feature.shape)
     return width
 
@@ -58,7 +60,7 @@ class PatchPolicyConfig(Config):
         encoder_name: Name of the timm visual encoder architecture.
         encoder_output: Visual representation extracted from the encoder.
         encoder_pretrained: Whether to initialize the encoder with pretrained weights.
-        freeze_encoder: Whether to prevent updates to encoder parameters.
+        image_size: Encoder input height and width, defaulting to (224, 224).
         action_head: Action-head architecture used to predict action chunks.
         hidden_dim: Hidden width of the action head.
         num_layers: Number of transformer layers in the action head.
@@ -93,7 +95,7 @@ class PatchPolicyConfig(Config):
     encoder_name: FeatureEncoderName = "dinov2"
     encoder_output: EncoderOutput = "patches"
     encoder_pretrained: bool = True
-    freeze_encoder: bool = True
+    image_size: tuple[int, int] = (224, 224)
     action_head: ActionHeadName = "diffusion"
 
     hidden_dim: int = 256
@@ -120,20 +122,32 @@ class PatchPolicyConfig(Config):
     focal_loss_gamma: float = 2.0
 
     def __post_init__(self) -> None:
-        """Validate values that affect model shapes."""
+        """Validate values that affect model shapes.
+
+        Raises:
+            ValueError: If features, dimensions, horizons, or VQ settings are invalid.
+        """
         if not any(feature.ftype is FeatureType.VISUAL for feature in self.input_features):
-            raise ValueError("Patch Policy requires at least one visual input feature.")
+            msg = "Patch Policy requires at least one visual input feature."
+            raise ValueError(msg)
         if self.action_dim != resolve_action_dim(self.output_features):
-            raise ValueError("action_dim does not match the configured output features.")
+            msg = "action_dim does not match the configured output features."
+            raise ValueError(msg)
         if self.n_obs_steps <= 0 or self.chunk_size <= 0:
-            raise ValueError("n_obs_steps and chunk_size must be positive.")
+            msg = "n_obs_steps and chunk_size must be positive."
+            raise ValueError(msg)
         if not 0 < self.n_action_steps <= self.chunk_size:
-            raise ValueError("n_action_steps must be in [1, chunk_size].")
+            msg = "n_action_steps must be in [1, chunk_size]."
+            raise ValueError(msg)
         if self.hidden_dim % self.num_heads:
-            raise ValueError("hidden_dim must be divisible by num_heads.")
+            msg = "hidden_dim must be divisible by num_heads."
+            raise ValueError(msg)
         if self.num_layers <= 0 or self.num_heads <= 0:
-            raise ValueError("num_layers and num_heads must be positive.")
+            msg = "num_layers and num_heads must be positive."
+            raise ValueError(msg)
         if self.vq_num_groups <= 0 or self.vq_num_embeddings <= 0:
-            raise ValueError("VQ group and embedding counts must be positive.")
+            msg = "VQ group and embedding counts must be positive."
+            raise ValueError(msg)
         if self.vq_action_scale <= 0:
-            raise ValueError("vq_action_scale must be positive.")
+            msg = "vq_action_scale must be positive."
+            raise ValueError(msg)

@@ -34,6 +34,17 @@ class EmbeddingMemoryBank:
         self.n_obs_steps = n_obs_steps
         self._history: deque[Tensor] = deque(maxlen=n_obs_steps)
 
+    @staticmethod
+    def update(embeddings: Tensor, history: Tensor, initialized: Tensor) -> tuple[Tensor, Tensor]:
+        """Update explicit embedding state without mutating the eager history.
+
+        Returns:
+            Updated embedding history and its initialized flag.
+        """
+        shifted = torch.cat((history[:, 1:], embeddings), dim=1)
+        updated = torch.where(initialized > 0, shifted, embeddings.expand_as(history))
+        return updated, initialized.clamp(min=1)
+
     def __call__(self, embeddings: Tensor) -> Tensor:
         """Return an explicit window or append one current embedding.
 
@@ -67,7 +78,7 @@ class EmbeddingMemoryBank:
             message = "Observation embedding shape, device, and dtype must remain constant until reset()."
             raise ValueError(message)
 
-        self._history.append(current.detach())
+        self._history.append(current)
         padding = [self._history[0] for _ in range(self.n_obs_steps - len(self._history))]
         return torch.stack([*padding, *self._history], dim=1)
 

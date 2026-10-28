@@ -315,18 +315,6 @@ ignore = [
     "noqa-comments",
 ]
 
-[tool.ruff.lint.per-file-ignores]
-"src/physicalai/policies/patch_policy/config.py" = ["DOC501", "EM101", "EM102", "TRY003"]
-"src/physicalai/policies/patch_policy/encoder.py" = ["D107", "DOC201", "DOC501", "EM101", "EM102", "PLR2004", "TRY003"]
-"src/physicalai/policies/patch_policy/gpt.py" = ["D102", "D107", "DOC201", "DOC501"]
-"src/physicalai/policies/patch_policy/model.py" = ["D102", "D107"]
-"src/physicalai/policies/patch_policy/policy.py" = ["D102", "D107", "DOC201", "DOC501", "EM101", "EM102", "TRY003"]
-"src/physicalai/policies/patch_policy/processors.py" = ["D102", "D107", "DOC201", "EM101", "EM102", "PLR2004", "TRY003"]
-"src/physicalai/policies/patch_policy/heads/behavior_transformer.py" = ["D102", "D107", "DOC201", "EM102", "PLR0913", "TRY003"]
-"src/physicalai/policies/patch_policy/heads/diffusion.py" = ["D107", "DOC201"]
-"tests/unit/policies/patch_policy/test_policy.py" = ["DOC201", "S101"]
-
-
 # ============================================================================ #
 # BANDIT CONFIGURATION                                                         #
 # ============================================================================ #

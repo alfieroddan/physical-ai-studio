@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor
 
+from physicalai.data.observation import IMAGES
 from physicalai.policies.base import Model
 from physicalai.policies.utils import in_episode_bound, reduce_losses
 
@@ -40,7 +41,7 @@ class PatchPolicyModel(Model):
         encoder_name: Name of the timm visual encoder architecture.
         encoder_output: Visual representation extracted from the encoder.
         encoder_pretrained: Whether to initialize the encoder with pretrained weights.
-        freeze_encoder: Whether to prevent updates to encoder parameters.
+        image_size: Encoder input height and width, defaulting to (224, 224).
         action_head: Action-head architecture used to predict action chunks.
         hidden_dim: Hidden width of the action head.
         num_layers: Number of transformer layers in the action head.
@@ -74,7 +75,7 @@ class PatchPolicyModel(Model):
         encoder_name: FeatureEncoderName = "dinov2",
         encoder_output: EncoderOutput = "patches",
         encoder_pretrained: bool = True,
-        freeze_encoder: bool = True,
+        image_size: tuple[int, int] = (224, 224),
         action_head: ActionHeadName = "diffusion",
         hidden_dim: int = 256,
         num_layers: int = 4,
@@ -97,6 +98,11 @@ class PatchPolicyModel(Model):
         secondary_code_weight: float = 0.5,
         focal_loss_gamma: float = 2.0,
     ) -> None:
+        """Initialize the encoder, embedding memory, and action head.
+
+        Raises:
+            ValueError: If camera names are empty or duplicated.
+        """
         super().__init__()
         if not camera_names or len(camera_names) != len(set(camera_names)):
             message = f"camera_names must be non-empty and unique, got {camera_names!r}."
@@ -109,7 +115,7 @@ class PatchPolicyModel(Model):
             encoder_name,
             encoder_output,
             pretrained=encoder_pretrained,
-            frozen=freeze_encoder,
+            image_size=image_size,
         )
         if action_head == "diffusion":
             self.action_head = PatchDiffusionHead(
@@ -179,7 +185,7 @@ class PatchPolicyModel(Model):
             encoder_name=config.encoder_name,
             encoder_output=config.encoder_output,
             encoder_pretrained=config.encoder_pretrained,
-            freeze_encoder=config.freeze_encoder,
+            image_size=config.image_size,
             action_head=config.action_head,
             hidden_dim=config.hidden_dim,
             num_layers=config.num_layers,
@@ -203,21 +209,25 @@ class PatchPolicyModel(Model):
             focal_loss_gamma=config.focal_loss_gamma,
         )
 
-    def _context(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+    def _encode_observations(self, batch: dict[str, Any]) -> Tensor:
         """Encode batch images into flattened visual context tokens.
 
         Args:
             batch: Model batch containing preprocessed images.
 
         Returns:
-            Action-head context containing visual tokens.
+            Visual tokens shaped [B, T, V * P, E].
 
         Raises:
             KeyError: If a configured camera tensor is missing.
             TypeError: If images are not provided as a mapping.
             ValueError: If camera shapes, names, or temporal lengths are invalid.
         """
-        images = batch.get("images")
+        images = batch.get(IMAGES)
+        if images is None:
+            images = {
+                key.removeprefix(f"{IMAGES}."): value for key, value in batch.items() if key.startswith(f"{IMAGES}.")
+            }
         if not isinstance(images, Mapping):
             message = "Patch Policy expects images as a dictionary of camera tensors."
             raise TypeError(message)
@@ -255,8 +265,15 @@ class PatchPolicyModel(Model):
         if self.training and temporal_tokens.shape[1] != self._n_obs_steps:
             message = f"Training requires {self._n_obs_steps} observation steps, got {temporal_tokens.shape[1]}."
             raise ValueError(message)
-        temporal_tokens = self.memory_bank(temporal_tokens)
-        return {"tokens": temporal_tokens.flatten(1, 2)}
+        return temporal_tokens
+
+    def _context(self, batch: dict[str, Any]) -> dict[str, Tensor]:
+        """Encode observations and resolve their temporal embedding context.
+
+        Returns:
+            Context tokens with temporal and patch dimensions flattened.
+        """
+        return {"tokens": self.memory_bank(self._encode_observations(batch)).flatten(1, 2)}
 
     def forward(self, batch: dict[str, Any]) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
         """Compute training loss or sample actions according to module mode.

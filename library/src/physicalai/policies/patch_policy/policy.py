@@ -45,7 +45,14 @@ def _feature_key(feature: Feature) -> tuple[FeatureType | None, str | None]:
 
 
 def _copy_normalization_data(features: list[Feature], sources: list[Feature]) -> list[Feature]:
-    """Replace configured statistics with matching training dataset statistics."""
+    """Replace configured statistics with matching training dataset statistics.
+
+    Returns:
+        Features with statistics copied from matching dataset features.
+
+    Raises:
+        ValueError: If matching features have different shapes.
+    """
     source_features = {_feature_key(feature): feature for feature in sources}
     resolved = []
     for feature in features:
@@ -54,9 +61,8 @@ def _copy_normalization_data(features: list[Feature], sources: list[Feature]) ->
             resolved.append(feature)
             continue
         if feature.shape != source.shape:
-            raise ValueError(
-                f"Feature {feature.name!r} shape {feature.shape} does not match dataset feature shape {source.shape}.",
-            )
+            msg = f"Feature {feature.name!r} shape {feature.shape} does not match dataset feature shape {source.shape}."
+            raise ValueError(msg)
         if feature.normalization_data is not None and feature.normalization_data != source.normalization_data:
             warnings.warn(
                 f"Replacing normalization statistics for feature {feature.name!r} with training dataset statistics.",
@@ -71,7 +77,11 @@ def _attach_encoder_normalization(
     mean: Tensor,
     std: Tensor,
 ) -> list[Feature]:
-    """Attach the selected timm encoder's input statistics to visual features."""
+    """Attach the selected timm encoder's input statistics to visual features.
+
+    Returns:
+        Features with encoder statistics attached to visual inputs.
+    """
     normalization = NormalizationParameters(
         mean=mean.flatten().detach().cpu().tolist(),
         std=std.flatten().detach().cpu().tolist(),
@@ -99,7 +109,7 @@ class PatchPolicy(Policy):
         encoder_name: Name of the timm visual encoder architecture.
         encoder_output: Visual representation extracted from the encoder.
         encoder_pretrained: Whether to initialize the encoder with pretrained weights.
-        freeze_encoder: Whether to prevent updates to encoder parameters.
+        image_size: Encoder input height and width, defaulting to (224, 224).
         action_head: Action-head architecture used to predict action chunks.
         n_obs_steps: Number of observation timesteps used as context.
         chunk_size: Number of action timesteps predicted per chunk.
@@ -132,7 +142,7 @@ class PatchPolicy(Policy):
         encoder_name: FeatureEncoderName = "webssl",
         encoder_output: EncoderOutput = "patches",
         encoder_pretrained: bool = True,
-        freeze_encoder: bool = True,
+        image_size: tuple[int, int] = (224, 224),
         action_head: ActionHeadName = "behavior_transformer",
         n_obs_steps: int = 1,
         chunk_size: int = 16,
@@ -156,6 +166,7 @@ class PatchPolicy(Policy):
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
     ) -> None:
+        """Initialize policy settings and configure the model when features are available."""
         super().__init__(n_action_steps=n_action_steps)
 
         self.model = None
@@ -176,7 +187,7 @@ class PatchPolicy(Policy):
         self.encoder_name = encoder_name
         self.encoder_output = encoder_output
         self.encoder_pretrained = encoder_pretrained
-        self.freeze_encoder = freeze_encoder
+        self.image_size = image_size
         self.action_head = action_head
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -206,6 +217,12 @@ class PatchPolicy(Policy):
             self.configure_model()
 
     def setup(self, stage: str) -> None:
+        """Resolve training features and normalization statistics during fitting.
+
+        Raises:
+            TypeError: If the training dataset is not a physicalai Dataset.
+            ValueError: If configured features differ from the training dataset.
+        """
         # only setup on fit stage
         if stage != "fit":
             return
@@ -213,7 +230,8 @@ class PatchPolicy(Policy):
         # Get the training features from the datamodule
         train_dataset = self.trainer.datamodule.train_dataset  # type: ignore[attr-defined]
         if not isinstance(train_dataset, Dataset):
-            raise TypeError(f"Expected physicalai Dataset, got {type(train_dataset)}.")
+            msg = f"Expected physicalai Dataset, got {type(train_dataset)}."
+            raise TypeError(msg)
 
         dataset_input_features = list(train_dataset.observation_features.values())
         dataset_output_features = list(train_dataset.action_features.values())
@@ -222,11 +240,13 @@ class PatchPolicy(Policy):
         if self.input_features is not None and [
             (_feature_key(feature), feature.shape) for feature in self.input_features
         ] != [(_feature_key(feature), feature.shape) for feature in dataset_input_features]:
-            raise ValueError("Configured input_features do not match the training dataset features.")
+            msg = "Configured input_features do not match the training dataset features."
+            raise ValueError(msg)
         if self.output_features is not None and [
             (_feature_key(feature), feature.shape) for feature in self.output_features
         ] != [(_feature_key(feature), feature.shape) for feature in dataset_output_features]:
-            raise ValueError("Configured output_features do not match the training dataset features.")
+            msg = "Configured output_features do not match the training dataset features."
+            raise ValueError(msg)
 
         # Copy normalization data from the dataset to the configured features for new training
         input_features = dataset_input_features if self.input_features is None else self.input_features
@@ -245,13 +265,18 @@ class PatchPolicy(Policy):
         optimizer_lr: float = 1e-4,
         optimizer_weight_decay: float = 0.0,
     ) -> PatchPolicy:
+        """Build a policy from a resolved configuration.
+
+        Returns:
+            Configured policy with its model and processors initialized.
+        """
         policy = cls(
             input_features=None,
             output_features=None,
             encoder_name=config.encoder_name,
             encoder_output=config.encoder_output,
             encoder_pretrained=config.encoder_pretrained,
-            freeze_encoder=config.freeze_encoder,
+            image_size=config.image_size,
             action_head=config.action_head,
             n_obs_steps=config.n_obs_steps,
             chunk_size=config.chunk_size,
@@ -288,6 +313,11 @@ class PatchPolicy(Policy):
         weights_only: bool | None = None,  # noqa: FBT001
         **kwargs: Any,  # noqa: ANN401
     ) -> PatchPolicy:
+        """Restore a policy from a Lightning checkpoint.
+
+        Returns:
+            Policy restored with its configuration and learned weights.
+        """
         return super().load_from_checkpoint(
             checkpoint_path,
             map_location=map_location,
@@ -298,7 +328,11 @@ class PatchPolicy(Policy):
         )
 
     def configure_model(self) -> None:
-        """Create the model once and synchronize feature normalization and processors."""
+        """Create the model once and synchronize feature normalization and processors.
+
+        Raises:
+            TypeError: If an existing model is not a PatchPolicyModel.
+        """
         # config requires input and output features
         if self.input_features is None or self.output_features is None:
             return
@@ -313,7 +347,7 @@ class PatchPolicy(Policy):
                 encoder_name=self.encoder_name,
                 encoder_output=self.encoder_output,
                 encoder_pretrained=self.encoder_pretrained,
-                freeze_encoder=self.freeze_encoder,
+                image_size=self.image_size,
                 action_head=self.action_head,
                 n_obs_steps=self.n_obs_steps,
                 chunk_size=self.chunk_size,
@@ -342,7 +376,7 @@ class PatchPolicy(Policy):
         self.encoder_name = config.encoder_name
         self.encoder_output = config.encoder_output
         self.encoder_pretrained = config.encoder_pretrained
-        self.freeze_encoder = config.freeze_encoder
+        self.image_size = config.image_size
         self.action_head = config.action_head
         self.n_obs_steps = config.n_obs_steps
         self.chunk_size = config.chunk_size
@@ -367,7 +401,7 @@ class PatchPolicy(Policy):
             encoder_name=config.encoder_name,
             encoder_output=config.encoder_output,
             encoder_pretrained=config.encoder_pretrained,
-            freeze_encoder=config.freeze_encoder,
+            image_size=config.image_size,
             action_head=config.action_head,
             n_obs_steps=config.n_obs_steps,
             chunk_size=config.chunk_size,
@@ -394,7 +428,8 @@ class PatchPolicy(Policy):
         if model is None:
             model = PatchPolicyModel.from_config(config)
         elif not isinstance(model, PatchPolicyModel):
-            raise TypeError("Patch Policy requires a PatchPolicyModel instance.")
+            msg = "Patch Policy requires a PatchPolicyModel instance."
+            raise TypeError(msg)
 
         # Replace input features with normalized versions based on encoder statistics
         # Normalization is only used by pre / post processor
@@ -439,7 +474,8 @@ class PatchPolicy(Policy):
                 or [(_feature_key(feature), feature.shape) for feature in config.output_features]
                 != [(_feature_key(feature), feature.shape) for feature in self.config.output_features]
             ):
-                raise ValueError("Checkpoint policy config does not match the initialized policy.")
+                msg = "Checkpoint policy config does not match the initialized policy."
+                raise ValueError(msg)
         else:
             self.config = config
         self.input_features = config.input_features
@@ -447,20 +483,38 @@ class PatchPolicy(Policy):
         self.configure_model()
 
     def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Store the resolved policy configuration in a checkpoint.
+
+        Raises:
+            RuntimeError: If the policy has not been configured.
+        """
         if self.config is None:
-            raise RuntimeError("Cannot save a Patch Policy checkpoint before the policy is configured.")
+            msg = "Cannot save a Patch Policy checkpoint before the policy is configured."
+            raise RuntimeError(msg)
         checkpoint["policy_config"] = self.config.to_dict()
 
     def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Initialize the policy from its checkpoint configuration.
+
+        Raises:
+            TypeError: If the checkpoint lacks a valid policy configuration.
+        """
         config_data = checkpoint.get("policy_config")
         if not isinstance(config_data, Mapping):
-            raise TypeError("Patch Policy checkpoint is missing a valid policy_config.")
+            msg = "Patch Policy checkpoint is missing a valid policy_config."
+            raise TypeError(msg)
         self._initialize_from_checkpoint_config(PatchPolicyConfig.from_dict(config_data))
 
     def reset(self) -> None:
+        """Clear the model history and queued actions.
+
+        Raises:
+            TypeError: If the configured model is not a PatchPolicyModel.
+        """
         if self.model is not None:
             if not isinstance(self.model, PatchPolicyModel):
-                raise TypeError("Patch Policy requires a PatchPolicyModel instance.")
+                msg = "Patch Policy requires a PatchPolicyModel instance."
+                raise TypeError(msg)
             self.model.reset()
         # Call the reset method of the parent class
         super().reset()
@@ -472,36 +526,74 @@ class PatchPolicy(Policy):
         require_actions: bool,
     ) -> dict[str, Any]:
         if self.config is None or self._preprocessor is None:
-            raise RuntimeError("Patch Policy is not initialized.")
+            msg = "Patch Policy is not initialized."
+            raise RuntimeError(msg)
         values = batch.to(self.device).to_dict()
         if require_actions and not isinstance(values.get("action"), Tensor):
-            raise TypeError("Training requires tensor actions.")
+            msg = "Training requires tensor actions."
+            raise TypeError(msg)
         return self._preprocessor(values)
 
     def forward(self, batch: Observation) -> Tensor | tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute training loss or predict actions according to the current mode.
+
+        Returns:
+            Training loss and metrics, or predicted actions during inference.
+
+        Raises:
+            RuntimeError: If the policy is not initialized.
+        """
         if self.model is None:
-            raise RuntimeError("Patch Policy is not initialized.")
+            msg = "Patch Policy is not initialized."
+            raise RuntimeError(msg)
         if self.training:
             return self.model(self._prepare_batch(batch, require_actions=True))
         return self.predict_action_chunk(batch)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: Observation) -> Tensor:
+        """Predict and postprocess an action chunk.
+
+        Returns:
+            Actions for the configured execution horizon.
+
+        Raises:
+            RuntimeError: If the model or postprocessor is not initialized.
+        """
         if not isinstance(self.model, PatchPolicyModel) or self._postprocessor is None:
-            raise RuntimeError("Patch Policy is not initialized.")
+            msg = "Patch Policy is not initialized."
+            raise RuntimeError(msg)
         prepared = self._prepare_batch(batch, require_actions=False)
         return self._postprocessor(self.model.predict_action_chunk(prepared))
 
     def compute_val_loss(self, batch: Observation) -> tuple[Tensor, dict[str, Tensor | float]]:
+        """Compute validation loss for an observation batch.
+
+        Returns:
+            Validation loss and per-component metrics.
+
+        Raises:
+            RuntimeError: If the policy is not initialized.
+        """
         if self.model is None:
-            raise RuntimeError("Patch Policy is not initialized.")
+            msg = "Patch Policy is not initialized."
+            raise RuntimeError(msg)
         return self.model.compute_val_loss(self._prepare_batch(batch, require_actions=True))
 
     def training_step(self, batch: Observation, batch_idx: int) -> Tensor:
+        """Compute and log training loss and metrics.
+
+        Returns:
+            Loss used for backpropagation.
+
+        Raises:
+            TypeError: If training forward does not return loss and metrics.
+        """
         del batch_idx
         result = self(batch)
         if not isinstance(result, tuple):
-            raise TypeError("Training forward must return loss and metrics.")
+            msg = "Training forward must return loss and metrics."
+            raise TypeError(msg)
         loss, metrics = result
         self.log_dict({f"train/{name}": value for name, value in metrics.items()}, prog_bar=True)
         return loss
@@ -513,8 +605,17 @@ class PatchPolicy(Policy):
             self.model.update_ema()
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
+        """Create the optimizer for trainable policy parameters.
+
+        Returns:
+            AdamW optimizer excluding frozen parameters.
+
+        Raises:
+            RuntimeError: If the model has not been configured.
+        """
         if self.model is None:
-            raise RuntimeError("Cannot configure optimizers before Patch Policy features and model are resolved.")
+            msg = "Cannot configure optimizers before Patch Policy features and model are resolved."
+            raise RuntimeError(msg)
         return torch.optim.AdamW(
             (parameter for parameter in self.parameters() if parameter.requires_grad),
             lr=self.optimizer_lr,

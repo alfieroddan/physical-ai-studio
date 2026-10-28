@@ -69,6 +69,11 @@ class CausalSelfAttention(nn.Module):
     bias: Tensor
 
     def __init__(self, config: GPTConfig) -> None:
+        """Initialize attention projections and the block-causal mask.
+
+        Raises:
+            ValueError: If the embedding width is not divisible by the head count.
+        """
         super().__init__()
         if config.n_embd % config.n_head != 0:
             msg = f"n_embd ({config.n_embd}) must be divisible by n_head ({config.n_head})."
@@ -116,6 +121,7 @@ class MLP(nn.Module):
     """
 
     def __init__(self, config: GPTConfig) -> None:
+        """Initialize the feed-forward projections and dropout."""
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd)
         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd)
@@ -144,6 +150,7 @@ class Block(nn.Module):
     """
 
     def __init__(self, config: GPTConfig) -> None:
+        """Initialize attention, feed-forward, and normalization layers."""
         super().__init__()
         self.ln_1 = nn.LayerNorm(config.n_embd)
         self.attn = CausalSelfAttention(config)
@@ -229,6 +236,7 @@ class PatchGPT(nn.Module):
         n_embd: int = 256,
         dropout: float = 0.0,
     ) -> None:
+        """Initialize the patch-aware transformer and its output projection."""
         super().__init__()
         self.config = GPTConfig(
             block_size=n_obs_steps,

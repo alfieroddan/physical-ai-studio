@@ -11,11 +11,20 @@ from typing import Any
 from unittest.mock import Mock
 
 import lightning as L  # noqa: N812
+import numpy as np
 import pytest
 import torch
 
 from physicalai.data import DataModule, Dataset, Feature, FeatureType, NormalizationParameters, Observation
+from physicalai.data.observation import IMAGES
+from physicalai.inference.preprocessors import (
+    PatchPolicyPreprocessor as NumpyPatchPolicyPreprocessor,
+    ResizePreprocessor,
+    StatsNormalizer,
+    ToFloatTensorPreprocessor,
+)
 from physicalai.policies.patch_policy import PatchPolicy
+from physicalai.policies.patch_policy.config import FeatureEncoderName
 from physicalai.policies.patch_policy.encoder import TimmFeatureEncoder
 from physicalai.policies.patch_policy.heads import PatchBehaviorTransformerHead
 from physicalai.policies.patch_policy.memory import EmbeddingMemoryBank
@@ -34,7 +43,9 @@ def features() -> tuple[list[Feature], list[Feature]]:
     )
 
 
-def make_policy(action_head: str, *, use_random_input_noise: bool = True) -> PatchPolicy:
+def make_policy(
+    action_head: str, *, use_random_input_noise: bool = True, image_size: tuple[int, int] = (224, 224),
+) -> PatchPolicy:
     """Construct a small policy without downloading pretrained weights."""
     inputs, outputs = features()
     return PatchPolicy(
@@ -43,6 +54,7 @@ def make_policy(action_head: str, *, use_random_input_noise: bool = True) -> Pat
         encoder_name="resnet18",
         encoder_output="average",
         encoder_pretrained=False,
+        image_size=image_size,
         action_head=action_head,  # type: ignore[arg-type]
         n_obs_steps=2,
         chunk_size=4,
@@ -63,6 +75,20 @@ def batch() -> Observation:
         images={"front": torch.rand(2, 2, 3, 32, 32)},
         action=torch.rand(2, 5, 2) * 2 - 1,
     )
+
+
+@pytest.mark.parametrize("n_obs_steps", [1, 2, 3])
+def test_explicit_memory_matches_eager_history(n_obs_steps: int) -> None:
+    bank = EmbeddingMemoryBank(n_obs_steps)
+    for _ in range(2):
+        bank.reset()
+        history = torch.zeros(2, n_obs_steps, 4, 8)
+        initialized = torch.zeros(1)
+        for _ in range(4):
+            embeddings = torch.randn(2, 1, 4, 8)
+            history, initialized = bank.update(embeddings, history, initialized)
+            torch.testing.assert_close(history, bank(embeddings))
+            torch.testing.assert_close(initialized, torch.ones_like(initialized))
 
 
 @pytest.mark.parametrize("flatten", [False, True])
@@ -253,14 +279,14 @@ def test_processors_normalize_images_and_concatenated_actions() -> None:
         },
     )
 
-    assert processed["images"]["front"].shape == (1, 1, 3, 4, 4)
-    assert processed["images"]["wrist"].shape == (1, 1, 3, 4, 4)
-    torch.testing.assert_close(processed["images"]["front"][0, 0, :, 0, 0], torch.tensor([0.0, 0.0, 1.0]))
-    torch.testing.assert_close(processed["images"]["wrist"][0, 0, :, 0, 0], torch.ones(3))
+    assert processed["images.front"].shape == (1, 1, 3, 4, 4)
+    assert processed["images.wrist"].shape == (1, 1, 3, 4, 4)
+    torch.testing.assert_close(processed["images.front"][0, 0, :, 0, 0], torch.tensor([0.0, 0.0, 1.0]))
+    torch.testing.assert_close(processed["images.wrist"][0, 0, :, 0, 0], torch.ones(3))
     assert processed["action"].shape == (1, 2, 3)
     torch.testing.assert_close(processed["action"], torch.tensor([[[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]]))
-    torch.testing.assert_close(flattened["images"]["front"], processed["images"]["front"])
-    torch.testing.assert_close(flattened["images"]["wrist"], processed["images"]["wrist"])
+    torch.testing.assert_close(flattened["images.front"], processed["images.front"])
+    torch.testing.assert_close(flattened["images.wrist"], processed["images.wrist"])
     torch.testing.assert_close(flattened["action"], processed["action"])
     torch.testing.assert_close(postprocessor(processed["action"]), raw_actions[:, :1])
 
@@ -271,10 +297,11 @@ def test_preprocessor_adds_singleton_time_axis_to_single_frame() -> None:
     preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4), n_obs_steps=3)
     frame = torch.full((1, 3, 4, 4), 5.0)
 
-    processed = preprocessor({"images": {"front": frame}})["images"]
+    processed = preprocessor({"images": {"front": frame}})
 
-    assert processed["front"].shape == (1, 1, 3, 4, 4)
-    torch.testing.assert_close(processed["front"][0, 0, :, 0, 0], torch.full((3,), 5.0))
+    assert processed["images.front"].shape == (1, 1, 3, 4, 4)
+    torch.testing.assert_close(processed["images.front"][0, 0, :, 0, 0], torch.full((3,), 5.0))
+    torch.testing.assert_close(preprocessor({"images.front": frame[:, None]})["images.front"], processed["images.front"])
 
 
 def test_preprocessor_uses_mean_std_feature_statistics() -> None:
@@ -288,9 +315,63 @@ def test_preprocessor_uses_mean_std_feature_statistics() -> None:
     preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4))
     image = torch.full((1, 3, 4, 4), 3.0)
 
-    processed = preprocessor({"images": {"front": image}})["images"]["front"]
+    processed = preprocessor({"images": {"front": image}})["images.front"]
 
     torch.testing.assert_close(processed, torch.ones_like(image[:, None]))
+
+
+@pytest.mark.parametrize("flatten", [False, True])
+@pytest.mark.parametrize("timesteps", [1, 3])
+@pytest.mark.parametrize("image_layout", ["BCHW", "BHWC"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float32, np.float64])
+def test_numpy_image_pipeline_matches_torch(
+    flatten: bool,
+    timesteps: int,
+    image_layout: str,
+    dtype: type[np.uint8] | type[np.float32] | type[np.float64],
+) -> None:
+    """Shared NumPy stages match Torch image preparation without action processing."""
+    mean = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+    std = np.array([0.5, 0.75, 1.0], dtype=np.float32)
+    inputs = [
+        Feature(
+            name="wrist", ftype=FeatureType.VISUAL, shape=(3, 5, 7),
+            normalization_data=NormalizationParameters(mean=mean.tolist(), std=std.tolist()),
+        ),
+        Feature(name="front", ftype=FeatureType.VISUAL, shape=(3, 5, 7)),
+    ]
+    torch_processor = PatchPolicyPreprocessor(inputs, [], (8, 10), n_obs_steps=3)
+    camera_processor = NumpyPatchPolicyPreprocessor(["wrist", "front"], n_obs_steps=3)
+    resizer = ResizePreprocessor((8, 10), image_layout=image_layout, mode="stretch")
+    normalizer = StatsNormalizer(stats={
+        f"{IMAGES}.wrist": {"mean": mean.reshape(3, 1, 1), "std": std.reshape(3, 1, 1)},
+    })
+    rng = np.random.default_rng(42)
+    images: dict[str, np.ndarray] = {
+        name: rng.integers(0, 256, (2, timesteps, 3, 5, 7), dtype=np.uint8)
+        for name in ("front", "wrist")
+    }
+    if dtype != np.uint8:
+        images = {name: image.astype(dtype) / 255.0 for name, image in images.items()}
+    torch_images = {name: torch.from_numpy(image) for name, image in images.items()}
+    if image_layout == "BHWC":
+        images = {name: image.transpose(0, 1, 3, 4, 2) for name, image in images.items()}
+    numpy_batch = {f"{IMAGES}.{name}": image for name, image in images.items()} if flatten else {IMAGES: images}
+    torch_batch = (
+        {f"{IMAGES}.{name}": image for name, image in torch_images.items()}
+        if flatten else {IMAGES: torch_images}
+    )
+
+    prepared = camera_processor(numpy_batch)
+    resized = resizer(ToFloatTensorPreprocessor()(prepared))
+    actual = normalizer({key: np.asarray(value) for key, value in resized.items()})
+    expected = torch_processor(torch_batch)
+
+    assert list(actual) == list(expected) == [f"{IMAGES}.wrist", f"{IMAGES}.front"]
+    for key in expected:
+        assert actual[key].dtype == np.float32
+        assert actual[key].shape == (2, timesteps, 3, 8, 10)
+        np.testing.assert_allclose(actual[key], expected[key].numpy(), atol=1e-6, rtol=1e-5)
 
 
 def test_preprocessor_scales_uint8_before_image_normalization() -> None:
@@ -306,7 +387,7 @@ def test_preprocessor_scales_uint8_before_image_normalization() -> None:
     preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4))
     image = torch.full((1, 3, 4, 4), 255, dtype=torch.uint8)
 
-    processed = preprocessor({"images": {"front": image}})["images"]["front"]
+    processed = preprocessor({"images": {"front": image}})["images.front"]
 
     torch.testing.assert_close(processed[0, 0, :, 0, 0], (1 - torch.tensor(mean)) / torch.tensor(std))
 
@@ -516,9 +597,9 @@ def test_preprocessor_requires_matching_temporal_length() -> None:
     preprocessor = PatchPolicyPreprocessor([feature], [], (4, 4), n_obs_steps=3)
     images = torch.zeros(1, 3, 3, 4, 4)
 
-    processed = preprocessor({"images": {"front": images}})["images"]
+    processed = preprocessor({"images": {"front": images}})
 
-    assert processed["front"].shape == (1, 3, 3, 4, 4)
+    assert processed["images.front"].shape == (1, 3, 3, 4, 4)
 
     with pytest.raises(ValueError, match="Expected 3 observation timestep"):
         preprocessor({"images": {"front": torch.zeros(1, 2, 3, 4, 4)}})
@@ -531,7 +612,7 @@ def test_select_action_does_not_track_queued_observations(monkeypatch: pytest.Mo
     captured: list[torch.Tensor] = []
 
     def predict(batch: dict[str, Any]) -> torch.Tensor:
-        captured.append(batch["images"]["front"].clone())
+        captured.append(batch["images.front"].clone())
         return torch.zeros(1, 4, 2)
 
     assert policy.model is not None
@@ -636,6 +717,26 @@ def test_model_stacks_camera_dict_and_banks_encoded_observations(monkeypatch: py
     torch.testing.assert_close(after_reset["tokens"][0, :, 0], torch.tensor([5.0, 6.0, 5.0, 6.0]))
 
 
+@pytest.mark.parametrize("flatten", [False, True])
+def test_model_camera_order_follows_input_features(flatten: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Configured feature order, not dictionary or alphabetical order, controls stacking."""
+    inputs, _ = features()
+    config = replace(
+        make_policy("diffusion").config,
+        input_features=[replace(inputs[0], name="wrist"), inputs[0]],
+    )
+    model = PatchPolicyModel.from_config(config).eval()
+    images = {"front": torch.ones(1, 1, 3, 4, 4), "wrist": torch.full((1, 1, 3, 4, 4), 2.0)}
+    sample = {f"images.{name}": value for name, value in images.items()} if flatten else {"images": images}
+    encode = Mock(return_value=torch.zeros(1, 1, 2, 1, model.encoder.output_dim))
+    monkeypatch.setattr(model.encoder, "forward", encode)
+
+    model._encode_observations(sample)
+
+    assert model.camera_names == ("wrist", "front")
+    torch.testing.assert_close(encode.call_args.args[0], torch.stack([images["wrist"], images["front"]], dim=2))
+
+
 def test_model_training_requires_complete_temporal_window(monkeypatch: pytest.MonkeyPatch) -> None:
     """Training consumes dataset history directly and rejects incomplete windows."""
     policy = make_policy("diffusion")
@@ -661,8 +762,7 @@ def test_camera_dictionary_matches_legacy_6d_context_and_loss() -> None:
     assert isinstance(model, PatchPolicyModel)
     model.train()
     prepared = policy._prepare_batch(batch(), require_actions=True)
-    images = prepared["images"]
-    stacked = torch.stack([images[name] for name in model.camera_names], dim=2)
+    stacked = torch.stack([prepared[f"images.{name}"] for name in model.camera_names], dim=2)
 
     expected_context = {"tokens": model.encoder(stacked).flatten(1, 3)}
     actual_context = model._context(prepared)
@@ -731,27 +831,55 @@ def test_random_input_noise_propagates_from_policy() -> None:
     assert getattr(policy.model.action_head, "use_random_input_noise") is False
 
 
+@pytest.mark.parametrize("image_size", [(224, 224), (28, 42)])
 @torch.no_grad()
-def test_dinov2_uses_native_image_size() -> None:
-    """DINOv2 supplies the resolution used by preprocessing and patch counts."""
+def test_dinov2_uses_policy_image_size(image_size: tuple[int, int]) -> None:
+    """Policy resolution controls preprocessing, positional embeddings, and patch counts."""
+    original_config = make_policy("diffusion").config
+    assert original_config is not None
     config = replace(
-        make_policy("diffusion").config,
+        original_config,
         encoder_name="dinov2",
         encoder_output="patches",
+        image_size=image_size,
     )
     policy = PatchPolicy.from_config(config)
     model = policy.model
-    assert model is not None
-    image_size = model.encoder.image_size
-    assert image_size == model.encoder.backbone.patch_embed.img_size
-    assert policy._preprocessor.image_size == image_size
-    assert "image_size" not in policy.hparams
-    assert "image_size" not in policy.config.to_dict()
-    expected_tokens = (image_size[0] // 14) * (image_size[1] // 14)
+    assert isinstance(model, PatchPolicyModel)
+    assert policy.config is not None
+    assert policy._preprocessor is not None
+    expected_size = image_size
+    assert model.encoder.image_size == expected_size
+    assert expected_size == getattr(model.encoder.backbone, "patch_embed").img_size
+    assert policy._preprocessor.image_size == expected_size
+    assert policy.hparams["image_size"] == image_size
+    assert "image_size" in policy.config.to_dict()
+    prepared = policy._prepare_batch(batch(), require_actions=False)
+    assert prepared["images.front"].shape[-2:] == expected_size
+    expected_tokens = (expected_size[0] // 14) * (expected_size[1] // 14)
 
     assert model.encoder.num_tokens == expected_tokens
-    tokens = model.encoder(torch.rand(1, 1, 1, 3, *image_size))
+    tokens = model.encoder(torch.rand(1, 1, 1, 3, *expected_size))
     assert tokens.shape == (1, 1, 1, expected_tokens, model.encoder.output_dim)
+
+
+def test_encoder_is_frozen_without_tracking_input_gradients() -> None:
+    """Encoder features stay constant while downstream heads remain trainable."""
+    encoder = TimmFeatureEncoder("resnet18", "patches", pretrained=False)
+    encoder.train()
+    images = torch.randn(2, 3, 32, 32, requires_grad=True)
+    head = torch.nn.Linear(encoder.output_dim, 1)
+
+    with torch.enable_grad():
+        tokens = encoder(images)
+        head(tokens).sum().backward()
+
+    assert not encoder.backbone.training
+    assert all(not parameter.requires_grad and parameter.grad is None for parameter in encoder.parameters())
+    assert not tokens.requires_grad
+    assert tokens.grad_fn is None
+    assert images.grad is None
+    assert head.weight.grad is not None
 
 
 def test_resnet18_uses_fallback_image_size() -> None:
@@ -760,32 +888,39 @@ def test_resnet18_uses_fallback_image_size() -> None:
     assert policy.model.encoder.image_size == (224, 224)
     assert policy._preprocessor.image_size == (224, 224)
     prepared = policy._prepare_batch(batch(), require_actions=False)
-    assert prepared["images"]["front"].shape[-2:] == (224, 224)
+    assert prepared["images.front"].shape[-2:] == (224, 224)
 
 
-@pytest.mark.parametrize("image_size", [224, (112, 224)])
-def test_webssl_uses_config_image_size(image_size: int | tuple[int, int], monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("encoder_name", ["dinov2", "webssl", "resnet18"])
+@pytest.mark.parametrize("image_size", [(224, 224), (28, 42)])
+def test_encoders_accept_image_size(
+    encoder_name: FeatureEncoderName, image_size: tuple[int, int], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every backbone accepts the default resolution and a rectangular override."""
     from transformers import Dinov2Config  # noqa: PLC0415
 
     config = Dinov2Config(
-        image_size=image_size,
+        image_size=224,
         hidden_size=8,
         num_hidden_layers=1,
         num_attention_heads=2,
-        intermediate_size=16,
     )
     monkeypatch.setattr(Dinov2Config, "from_pretrained", Mock(return_value=config))
 
-    encoder = TimmFeatureEncoder("webssl", "patches", pretrained=False)
+    encoder = TimmFeatureEncoder(encoder_name, "patches", pretrained=False, image_size=image_size)
 
-    expected_size = (image_size, image_size) if isinstance(image_size, int) else image_size
+    expected_size = image_size
     assert encoder.image_size == expected_size
-    assert encoder.num_tokens == (expected_size[0] // config.patch_size) * (expected_size[1] // config.patch_size)
+    expected_tokens = 1 if encoder_name == "resnet18" else (expected_size[0] // 14) * (expected_size[1] // 14)
+    assert encoder.num_tokens == expected_tokens
+    tokens = encoder(torch.rand(1, 1, 1, 3, *expected_size))
+    assert tokens.shape == (1, 1, 1, expected_tokens, encoder.output_dim)
 
 
 def test_checkpoint_hooks_restore_complete_config() -> None:
     """Checkpoint hooks rebuild a lazy policy from its complete serialized config."""
-    original = make_policy("diffusion", use_random_input_noise=False)
+    original = make_policy("diffusion", use_random_input_noise=False, image_size=(28, 42))
+    assert original.config is not None
     checkpoint: dict[str, object] = {}
     original.on_save_checkpoint(checkpoint)
 

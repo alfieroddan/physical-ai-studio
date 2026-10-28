@@ -23,9 +23,12 @@ _TIMM_MODELS: dict[FeatureEncoderName, str] = {
     "dinov2": "vit_small_patch14_dinov2.lvd142m",
 }
 _WEBSSL_REPO = "facebook/webssl-dino300m-full2b-224"
-_IMAGE_SIZES: dict[FeatureEncoderName, tuple[int, int]] = {"resnet18": (224, 224)}
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
+_SPATIAL_NDIM = 2
+_BATCHED_IMAGE_NDIM = 4
+_POOLED_FEATURE_NDIM = 2
+_TOKEN_FEATURE_NDIM = 3
 
 
 def _import_timm() -> ModuleType:
@@ -40,7 +43,8 @@ def _import_timm() -> ModuleType:
     try:
         import timm  # noqa: PLC0415
     except ImportError as exc:
-        raise ImportError("Patch Policy requires timm. Install physicalai-train[patch_policy].") from exc
+        msg = "Patch Policy requires timm. Install physicalai-train[patch_policy]."
+        raise ImportError(msg) from exc
     return timm
 
 
@@ -51,7 +55,7 @@ class TimmFeatureEncoder(nn.Module):
         name: Supported timm encoder name.
         output: Encoder representation to return for each image.
         pretrained: Whether to load pretrained backbone weights.
-        frozen: Whether to freeze the backbone in evaluation mode.
+        image_size: Input height and width, defaulting to (224, 224).
     """
 
     mean: Tensor
@@ -64,37 +68,46 @@ class TimmFeatureEncoder(nn.Module):
         output: EncoderOutput,
         *,
         pretrained: bool = True,
-        frozen: bool = True,
+        image_size: tuple[int, int] = (224, 224),
     ) -> None:
+        """Initialize a frozen visual backbone and its output metadata.
+
+        Raises:
+            ImportError: If a required optional encoder dependency is unavailable.
+            ValueError: If the image size or backbone metadata is invalid.
+        """
         super().__init__()
         self.output = output
-        self.frozen = frozen
         self.name = name
+        if len(image_size) != _SPATIAL_NDIM or any(size <= 0 for size in image_size):
+            msg = "image_size must contain two positive dimensions."
+            raise ValueError(msg)
+        self.image_size = (image_size[0], image_size[1])
         if name == "dinov2":
             backbone = _import_timm().create_model(
                 _TIMM_MODELS[name],
                 pretrained=pretrained,
                 num_classes=0,
+                img_size=self.image_size,
             )
             self.backbone = backbone
             self.output_dim = int(backbone.num_features)
             patch_embed = getattr(backbone, "patch_embed", None)
             if patch_embed is None:
-                raise ValueError(f"Encoder {name!r} does not expose a patch embedding with image-size metadata.")
-            self.image_size = (int(patch_embed.img_size[0]), int(patch_embed.img_size[1]))
+                msg = f"Encoder {name!r} does not expose a patch embedding with image-size metadata."
+                raise ValueError(msg)
             self.num_tokens = int(getattr(patch_embed, "num_patches", 1)) if output == "patches" else 1
         elif name == "webssl":
             try:
                 from transformers import Dinov2Config, Dinov2Model  # noqa: PLC0415
             except ImportError as exc:
-                raise ImportError("WebSSL requires transformers. Install physicalai-train[patch_policy].") from exc
+                msg = "WebSSL requires transformers. Install physicalai-train[patch_policy]."
+                raise ImportError(msg) from exc
 
             config = Dinov2Config.from_pretrained(_WEBSSL_REPO)
             backbone = Dinov2Model.from_pretrained(_WEBSSL_REPO) if pretrained else Dinov2Model(config)
             self.backbone = backbone
             self.output_dim = int(config.hidden_size)
-            size = config.image_size
-            self.image_size = (size, size) if isinstance(size, int) else (int(size[0]), int(size[1]))
             patch_size = config.patch_size
             if isinstance(patch_size, int):
                 patch_size = (patch_size, patch_size)
@@ -107,19 +120,18 @@ class TimmFeatureEncoder(nn.Module):
             try:
                 from torchvision.models import ResNet18_Weights, resnet18  # noqa: PLC0415
             except ImportError as exc:
-                raise ImportError("ResNet18 requires torchvision. Install physicalai-train[patch_policy].") from exc
+                msg = "ResNet18 requires torchvision. Install physicalai-train[patch_policy]."
+                raise ImportError(msg) from exc
 
             model = resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
             self.backbone = nn.Sequential(*list(model.children())[:-1])
-            self.image_size = _IMAGE_SIZES[name]
             self.output_dim = int(model.fc.in_features)
             self.num_tokens = 1
 
         self.register_buffer("mean", torch.tensor(_IMAGENET_MEAN)[None, :, None, None])
         self.register_buffer("std", torch.tensor(_IMAGENET_STD)[None, :, None, None])
-        if frozen:
-            self.requires_grad_(requires_grad=False)
-            self.backbone.eval()
+        self.requires_grad_(requires_grad=False)
+        self.backbone.eval()
 
     def train(self, mode: bool = True) -> TimmFeatureEncoder:  # noqa: FBT001, FBT002
         """Set training mode while keeping a frozen backbone in evaluation mode.
@@ -131,8 +143,7 @@ class TimmFeatureEncoder(nn.Module):
             This encoder.
         """
         super().train(mode=mode)
-        if self.frozen:
-            self.backbone.eval()
+        self.backbone.eval()
         return self
 
     def _tokens(self, images: Tensor) -> Tensor:
@@ -151,7 +162,7 @@ class TimmFeatureEncoder(nn.Module):
         if self.name == "webssl":
             features = self.backbone(
                 pixel_values=images,
-                interpolate_pos_encoding=images.shape[-2:] != self.image_size,
+                interpolate_pos_encoding=True,
             ).last_hidden_state
             if self.output == "cls":
                 return features[:, :1]
@@ -163,19 +174,22 @@ class TimmFeatureEncoder(nn.Module):
         else:
             forward_features = getattr(self.backbone, "forward_features", None)
             if not callable(forward_features):
-                raise TypeError(f"Encoder {self.name!r} does not expose forward_features().")
+                msg = f"Encoder {self.name!r} does not expose forward_features()."
+                raise TypeError(msg)
             features = forward_features(images)
         if isinstance(features, dict):
             feature_key = "x_norm_clstoken" if self.output == "cls" else "x_norm_patchtokens"
             features = features.get(feature_key, features.get("last_hidden_state"))
         if not isinstance(features, Tensor):
-            raise TypeError("timm forward_features must return a tensor or a supported tensor dictionary.")
-        if features.ndim == 4:
+            msg = "timm forward_features must return a tensor or a supported tensor dictionary."
+            raise TypeError(msg)
+        if features.ndim == _BATCHED_IMAGE_NDIM:
             features = features.flatten(2).transpose(1, 2)
-        elif features.ndim == 2:
+        elif features.ndim == _POOLED_FEATURE_NDIM:
             features = features[:, None]
-        elif features.ndim != 3:
-            raise ValueError(f"Unsupported timm feature shape {tuple(features.shape)}.")
+        elif features.ndim != _TOKEN_FEATURE_NDIM:
+            msg = f"Unsupported timm feature shape {tuple(features.shape)}."
+            raise ValueError(msg)
 
         prefix = int(getattr(self.backbone, "num_prefix_tokens", 0))
         patches = features[:, prefix:] if prefix and features.shape[1] > prefix else features
@@ -185,6 +199,7 @@ class TimmFeatureEncoder(nn.Module):
             return features[:, :1]
         return patches.mean(dim=1, keepdim=True)
 
+    @torch.no_grad()
     def forward(self, images: Tensor) -> Tensor:
         """Encode images while preserving their leading dimensions.
 
@@ -197,8 +212,9 @@ class TimmFeatureEncoder(nn.Module):
         Raises:
             ValueError: If the input does not contain channel and spatial dimensions.
         """
-        if images.ndim < 4:
-            raise ValueError("Expected images with shape [..., C, H, W].")
+        if images.ndim < _BATCHED_IMAGE_NDIM:
+            msg = "Expected images with shape [..., C, H, W]."
+            raise ValueError(msg)
         leading = images.shape[:-3]
         flat = images.reshape(-1, *images.shape[-3:])
         tokens = self._tokens(flat)
