@@ -14,7 +14,7 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
 from physicalai.policies.components.action_heads import ActionHead, Context
-from physicalai.policies.patch_policy.gpt import PatchGPT
+from physicalai.policies.patch_policy.components.gpt import PatchGPT
 
 
 class _MLP(nn.Sequential):
@@ -54,7 +54,11 @@ class _ActionMLP(nn.Module):
             nn.init.zeros_(module.bias)
 
     def forward(self, values: Tensor) -> Tensor:
-        """Project flattened action windows."""
+        """Project flattened action windows.
+
+        Returns:
+            Projected values with the configured output width.
+        """
         return self.fc(self.encoder(values))
 
 
@@ -71,6 +75,7 @@ class ResidualActionQuantizer(nn.Module):
         *,
         action_scale: float,
     ) -> None:
+        """Initialize action projections and the residual codebook."""
         super().__init__()
         flat_dim = action_dim * chunk_size
         self.action_dim = action_dim
@@ -96,7 +101,11 @@ class ResidualActionQuantizer(nn.Module):
         return torch.stack(codes, dim=-1)
 
     def decode_codes(self, codes: Tensor) -> Tensor:
-        """Decode residual code indices into action centers."""
+        """Decode residual code indices into action centers.
+
+        Returns:
+            Decoded actions shaped ``[B, chunk_size, action_dim]``.
+        """
         groups = torch.arange(self.groups, device=codes.device)
         latent = self.codebook[groups[:, None], codes.transpose(0, 1)].sum(0)
         decoded = self.decoder(latent) * self.action_scale
@@ -106,7 +115,7 @@ class ResidualActionQuantizer(nn.Module):
 class PatchBehaviorTransformerHead(ActionHead):
     """Upstream-compatible patch-aware Behavior Transformer head."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         context_dim: int,
         action_dim: int,
@@ -126,6 +135,7 @@ class PatchBehaviorTransformerHead(ActionHead):
         secondary_code_weight: float = 0.5,
         focal_loss_gamma: float = 2.0,
     ) -> None:
+        """Initialize the transformer, action predictors, and quantizer."""
         super().__init__(chunk_size, action_dim)
         self.n_obs_steps = n_obs_steps
         self.n_patches = n_patches
@@ -199,13 +209,20 @@ class PatchBehaviorTransformerHead(ActionHead):
         return centers.detach() + selected_offsets
 
     def sample(self, context: Context, *, noise: Tensor | None = None, num_steps: int | None = None) -> Tensor:
-        """Sample the final observation timestep's action chunk."""
+        """Sample the final observation timestep's action chunk.
+
+        Returns:
+            Predicted actions shaped ``[B, chunk_size, action_dim]``.
+        """
         del noise, num_steps
         logits, offsets = self._predictions(context)
         return self._actions(logits, offsets)[:, -1]
 
     def compute_loss(self, actions: Tensor, context: Context, *, valid_steps: Tensor | None = None) -> Tensor:
         """Compute the upstream focal-code and continuous-offset loss.
+
+        Returns:
+            Combined code-prediction and action-offset loss.
 
         Raises:
             ValueError: If actions do not cover every overlapping target window.

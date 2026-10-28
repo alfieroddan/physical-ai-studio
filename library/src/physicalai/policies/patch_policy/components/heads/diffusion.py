@@ -30,7 +30,11 @@ class _SinusoidalPositionalEmbedding(nn.Module):
         self.hidden_dim = hidden_dim
 
     def forward(self, timesteps: Tensor) -> Tensor:
-        """Encode one timestep per batch item."""
+        """Encode one timestep per batch item.
+
+        Returns:
+            Sinusoidal timestep embeddings for the batch.
+        """
         half_dim = self.hidden_dim // 2
         scale = math.log(10000) / (half_dim - 1)
         frequencies = torch.exp(torch.arange(half_dim, device=timesteps.device) * -scale)
@@ -63,6 +67,7 @@ class PatchDiffusionHead(DiffusionActionHead):
         eta: float = 1.0,
         use_random_input_noise: bool = True,
     ) -> None:
+        """Initialize the diffusion scheduler and causal transformer network."""
         self.action_horizon = chunk_size
         self.n_obs_steps = n_obs_steps
         self.n_patches = n_patches
@@ -140,7 +145,11 @@ class PatchDiffusionHead(DiffusionActionHead):
             nn.init.ones_(module.weight)
 
     def denoise(self, x_t: Tensor, t: Tensor, context: Context) -> Tensor:
-        """Predict noise from actions, timestep, and causal visual context."""
+        """Predict noise from actions, timestep, and causal visual context.
+
+        Returns:
+            Predicted diffusion targets with the noisy action tensor's shape.
+        """
         tokens = context["tokens"]
         time = self.time_encoder(t.to(x_t.dtype))[:, None]
         memory = torch.cat((time, self.context_in(tokens)), dim=1)
@@ -155,7 +164,11 @@ class PatchDiffusionHead(DiffusionActionHead):
         return self.action_out(self.norm(decoded))
 
     def sample(self, context: Context, *, noise: Tensor | None = None, num_steps: int | None = None) -> Tensor:
-        """Sample the full trajectory and return the current action chunk."""
+        """Sample the full trajectory and return the current action chunk.
+
+        Returns:
+            Predicted actions shaped ``[B, action_horizon, action_dim]``.
+        """
         trajectory = super().sample(context, noise=noise, num_steps=num_steps)
         start = self.n_obs_steps - 1
         return trajectory[:, start : start + self.action_horizon]

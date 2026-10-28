@@ -17,7 +17,7 @@ from torch import Tensor, nn
 if TYPE_CHECKING:
     from types import ModuleType
 
-    from .config import EncoderOutput, FeatureEncoderName
+    from physicalai.policies.patch_policy.config import EncoderOutput, FeatureEncoderName
 
 _TIMM_MODELS: dict[FeatureEncoderName, str] = {
     "dinov2": "vit_small_patch14_dinov2.lvd142m",

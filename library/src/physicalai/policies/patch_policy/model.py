@@ -21,9 +21,9 @@ from physicalai.data.observation import IMAGES
 from physicalai.policies.base import Model
 from physicalai.policies.utils import in_episode_bound, reduce_losses
 
-from .encoder import TimmFeatureEncoder
-from .heads import PatchBehaviorTransformerHead, PatchDiffusionHead
-from .memory import EmbeddingMemoryBank
+from .components.encoder import TimmFeatureEncoder
+from .components.heads import PatchBehaviorTransformerHead, PatchDiffusionHead
+from .components.memory import EmbeddingMemoryBank
 from .processors import resolve_camera_name
 
 if TYPE_CHECKING:

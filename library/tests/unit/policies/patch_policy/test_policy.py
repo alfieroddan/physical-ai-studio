@@ -15,8 +15,12 @@ import numpy as np
 import pytest
 import torch
 
+import physicalai.policies.patch_policy as patch_policy
 from physicalai.data import DataModule, Dataset, Feature, FeatureType, NormalizationParameters, Observation
-from physicalai.data.observation import IMAGES
+from physicalai.data.observation import ACTION, IMAGES
+from physicalai.export import ExportBackend
+from physicalai.inference.adapters.pytorch import TorchAdapter
+from physicalai.inference.manifest import Manifest
 from physicalai.inference.preprocessors import (
     PatchPolicyPreprocessor as NumpyPatchPolicyPreprocessor,
     ResizePreprocessor,
@@ -24,10 +28,10 @@ from physicalai.inference.preprocessors import (
     ToFloatTensorPreprocessor,
 )
 from physicalai.policies.patch_policy import PatchPolicy
+from physicalai.policies.patch_policy.components.encoder import TimmFeatureEncoder
+from physicalai.policies.patch_policy.components.heads import PatchBehaviorTransformerHead
+from physicalai.policies.patch_policy.components.memory import EmbeddingMemoryBank
 from physicalai.policies.patch_policy.config import FeatureEncoderName
-from physicalai.policies.patch_policy.encoder import TimmFeatureEncoder
-from physicalai.policies.patch_policy.heads import PatchBehaviorTransformerHead
-from physicalai.policies.patch_policy.memory import EmbeddingMemoryBank
 from physicalai.policies.patch_policy.model import PatchPolicyModel
 from physicalai.policies.patch_policy.policy import _copy_normalization_data
 from physicalai.policies.patch_policy.processors import PatchPolicyPostprocessor, PatchPolicyPreprocessor
@@ -75,6 +79,12 @@ def batch() -> Observation:
         images={"front": torch.rand(2, 2, 3, 32, 32)},
         action=torch.rand(2, 5, 2) * 2 - 1,
     )
+
+
+def test_package_exports_only_public_policy_types() -> None:
+    """The package exports config, model, and policy without private components."""
+    assert patch_policy.__all__ == ["PatchPolicy", "PatchPolicyConfig", "PatchPolicyModel"]
+    assert not hasattr(patch_policy, "EmbeddingMemoryBank")
 
 
 @pytest.mark.parametrize("n_obs_steps", [1, 2, 3])
@@ -985,6 +995,48 @@ def test_checkpoint_rejects_incompatible_existing_model() -> None:
 
     assert policy.model is model
     assert policy.config is config
+
+
+@pytest.mark.parametrize("action_head", ["diffusion", "behavior_transformer"])
+def test_torch_export_round_trip(tmp_path: Path, action_head: str) -> None:
+    """Torch exports preserve configuration, weights, and streamed inference."""
+    original = make_policy(action_head, use_random_input_noise=False, image_size=(28, 42)).eval()
+
+    original.export(tmp_path, backend=ExportBackend.TORCH)
+
+    model_path = tmp_path / "patchpolicy.pt"
+    assert model_path.is_file()
+    manifest = Manifest.load(tmp_path)
+    assert manifest.policy.source.class_path == "physicalai.policies.patch_policy.policy.PatchPolicy"
+    assert manifest.model.artifacts["torch"] == model_path.name
+
+    restored = PatchPolicy.load_from_checkpoint(model_path).eval()
+    assert restored.config == original.config
+    assert set(restored.state_dict()) == set(original.state_dict())
+    for name, value in original.state_dict().items():
+        torch.testing.assert_close(restored.state_dict()[name], value)
+
+    adapter = TorchAdapter()
+    adapter.load(model_path)
+    for _ in range(3):
+        images = torch.rand(2, 1, 3, 32, 32)
+        observation = Observation(images={"front": images})
+        torch.manual_seed(7)
+        expected = original.predict_action_chunk(observation)
+        torch.manual_seed(7)
+        torch.testing.assert_close(restored.predict_action_chunk(observation), expected)
+        torch.manual_seed(7)
+        predicted = adapter.predict({IMAGES: {"front": images.numpy()}})
+        np.testing.assert_allclose(predicted[ACTION], expected.numpy(), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("backend", [ExportBackend.ONNX, ExportBackend.OPENVINO, ExportBackend.EXECUTORCH])
+def test_export_rejects_non_torch_backends(tmp_path: Path, backend: ExportBackend) -> None:
+    """Patch Policy advertises and supports only Torch export."""
+    policy = make_policy("diffusion")
+    assert policy.get_supported_export_backends() == [ExportBackend.TORCH]
+    with pytest.raises(NotImplementedError, match="not implemented"):
+        policy.export(tmp_path, backend=backend)
 
 
 def test_load_from_checkpoint_round_trip(tmp_path: Path) -> None:

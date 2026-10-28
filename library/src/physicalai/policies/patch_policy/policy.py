@@ -27,6 +27,7 @@ from .config import (
     PatchPolicyConfig,
     resolve_action_dim,
 )
+from .export import PatchPolicyExportMixin
 from .model import PatchPolicyModel
 from .processors import (
     PatchPolicyPostprocessor,
@@ -100,7 +101,7 @@ def _attach_encoder_normalization(
     return resolved
 
 
-class PatchPolicy(Policy):
+class PatchPolicy(PatchPolicyExportMixin, Policy):
     """Train a timm visual encoder followed by a diffusion or Behavior Transformer head.
 
     Args:
@@ -126,12 +127,12 @@ class PatchPolicy(Policy):
         optimizer_weight_decay: AdamW weight-decay coefficient.
     """
 
-    model: Model | None
+    model: Model | None  # pyrefly: ignore[bad-override-mutable-attribute]
     config: PatchPolicyConfig | None
     encoder_name: FeatureEncoderName
     encoder_output: EncoderOutput
     action_head: ActionHeadName
-    _preprocessor: PatchPolicyPreprocessor | None
+    _preprocessor: PatchPolicyPreprocessor | None  # pyrefly: ignore[bad-override-mutable-attribute]
     _postprocessor: PatchPolicyPostprocessor | None
 
     def __init__(  # noqa: PLR0913
