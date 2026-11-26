@@ -259,6 +259,44 @@ class _LeRobotDatasetAdapter(Dataset):
         """Raw dataset features."""
         return self._lerobot_dataset.features
 
+    def relative_action_stats(self, chunk_size: int, exclude_joints: tuple[str, ...]) -> dict[str, list[float] | tuple]:
+        """Compute LeRobot's chunk statistics over the selected episodes, without decoding video.
+
+        Returns:
+            Relative action statistics and the per-joint relative mask.
+
+        Raises:
+            ValueError: If action and state vectors do not have matching joint names and order.
+        """
+        from lerobot.datasets.compute_stats import compute_relative_action_stats  # noqa: PLC0415
+
+        action = self.raw_features.get("action", {})
+        state = self.raw_features.get("observation.state", {})
+        names = action.get("names")
+        invalid_features = (
+            "Relative actions require matching named 'action' and 'observation.state' vectors in the same order"
+        )
+        if not isinstance(names, (list, tuple)) or not names:
+            raise ValueError(invalid_features)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError(invalid_features)
+        if len(set(names)) != len(names) or names != state.get("names"):
+            raise ValueError(invalid_features)
+        if any(tuple(feature.get("shape", ())) != (len(names),) for feature in (action, state)):
+            raise ValueError(invalid_features)
+
+        # LeRobot's exclusion tokens are case-insensitive substrings (e.g. "gripper").
+        mask = tuple(not any(token.lower() in name.lower() for token in exclude_joints if token) for name in names)
+        columns = self._lerobot_dataset.hf_dataset.with_format(
+            "numpy",
+            columns=["action", "observation.state", "episode_index"],
+        )
+        stats = compute_relative_action_stats(columns, self.raw_features, chunk_size, list(exclude_joints))
+        return {
+            **{key: stats[key].tolist() for key in ("mean", "std", "min", "max", "q01", "q99")},
+            "relative_action_mask": mask,
+        }
+
     @property
     def observation_features(self) -> dict[str, Feature]:
         """Observation features from the dataset."""

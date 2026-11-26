@@ -133,6 +133,8 @@ class Pi05Config(PeftConfigMixin, SnapFlowConfigMixin, Config):
     }
 
     normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES"
+    use_relative_actions: bool = False
+    relative_exclude_joints: tuple[str, ...] = ("gripper",)
 
     optimizer_lr: float = 2.5e-5
     optimizer_betas: tuple[float, float] = (0.9, 0.95)

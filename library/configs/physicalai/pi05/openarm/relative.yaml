@@ -1,0 +1,31 @@
+# Use a local LeRobot v3 snapshot of the OpenArm dataset, including its videos.
+# For the pinned mixing-station snapshot, omit the stale episode metadata shard
+# meta/episodes/chunk-000/file-001.parquet when downloading a fresh copy.
+model:
+  class_path: physicalai.policies.Pi05
+  init_args:
+    pretrained_name_or_path: lerobot/pi05_base
+    use_relative_actions: true
+    relative_exclude_joints: [gripper]
+    n_action_steps: 10
+    lora_enabled: true
+    lora_rank: 16
+    optimizer_lr: 2.5e-4
+    scheduler_decay_lr: 2.5e-5
+
+data:
+  class_path: physicalai.data.lerobot.LeRobotDataModule
+  init_args:
+    repo_id: rhecker/mixing-station-io-2
+    revision: f820786ccb8bcba7065e7d0e0e0e31e9000cafbc
+    root: dataset_clean
+    download_videos: false
+    video_backend: pyav
+    train_batch_size: 2
+    val_split: 0.1
+    val_split_seed: 42
+
+trainer:
+  accelerator: gpu
+  devices: 1
+  max_epochs: 10

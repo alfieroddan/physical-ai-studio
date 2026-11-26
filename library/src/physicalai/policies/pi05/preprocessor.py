@@ -129,6 +129,35 @@ def _resize_with_pad_torch(  # noqa: PLR0914
     return padded_images
 
 
+_ACTION_CHUNK_NDIM = 3
+
+
+def _shift_action_chunk(
+    action: torch.Tensor,
+    raw_state: torch.Tensor,
+    mask: tuple[bool, ...],
+    *,
+    to_absolute: bool,
+) -> torch.Tensor:
+    """Shift every action in a chunk by the same raw joint state.
+
+    Returns:
+        The transformed chunk, with excluded joints unchanged.
+
+    Raises:
+        ValueError: If state and action shapes do not match the joint mask.
+    """
+    if action.ndim != _ACTION_CHUNK_NDIM or action.shape[-1] != len(mask):
+        msg = "Relative actions require action shape (B, H, J) matching the joint mask"
+        raise ValueError(msg)
+    if raw_state.shape != (action.shape[0], len(mask)):
+        msg = "Relative actions require raw state shape (B, J) matching the action chunk"
+        raise ValueError(msg)
+    anchor = raw_state.to(device=action.device)[:, None, :]
+    relative = torch.tensor(mask, device=action.device)
+    return torch.where(relative, action + anchor if to_absolute else action - anchor, action)
+
+
 class Pi05Preprocessor(torch.nn.Module):
     """Preprocessor for Pi05 model inputs.
 
@@ -157,6 +186,7 @@ class Pi05Preprocessor(torch.nn.Module):
         tokenizer_name: str = "google/paligemma-3b-pt-224",
         empty_cameras: int = 0,
         normalization_mode: str = "QUANTILES",
+        relative_action_mask: tuple[bool, ...] | None = None,
     ) -> None:
         """Initialize Pi05Preprocessor."""
         super().__init__()
@@ -168,6 +198,7 @@ class Pi05Preprocessor(torch.nn.Module):
         self._tokenizer = None
         self.empty_cameras = empty_cameras
         self.normalization_mode = normalization_mode
+        self._relative_action_mask = relative_action_mask
 
         norm_map = _norm_map_for_mode(normalization_mode)
         if features is not None:
@@ -185,7 +216,11 @@ class Pi05Preprocessor(torch.nn.Module):
             Dictionary with tokenized_prompt, tokenized_prompt_mask, image tensor lists,
             image_masks, and optionally padded/normalized ACTION.
         """
-        # Normalize state/action
+        if self._relative_action_mask is not None and batch.get(ACTION) is not None:
+            relative = _shift_action_chunk(batch[ACTION], batch[STATE], self._relative_action_mask, to_absolute=False)
+            batch = {**batch, ACTION: relative}
+
+        # Normalize state/action after converting the targets.
         batch = self._state_action_normalizer(batch)
         batch = normalize_rtc_prev_action_chunk(batch, self._state_action_normalizer)
 
@@ -349,9 +384,11 @@ class Pi05Postprocessor(torch.nn.Module):
         self,
         features: dict[str, Feature] | None = None,
         normalization_mode: str = "QUANTILES",
+        relative_action_mask: tuple[bool, ...] | None = None,
     ) -> None:
         """Initialize Pi05Postprocessor."""
         super().__init__()
+        self._relative_action_mask = relative_action_mask
 
         norm_map = _norm_map_for_mode(normalization_mode)
         if features is not None:
@@ -360,15 +397,36 @@ class Pi05Postprocessor(torch.nn.Module):
         else:
             self._action_denormalizer = torch.nn.Identity()
 
-    def forward(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
-        """Denormalize actions.
+    def forward(
+        self,
+        batch: dict[str, Any],
+        *,
+        raw_state: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Denormalize actions, then restore absolute targets for relative policies.
 
         Returns:
             Batch dict with denormalized actions.
+
+        Raises:
+            ValueError: If relative inference has missing or non-finite state or produces non-finite targets.
         """
         batch = dict(batch)
         if ACTION in batch:
             batch[ACTION] = self._action_denormalizer({ACTION: batch[ACTION]})[ACTION]
+            if self._relative_action_mask is not None:
+                if raw_state is None or not torch.isfinite(raw_state).all():
+                    msg = "Relative inference requires a finite raw joint state"
+                    raise ValueError(msg)
+                batch[ACTION] = _shift_action_chunk(
+                    batch[ACTION],
+                    raw_state,
+                    self._relative_action_mask,
+                    to_absolute=True,
+                )
+                if not torch.isfinite(batch[ACTION]).all():
+                    msg = "Absolute action targets must be finite"
+                    raise ValueError(msg)
         return batch
 
 
@@ -380,6 +438,7 @@ def make_pi05_preprocessors(
     max_token_len: int = 200,
     empty_cameras: int = 0,
     normalization_mode: str = "QUANTILES",
+    relative_action_mask: tuple[bool, ...] | None = None,
 ) -> tuple[Pi05Preprocessor, Pi05Postprocessor]:
     """Create preprocessor and postprocessor pair for Pi05.
 
@@ -390,6 +449,7 @@ def make_pi05_preprocessors(
         max_token_len: Maximum token length.
         empty_cameras: Number of empty camera slots to add.
         normalization_mode: ``"MEAN_STD"`` or ``"QUANTILES"``.
+        relative_action_mask: Joints to convert to relative actions, or None for absolute actions.
 
     Returns:
         Tuple of (preprocessor, postprocessor).
@@ -435,11 +495,13 @@ def make_pi05_preprocessors(
         max_token_len=max_token_len,
         empty_cameras=empty_cameras,
         normalization_mode=normalization_mode,
+        relative_action_mask=relative_action_mask,
     )
 
     postprocessor = Pi05Postprocessor(
         features=features,
         normalization_mode=normalization_mode,
+        relative_action_mask=relative_action_mask,
     )
 
     return preprocessor, postprocessor

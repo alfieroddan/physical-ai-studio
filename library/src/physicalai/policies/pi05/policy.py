@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -20,6 +21,7 @@ from safetensors.torch import load_file
 
 from physicalai.data.constants import RTC_EXECUTION_HORIZON, RTC_INFERENCE_DELAY, RTC_MAX_GUIDANCE_WEIGHT
 from physicalai.data.dataset import Dataset
+from physicalai.data.lerobot.dataset import _LeRobotDatasetAdapter  # noqa: PLC2701
 from physicalai.data.observation import ACTION, IMAGES, PREV_CHUNK_LEFT_OVER, STATE, TASK, FeatureType
 from physicalai.export import ExportablePolicyMixin, ExportBackend
 from physicalai.export.backends import (
@@ -30,7 +32,7 @@ from physicalai.export.backends import (
 )
 from physicalai.policies.base import Policy
 from physicalai.policies.mixins import RTCPolicyMixin, SnapFlowPolicyMixin
-from physicalai.policies.mixins.peft import PeftPolicyMixin
+from physicalai.policies.mixins.peft import PeftPolicyMixin, is_lora_injected
 from physicalai.train.schedulers import cosine_decay_with_warmup_scheduler
 from physicalai.train.utils import reformat_dataset_to_match_policy
 
@@ -86,6 +88,8 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         train_expert_only: Train only action expert. Default: False.
         normalization_mode: Normalization method for state/action features — ``"QUANTILES"``
             (percentile-based, robust to outliers) or ``"MEAN_STD"``. Default: ``"QUANTILES"``.
+        use_relative_actions: Train on chunk-relative joint actions and predict absolute commands.
+        relative_exclude_joints: Case-insensitive name substrings for channels kept absolute.
 
         optimizer_lr: Learning rate. Default: 2.5e-5.
         optimizer_betas: Adam beta coefficients. Default: (0.9, 0.95).
@@ -162,6 +166,8 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         lora_lr_scale: float = 10.0,
         # Normalization
         normalization_mode: Literal["MEAN_STD", "QUANTILES"] = "QUANTILES",
+        use_relative_actions: bool = False,
+        relative_exclude_joints: tuple[str, ...] = ("gripper",),
         # Optimizer
         optimizer_lr: float = 2.5e-5,
         optimizer_betas: tuple[float, float] = (0.9, 0.95),
@@ -213,6 +219,11 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 snapflow_lambda=snapflow_lambda,
                 snapflow_num_inference_steps=snapflow_num_inference_steps,
             )
+            self.config = replace(
+                self.config,
+                use_relative_actions=use_relative_actions,
+                relative_exclude_joints=relative_exclude_joints,
+            )
         else:
             self.config = Pi05Config(
                 paligemma_variant=paligemma_variant,
@@ -252,6 +263,8 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 lora_use_dora=lora_use_dora,
                 lora_lr_scale=lora_lr_scale,
                 normalization_mode=normalization_mode,
+                use_relative_actions=use_relative_actions,
+                relative_exclude_joints=relative_exclude_joints,
                 optimizer_lr=optimizer_lr,
                 optimizer_betas=optimizer_betas,
                 optimizer_eps=optimizer_eps,
@@ -261,6 +274,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 scheduler_decay_steps=scheduler_decay_steps,
                 scheduler_decay_lr=scheduler_decay_lr,
             )
+        self.supports_rtc = not self.config.use_relative_actions
         # captures raw init args
         self.save_hyperparameters(ignore=["config", "pretrained_name_or_path", "compile_model"])
         # overwrites with resolved self.config values
@@ -356,15 +370,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         if self.config.use_lora:
             self._inject_lora()
 
-        self._preprocessor, self._postprocessor = make_pi05_preprocessors(
-            max_action_dim=self.config.max_action_dim,
-            stats=dataset_stats,
-            image_resolution=self.config.image_resolution,
-            max_token_len=self.config.tokenizer_max_length,
-            empty_cameras=self.config.empty_cameras,
-            normalization_mode=self.config.normalization_mode,
-        )
-
+        self._preprocessor, self._postprocessor = self._make_preprocessors(dataset_stats)
         self._dataset_stats = dataset_stats
 
         # Apply any RTC state requested before the model was built.
@@ -585,6 +591,15 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             raise TypeError(msg)
 
         stats_dict = train_dataset.stats
+        if self.config.use_relative_actions:
+            if not isinstance(train_dataset, _LeRobotDatasetAdapter):
+                msg = "Relative π0.5 training requires a LeRobot dataset"
+                raise TypeError(msg)
+            relative_stats = train_dataset.relative_action_stats(
+                self.config.chunk_size,
+                self.config.relative_exclude_joints,
+            )
+            stats_dict[ACTION].update(relative_stats)
 
         if self.model is not None:
             # Fine-tuning path: model exists from pretrained, but the
@@ -610,18 +625,40 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
         reflect the training data.
         """
         logger.info("Updating preprocessor stats for fine-tuning dataset")
-        self._preprocessor, self._postprocessor = make_pi05_preprocessors(
-            max_action_dim=self.config.max_action_dim,
-            stats=dataset_stats,
-            image_resolution=self.config.image_resolution,
-            max_token_len=self.config.tokenizer_max_length,
-            empty_cameras=self.config.empty_cameras,
-            normalization_mode=self.config.normalization_mode,
-        )
+        self._preprocessor, self._postprocessor = self._make_preprocessors(dataset_stats)
         self._dataset_stats = dataset_stats
         self.hparams["dataset_stats"] = dataset_stats
         if self.model is not None:
             self.model.set_dataset_stats(dataset_stats)
+
+    def _make_preprocessors(
+        self,
+        stats: dict[str, dict[str, list[float] | str | tuple]],
+    ) -> tuple[Pi05Preprocessor, Pi05Postprocessor]:
+        mask = self._relative_action_mask(stats)
+        return make_pi05_preprocessors(
+            max_action_dim=self.config.max_action_dim,
+            stats=stats,
+            image_resolution=self.config.image_resolution,
+            max_token_len=self.config.tokenizer_max_length,
+            empty_cameras=self.config.empty_cameras,
+            normalization_mode=self.config.normalization_mode,
+            relative_action_mask=mask,
+        )
+
+    def _relative_action_mask(
+        self,
+        stats: dict[str, dict[str, list[float] | str | tuple]] | None,
+        *,
+        required: bool = False,
+    ) -> tuple[bool, ...] | None:
+        if not self.config.use_relative_actions:
+            return None
+        mask = (stats or {}).get(ACTION, {}).get("relative_action_mask")
+        if not mask and required:
+            msg = "Relative π0.5 requires training with relative action statistics before inference or export"
+            raise ValueError(msg)
+        return cast("tuple[bool, ...] | None", mask)
 
     def forward(self, batch: Observation) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor | float]]:
         """Forward pass through the model.
@@ -639,6 +676,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             if self.model is None or self._preprocessor is None:
                 msg = "Model is not initialized"
                 raise ValueError(msg)
+            self._relative_action_mask(self._dataset_stats, required=True)
             processed_batch = self._preprocessor(batch.to_dict())
             return self.model(processed_batch)
         return self.predict_action_chunk(batch)
@@ -663,6 +701,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             msg = "Model is not initialized"
             raise ValueError(msg)
 
+        self._relative_action_mask(self._dataset_stats, required=True)
         processed_batch = self._preprocessor(batch.to_dict())
         return self.model.compute_val_loss(processed_batch)
 
@@ -684,11 +723,19 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             msg = "Model is not initialized"
             raise ValueError(msg)
 
-        processed_batch = self._preprocessor(batch.to(self.device).to_dict())
+        mask = self._relative_action_mask(self._dataset_stats, required=True)
+        inputs = batch.to(self.device).to_dict()
+        raw_state = inputs[STATE] if mask is not None else None
+        if mask is not None:
+            if self.rtc_enabled or inputs[PREV_CHUNK_LEFT_OVER] is not None:
+                msg = "RTC does not support relative π0.5 actions"
+                raise ValueError(msg)
+            inputs[ACTION] = None
+        processed_batch = self._preprocessor(inputs)
         self._validate_rtc_inputs(processed_batch)
         actions = self.model.predict_action_chunk(processed_batch)
 
-        return self._postprocessor({ACTION: actions})[ACTION]
+        return self._postprocessor({ACTION: actions}, raw_state=raw_state)[ACTION]
 
     def training_step(self, batch: Observation, batch_idx: int) -> torch.Tensor:
         """Lightning training step.
@@ -811,6 +858,14 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
     # export() is provided by PeftPolicyMixin (merges LoRA adapters into a disposable
     # copy of self.model before delegating to ExportablePolicyMixin.export() via
     # cooperative super()); see physicalai.policies.mixins.peft.PeftPolicyMixin.export.
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        """Record the merged model config when exporting a LoRA policy to Torch."""
+        super().on_save_checkpoint(checkpoint)
+        if self.config.use_lora and self.model is not None and not is_lora_injected(self.model):
+            hparams = checkpoint["hyper_parameters"]
+            hparams["lora_enabled"] = False
+            hparams["config"] = {**self.config.to_dict(), "lora_enabled": False}
 
     @property
     def inputs_schema(self) -> list[InferenceFeature] | None:
@@ -942,6 +997,7 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
             )
             raise ValueError(msg)
 
+        relative_mask = self._relative_action_mask(self._dataset_stats, required=True)
         normalize_stats: dict[str, Any] = {STATE: self._dataset_stats[f"observation.{STATE}"]}
         if self.rtc_enabled:
             normalize_stats[PREV_CHUNK_LEFT_OVER] = self._dataset_stats[ACTION]
@@ -965,6 +1021,8 @@ class Pi05(PeftPolicyMixin, SnapFlowPolicyMixin, RTCPolicyMixin, ExportablePolic
                 mode=self.config.normalization_mode.lower(),
             ),
         ]
+        if relative_mask is not None:
+            postproc_specs.append(ComponentSpec(type="absolute_actions", relative_mask=list(relative_mask)))
         torch_postproc_specs = []
         if self.config.chunk_size != self.config.n_action_steps:
             chunk_trimmer = ComponentSpec(

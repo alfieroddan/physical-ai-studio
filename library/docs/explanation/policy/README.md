@@ -56,6 +56,16 @@ class Policy(L.LightningModule, ABC):
         """Returns single action, using queue for chunked predictions."""
 ```
 
+## Relative joint actions in π0.5
+
+Set `use_relative_actions: true` in the π0.5 model configuration to train from an absolute LeRobot dataset with matching
+`observation.state` and `action` joint names and order. The preprocessor subtracts the starting joint state from every step
+in the action chunk, not the preceding action. `relative_exclude_joints` defaults to `[gripper]`; matching channels stay
+absolute. Studio computes relative action normalization statistics from the training episodes without rewriting the dataset.
+
+Torch and OpenVINO exports restore absolute joint targets after denormalization, before they reach the robot. Use a Runtime
+version that supports the `absolute_actions` postprocessor for OpenVINO. Relative π0.5 does not support RTC.
+
 ## PolicyLike Protocol
 
 For inference flexibility, a `PolicyLike` protocol defines the minimal interface:
